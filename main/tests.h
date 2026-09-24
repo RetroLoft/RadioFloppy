@@ -16,5 +16,5 @@ void button_test_run(void);
 /* Shugart output -> input loopback scanner (jumper on J1). */
 void loopback_test_run(void);
 
-/* Read-only floppy emulation of the embedded .ST image (drive B:). */
+/* Read-only floppy emulation of a .ST image from the external flash (drive B:). */
 void floppy_emu_run(void);

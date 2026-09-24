@@ -2,7 +2,7 @@
  * RadioFloppy - read-only floppy emulation.
  *
  * Emulates drive B: (EMU_SELECT_LINE) with a .ST image from the external
- * SPI flash image store (or the embedded image, see disk_image.h):
+ * SPI flash image store (see disk_image.h):
  * MFM tracks pre-encoded in PSRAM, flux stream and INDEX from RMT, drive
  * logic in drive_emu.c (ISR context). This file only sets things up and
  * does the (compact) logging, which never touches the timing path.

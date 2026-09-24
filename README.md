@@ -9,7 +9,7 @@ WiFi-floppy-emulator voor de Atari ST op basis van een ESP32-S3 (Otronic DevKitC
 
 | Test | Bestand | Wat |
 | ---- | ------- | --- |
-| `floppy_emu_run()` (actief) | `main/floppy_app.c`, `ext_flash.c`, `image_store.c`, `drive_emu.c`, `flux_stream.c`, `mfm_track.c`, `disk_image.c` | **Read-only** floppy-emulatie als drive B: (`EMU_SELECT_LINE`). De image komt uit de image store op de externe SPI-flash U2 (S25FL128L, zie `docs/IMAGE_STORE.md`) of, als ingestelde fallback, uit de firmware. Alle 160 sporen worden bij het opstarten naar MFM gecodeerd in PSRAM (FlashFloppy-layout voor .ST: geen IAM, GAP4a 80, GAP2 22, GAP3 84). RMT+DMA speelt de fluxstroom op GPIO41 (0,8 us pulsen, 10 MHz), een tweede RMT-kanaal de INDEX-puls op GPIO1 (3 ms per 200 ms, synchroon gestart). WPROT actief zodra geselecteerd; schrijven is uitgeschakeld. |
+| `floppy_emu_run()` (actief) | `main/floppy_app.c`, `ext_flash.c`, `image_store.c`, `drive_emu.c`, `flux_stream.c`, `mfm_track.c`, `disk_image.c` | **Read-only** floppy-emulatie als drive B: (`EMU_SELECT_LINE`). De image komt uitsluitend uit de image store op de externe SPI-flash U2 (S25FL128L, zie `docs/IMAGE_STORE.md`). Alle 160 sporen worden bij het opstarten naar MFM gecodeerd in PSRAM (FlashFloppy-layout voor .ST: geen IAM, GAP4a 80, GAP2 22, GAP3 84). RMT+DMA speelt de fluxstroom op GPIO41 (0,8 us pulsen, 10 MHz), een tweede RMT-kanaal de INDEX-puls op GPIO1 (3 ms per 200 ms, synchroon gestart). WPROT actief zodra geselecteerd; schrijven is uitgeschakeld. |
 | (oud) `legacy/input_monitor.c` | niet gebouwd | Selectiebewuste monitor met TRACK0 uit de vorige fase, ter referentie. |
 | `loopback_test_run()` | `main/loopback_test.c` | Zoekt continu welke Shugart-uitgang (ULN2003A) via een jumper op J1 met welke ingang (SN74LVC245A) verbonden is. |
 | `button_test_run()` | `main/button_test.c` | Knoppen: GPIO19 = links (SW_NEXT), GPIO8 = rechts (SW_PREV); piept 0,5 s bij opstarten. |
@@ -26,11 +26,10 @@ buzzer dus stil.
 (ULN2003A-ingangen) al in de bootloader op LOW; `shugart_outputs_release()` doet dat opnieuw als
 eerste stap in `app_main()`.
 
-**Floppy images:** alleen `images/RETROLOFT_TEST_720K.ST` (eigen testimage) zit in de repository.
-Andere images, zoals commerciële spellen, blijven lokaal (`.gitignore`). Leg ze in `images/`; de
-build embedt `images/CRYSTAL_CASTLES.ST` automatisch als het bestand aanwezig is. Kies de image met
-`DISK_IMAGE_SELECT` in `main/disk_image.h`; ontbreekt de gekozen image, dan wordt de testimage
-gebruikt.
+**Floppy images:** de firmware bevat geen images. De emulator laadt de image uitsluitend uit de
+image store op de externe SPI-flash (`docs/IMAGE_STORE.md`); ontbreekt die of is hij corrupt, dan
+blijft drive B: uit. `images/RETROLOFT_TEST_720K.ST` is alleen een testbestand in de repository.
+Commerciële images blijven lokaal (`.gitignore`).
 
 Volledige pinmapping: `main/board_pins.h`.
 

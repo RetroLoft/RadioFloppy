@@ -2,7 +2,7 @@
  * Floppy image source and MFM track generation. Images are raw .ST sector
  * dumps, 80 cylinders, 9 sectors of 512 bytes, one or two sides (derived
  * from the file size). They come from the external SPI flash image store
- * (loaded into PSRAM) or, when configured, from the firmware itself.
+ * and are loaded into PSRAM; the firmware itself contains no images.
  *
  * At start-up every track is encoded once into PSRAM (80 x 2 x 12500
  * bytes), so a STEP or SIDE change never has to wait for encoding. For a
@@ -22,28 +22,6 @@
 #include "disk_image.h"
 #include "ext_flash.h"
 #include "image_store.h"
-
-extern const uint8_t retroloft_start[] asm("_binary_RETROLOFT_TEST_720K_ST_start");
-extern const uint8_t retroloft_end[] asm("_binary_RETROLOFT_TEST_720K_ST_end");
-#if HAVE_CRYSTAL_CASTLES
-extern const uint8_t crystal_start[] asm("_binary_CRYSTAL_CASTLES_ST_start");
-extern const uint8_t crystal_end[] asm("_binary_CRYSTAL_CASTLES_ST_end");
-#endif
-
-typedef struct {
-    const char *name;
-    const uint8_t *start;
-    const uint8_t *end;
-} embedded_image_t;
-
-#if DISK_IMAGE_SELECT == DISK_IMAGE_CRYSTAL_CASTLES && HAVE_CRYSTAL_CASTLES
-static const embedded_image_t image = { "CRYSTAL_CASTLES.ST", crystal_start, crystal_end };
-#else
-#if DISK_IMAGE_SELECT == DISK_IMAGE_CRYSTAL_CASTLES
-#warning "images/CRYSTAL_CASTLES.ST not present: using RETROLOFT_TEST_720K.ST"
-#endif
-static const embedded_image_t image = { "RETROLOFT_TEST_720K.ST", retroloft_start, retroloft_end };
-#endif
 
 const char *disk_image_name;
 const char *disk_image_source;
@@ -79,10 +57,7 @@ static void verify_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/*
- * Get the raw image from the external flash (image store) into PSRAM.
- * Provisions the embedded image first when enabled and still missing.
- */
+/* Get the raw image from the external flash (image store) into PSRAM. */
 static esp_err_t load_external(const uint8_t **data, size_t *size)
 {
     esp_err_t err = ext_flash_init();
@@ -104,19 +79,6 @@ static esp_err_t load_external(const uint8_t **data, size_t *size)
     }
 
     const rf_record_t *rec = image_store_find(DISK_EXTERNAL_IMAGE);
-#if DISK_PROVISION_EMBEDDED && HAVE_CRYSTAL_CASTLES
-    if (!rec) {
-        size_t len = crystal_end - crystal_start;
-        printf("\"%s\" not in the image store: writing the embedded image "
-               "(%u bytes, CRC32 %08lx)\n", DISK_EXTERNAL_IMAGE, (unsigned)len,
-               (unsigned long)image_store_crc32(crystal_start, len));
-        err = image_store_add(DISK_EXTERNAL_IMAGE, RF_FMT_ST, crystal_start, len);
-        if (err != ESP_OK) {
-            return err;
-        }
-        rec = image_store_find(DISK_EXTERNAL_IMAGE);
-    }
-#endif
     if (!rec) {
         printf("ERROR: image \"%s\" not found in the image store\n", DISK_EXTERNAL_IMAGE);
         return ESP_ERR_NOT_FOUND;
@@ -156,29 +118,13 @@ esp_err_t disk_image_init(void)
     const size_t side_bytes = (size_t)DISK_CYLINDERS * MFM_SECTORS * MFM_SECTOR_SIZE;
     size_t size = 0;
 
-#if DISK_SOURCE_EXTERNAL
     const uint8_t *data = NULL;
-    if (load_external(&data, &size) == ESP_OK) {
-        image_data = data;
-        disk_image_source = "EXTERNAL SPI FLASH";
-    } else {
-#if DISK_EMBEDDED_FALLBACK
-        printf("External image NOT used - FALLBACK to the embedded image %s\n", image.name);
-#else
-        printf("External image not available and no fallback enabled.\n");
+    if (load_external(&data, &size) != ESP_OK) {
+        printf("Image not available - drive stays disabled.\n");
         return ESP_ERR_NOT_FOUND;
-#endif
     }
-#endif
-    if (!disk_image_source) {
-        disk_image_name = image.name;
-        image_data = image.start;
-        size = image.end - image.start;
-        disk_image_source = "EMBEDDED FIRMWARE IMAGE";
-        printf("Selected image: %s\n", disk_image_name);
-        printf("Source: %s%s\n", disk_image_source, DISK_SOURCE_EXTERNAL ? " (FALLBACK)" : "");
-        printf("Image size: %u bytes\n", (unsigned)size);
-    }
+    image_data = data;
+    disk_image_source = "EXTERNAL SPI FLASH";
 
     if (size == side_bytes) {
         disk_image_heads = 1;
