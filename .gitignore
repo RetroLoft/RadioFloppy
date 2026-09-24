@@ -1,0 +1,18 @@
+# ESP-IDF build output and generated configuration
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Floppy images: only our own test image is committed. Commercial images
+# (games etc.) stay local; they are embedded when present in images/.
+images/*
+!images/RETROLOFT_TEST_720K.ST
+
+# Editor / OS clutter
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
