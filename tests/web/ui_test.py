@@ -5,9 +5,10 @@ Browser test of the RadioFloppy web interface against a real device.
     RADIOFLOPPY_HOST=192.168.x.y [RADIOFLOPPY_TOKEN=...] tests/web/ui_test.py
 
 Needs Google Chrome and the Python package websocket-client (for the
-DevTools protocol). Slot 1 and 2 must hold valid images; the test uses
-slots 3 and up temporarily and frees them again, and restores the disk
-that was active at the start. DRIVE_BUSY, a lost connection and a phone
+DevTools protocol). Slot 1 and 2 must hold valid images. Images stored
+when the test starts are left alone: the test only uses free slots, frees
+exactly the slots it filled, and restores the disk that was active at the
+start. DRIVE_BUSY, a lost connection and a phone
 screen are simulated in the browser.
 """
 import http.client
@@ -161,10 +162,12 @@ def main():
     rl = os.path.join(IMAGES, "RETROLOFT_TEST_720K.ST")
     bad = os.path.join(tmp, "notadisk.st")
     open(bad, "wb").write(os.urandom(1000))
-    tenspt = os.path.join(tmp, "ten sectors.st")
-    open(tenspt, "wb").write(bytes(409600))
+    tenspt = os.path.join(tmp, "seventy tracks.st")
+    open(tenspt, "wb").write(bytes(645120))
 
     start = api("GET", "/api/v1/current")[1]
+    keep = [x["slot"] for x in api("GET", "/api/v1/slots")[1]["slots"] if x["status"] == "valid"]
+    first = [n for n in range(1, 21) if n not in keep][0]
     b = Browser()
     try:
         print("page and slot list")
@@ -254,37 +257,38 @@ def main():
 
         print("upload to the first free slot")
         upload_via_ui(b, cc, "free")
-        check(b.wait("document.getElementById('msg').innerText.includes('is stored in slot 3')", 60),
-              "stored in slot 3")
-        check(b.wait("document.querySelectorAll('#slots li')[2].innerText.includes('CRYSTAL_CASTLES')"),
+        check(b.wait("document.getElementById('msg').innerText.includes('is stored in slot %d')" % first, 60),
+              "stored in slot %d (first free)" % first)
+        check(b.wait("document.querySelectorAll('#slots li')[%d].innerText.includes('CRYSTAL_CASTLES')" % (first - 1)),
               "slot list refreshed")
 
         print("explicit slot: confirmation before overwriting")
         b.dialog_answer = False
         b.events.clear()
-        upload_via_ui(b, rl, "slot", slot=3)
+        upload_via_ui(b, rl, "slot", slot=first)
         b.pump(2)
         dialogs = [e for e in b.events if e["method"] == "Page.javascriptDialogOpening"]
         check(dialogs and "CRYSTAL_CASTLES" in dialogs[0]["params"]["message"],
               "confirmation names the image that would be replaced")
-        check(api("GET", "/api/v1/slots")[1]["slots"][2]["name"] == "CRYSTAL_CASTLES",
-              "cancelled: slot 3 unchanged")
+        check(api("GET", "/api/v1/slots")[1]["slots"][first - 1]["name"] == "CRYSTAL_CASTLES",
+              "cancelled: slot %d unchanged" % first)
         b.dialog_answer = True
-        upload_via_ui(b, rl, "slot", slot=3, activate=True)
-        check(b.wait("document.getElementById('msg').innerText.includes('is stored in slot 3 and is now the active')", 60),
-              "confirmed: slot 3 overwritten and loaded")
+        upload_via_ui(b, rl, "slot", slot=first, activate=True)
+        check(b.wait("document.getElementById('msg').innerText.includes('is stored in slot %d and is now the active')" % first, 60),
+              "confirmed: slot %d overwritten and loaded" % first)
 
         print("error messages")
         upload_via_ui(b, bad, "free")
         check(b.wait("document.getElementById('msg').innerText.includes('not a valid .ST')", 30),
               "invalid image: understandable message")
         upload_via_ui(b, tenspt, "free")
-        check(b.wait("document.getElementById('msg').innerText.includes('not supported yet')", 30),
+        check(b.wait("document.getElementById('msg').innerText.includes('is not supported')", 30),
               "unsupported geometry: understandable message")
         check("probably a format that is not supported" in text(b, "#fileinfo"),
               "file size warning shown right after choosing the file")
-        for n in range(4, 21):
-            api_upload(open(cc, "rb").read(), "Fill %d.st" % n, destination="flash")
+        for n in range(first + 1, 21):
+            if n not in keep:
+                api_upload(open(cc, "rb").read(), "Fill %d.st" % n, destination="flash")
         upload_via_ui(b, cc, "free")
         check(b.wait("document.getElementById('msg').innerText.includes('All 20 slots are in use')", 30),
               "full flash: NO_FREE_SLOT explained")
@@ -312,9 +316,9 @@ def main():
     finally:
         b.close()
         print("cleanup")
-        for n in range(3, 21):
-            if api("GET", "/api/v1/slots")[1]["slots"][n - 1]["status"] == "valid":
-                api("DELETE", "/api/v1/slots/%d" % n)
+        for x in api("GET", "/api/v1/slots")[1]["slots"]:
+            if x["status"] == "valid" and x["slot"] not in keep:
+                api("DELETE", "/api/v1/slots/%d" % x["slot"])
         if start.get("slot"):
             api("PUT", "/api/v1/current", {"slot": start["slot"]})
         print("  restored: " + json.dumps(api("GET", "/api/v1/current")[1]))

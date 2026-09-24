@@ -37,9 +37,9 @@
  */
 #define DISK_BACKGROUND_VERIFY      1
 
-#define DISK_CYLINDERS      80
+#define DISK_MAX_CYLS       84  /* head positions 0..83 */
 #define DISK_MAX_HEADS      2   /* the drive always has two heads */
-#define DISK_TRACKS_BYTES   ((size_t)DISK_CYLINDERS * DISK_MAX_HEADS * MFM_TRACK_BYTES)
+#define DISK_TRACKS_BYTES   ((size_t)DISK_MAX_CYLS * DISK_MAX_HEADS * MFM_MAX_BYTES)
 
 typedef enum {
     DISK_SRC_NONE,          /* no disk inserted */
@@ -54,16 +54,21 @@ typedef struct {
     char name[40];
     uint32_t size;
     uint32_t crc32;
+    int cylinders;          /* geometry of the image */
     int heads;
+    int sectors;            /* per track */
 } disk_info_t;
 
-/* Active tracks, [cyl][head][MFM_TRACK_BYTES]; read by the flux ISR. */
+/* Active tracks, [cyl][head][MFM_MAX_BYTES]; read by the flux ISR. */
 extern uint8_t *volatile disk_tracks;
+
+/* Bitcells per track of the active disk (100000, longer for 11 sectors). */
+extern volatile uint32_t disk_track_cells;
 
 /* Raw MFM bitcells of one track of the active disk. ISR safe. */
 static inline const uint8_t *disk_track_raw(int cyl, int head)
 {
-    return disk_tracks + (size_t)(cyl * DISK_MAX_HEADS + head) * MFM_TRACK_BYTES;
+    return disk_tracks + (size_t)(cyl * DISK_MAX_HEADS + head) * MFM_MAX_BYTES;
 }
 
 /* External flash, slot store, buffers and the start-up image. */
@@ -73,14 +78,14 @@ esp_err_t disk_image_init(void);
 void disk_get_current(disk_info_t *info);
 
 /*
- * Encode raw (a validated .ST image, heads 1 or 2) into the inactive track
- * buffer. Not visible to the Atari yet.
+ * Encode raw (a validated .ST image with the geometry in info) into the
+ * inactive track buffer. Not visible to the Atari yet.
  */
-esp_err_t disk_prepare(const uint8_t *raw, int heads);
+esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info);
 
 /* After a switch: decode the active tracks again in the background and
  * compare with raw (copied; result only in the log). */
-void disk_verify_active(const uint8_t *raw, uint32_t size, int heads);
+void disk_verify_active(const uint8_t *raw, const disk_info_t *info);
 
 /*
  * Make the prepared buffer the active disk. Waits up to timeout_ms for our

@@ -93,9 +93,9 @@
         <input id="file" type="file" accept=".st,.ST" class="grow" aria-label="Choose a .ST file">
       </div>
       <p id="fileinfo" class="small muted" style="margin:0">
-        Supported: <strong>.ST</strong> images of <strong>360 KiB</strong> (single-sided) or
-        <strong>720 KiB</strong> (double-sided), 80 tracks, 9 sectors. Other formats (including 800 KiB)
-        are not supported yet.
+        Supported: <strong>.ST</strong> images with <strong>80–84 tracks</strong>,
+        <strong>9, 10 or 11 sectors</strong> per track and 1 or 2 sides, up to <strong>800 KiB</strong>
+        (e.g. 360, 400, 410, 440, 720 or 800 KiB). .MSA and .HFE are not supported yet.
       </p>
       <fieldset>
         <legend>Destination</legend>
@@ -158,7 +158,19 @@ const S = {
 const POLL_CURRENT_MS = 3000;
 const POLL_SLOTS_MS = 15000;
 const MAX_SIZE = 819200;
-const SUPPORTED = { 368640: "360 KiB, single-sided", 737280: "720 KiB, double-sided" };
+// Same rule as the firmware (st_image.c): 80-84 tracks, 9-11 sectors, 1-2 sides.
+function geometryOf(size) {
+  if (size % 512 || size > MAX_SIZE) return null;
+  const n = size / 512;
+  for (let s = 9; s <= 11; s++)
+    for (let h = 1; h <= 2; h++)
+      if (n % (s * h) === 0 && n / (s * h) >= 80 && n / (s * h) <= 84)
+        return { cylinders: n / (s * h), sectors: s, sides: h };
+  return null;
+}
+function geometryText(g) {
+  return g.cylinders + " tracks · " + g.sectors + " sectors · " + (g.sides === 2 ? "double-sided" : "single-sided");
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -200,7 +212,7 @@ const ERRORS = {
   UNAUTHORIZED: "The API token is missing or wrong. Enter the correct token under Admin access.",
   NO_FREE_SLOT: "All 20 slots are in use. Choose ‘Store in slot’ to overwrite an existing image.",
   INVALID_IMAGE: "This file is not a valid .ST disk image.",
-  UNSUPPORTED_GEOMETRY: "This .ST format is not supported yet. Only 360 KiB (single-sided) and 720 KiB (double-sided) images with 80 tracks and 9 sectors work.",
+  UNSUPPORTED_GEOMETRY: "This .ST format is not supported. Images need 80–84 tracks, 9–11 sectors per track and 1 or 2 sides.",
   IMAGE_TOO_LARGE: "The file is too large: 800 KiB at most.",
   DRIVE_BUSY: "The Atari is still using drive B:. The current floppy was not replaced.",
   CHECKSUM_MISMATCH: "The file was damaged in transit. Please try again.",
@@ -281,7 +293,7 @@ function renderCurrent() {
     origin = "From the flash memory.";
   }
   el.innerHTML = '<div class="name">' + esc(c.name) + ' <span class="badge active">Active</span></div>' +
-    '<div class="muted">' + kib(c.size) + (c.sides ? " · " + (c.sides === 2 ? "double-sided" : "single-sided") : "") +
+    '<div class="muted">' + kib(c.size) + (c.sides ? " · " + geometryText({ cylinders: c.cylinders, sectors: c.sectors, sides: c.sides }) : "") +
     ' · CRC32 <span class="code">' + esc(c.crc32 || "") + "</span></div><div>" + origin + "</div>";
 }
 
@@ -467,12 +479,12 @@ function updateUploadForm() {
   if (f.size > MAX_SIZE) {
     info.innerHTML = '<span style="color:var(--err)">' + esc(f.name) + " is " + kib(f.size) +
       ": too large (800 KiB at most).</span>";
-  } else if (!SUPPORTED[f.size]) {
+  } else if (!geometryOf(f.size)) {
     info.innerHTML = '<span style="color:var(--warn)">' + esc(f.name) + " is " + f.size +
-      " bytes: probably a format that is not supported yet (only 360 KiB and 720 KiB). " +
+      " bytes: probably a format that is not supported yet (80–84 tracks, 9–11 sectors). " +
       "RadioFloppy makes the final check.</span>";
   } else {
-    info.innerHTML = esc(f.name) + ": " + SUPPORTED[f.size] + ".";
+    info.innerHTML = esc(f.name) + ": " + kib(f.size) + ", " + geometryText(geometryOf(f.size)) + ".";
   }
 }
 

@@ -295,11 +295,12 @@ void floppy_emu_run(void)
     printf("Floppy image: %s (%s)\n", disk.name,
            disk.source == DISK_SRC_FLASH ? "EXTERNAL SPI FLASH" : "none");
     if (disk.heads) {
-        printf("Geometry: %d/%d/%d/%d%s\n", DISK_CYLINDERS, disk.heads, MFM_SECTORS,
+        mfm_layout_t l = mfm_layout(disk.sectors);
+        printf("Geometry: %d/%d/%d/%d%s\n", disk.cylinders, disk.heads, disk.sectors,
                MFM_SECTOR_SIZE, disk.heads == 1 ? " (side 1 unformatted)" : "");
+        printf("MFM: 250 kbit/s, %lu bitcells/track, GAP3 %d, interleave %d, skew %s\n",
+               (unsigned long)l.cells, l.gap3, l.interleave, MFM_USE_TOS_SKEW ? "TOS" : "none");
     }
-    printf("MFM: 250 kbit/s, %d bitcells/track, sector skew %s\n", MFM_TRACK_CELLS,
-           MFM_USE_TOS_SKEW ? "TOS (4/2)" : "none");
     printf("RPM: 300 (200 ms, INDEX %d ms)\n", INDEX_PULSE_MS);
     printf("Read-only: YES\n");
 

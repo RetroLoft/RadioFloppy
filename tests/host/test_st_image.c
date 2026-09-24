@@ -35,17 +35,32 @@ int main(void)
     static uint8_t img[ST_MAX_SIZE + 4096];
 
     printf("size checks\n");
-    CHECK(st_check_size(368640, &info) == ST_OK && info.heads == 1 && info.sectors == 9);
-    CHECK(st_check_size(737280, &info) == ST_OK && info.heads == 2);
+    CHECK(st_check_size(368640, &info) == ST_OK && info.cylinders == 80 && info.heads == 1 && info.sectors == 9);
+    CHECK(st_check_size(737280, &info) == ST_OK && info.cylinders == 80 && info.heads == 2 && info.sectors == 9);
+    CHECK(st_check_size(409600, &info) == ST_OK && info.cylinders == 80 && info.heads == 1 && info.sectors == 10);
+    CHECK(st_check_size(419840, &info) == ST_OK && info.cylinders == 82 && info.heads == 1 && info.sectors == 10);
+    CHECK(st_check_size(450560, &info) == ST_OK && info.cylinders == 80 && info.heads == 1 && info.sectors == 11);
+    CHECK(st_check_size(473088, &info) == ST_OK && info.cylinders == 84 && info.sectors == 11);   /* 84/1/11 */
+    CHECK(st_check_size(746496, &info) == ST_OK && info.cylinders == 81 && info.heads == 2);      /* 81/2/9 */
+    CHECK(st_check_size(819200, &info) == ST_OK && info.cylinders == 80 && info.heads == 2 && info.sectors == 10);
     CHECK(st_check_size(0, &info) == ST_INVALID);
     CHECK(st_check_size(368641, &info) == ST_INVALID);          /* not whole sectors */
     CHECK(st_check_size(ST_MAX_SIZE + 1, &info) == ST_TOO_LARGE);
-    CHECK(st_check_size(2 * 1024 * 1024, &info) == ST_TOO_LARGE);
-    CHECK(st_check_size(409600, &info) == ST_UNSUPPORTED);      /* 80/1/10 */
-    CHECK(st_check_size(819200, &info) == ST_UNSUPPORTED);      /* 80/2/10 */
     CHECK(st_check_size(839680, &info) == ST_TOO_LARGE);        /* 82/2/10 > 800 KiB */
-    CHECK(st_check_size(512, &info) == ST_INVALID);             /* one sector */
+    CHECK(st_check_size(901120, &info) == ST_TOO_LARGE);        /* 80/2/11 > 800 KiB */
+    CHECK(st_check_size(645120, &info) == ST_UNSUPPORTED);      /* 70/2/9 */
+    CHECK(st_check_size(327680, &info) == ST_UNSUPPORTED);      /* 80/1/8 */
+    CHECK(st_check_size(512, &info) == ST_INVALID);
     CHECK(st_check_size(7 * 512, &info) == ST_INVALID);
+    /* every supported size maps to exactly one geometry */
+    for (int c = 80; c <= 84; c++)
+        for (int sp = 9; sp <= 11; sp++)
+            for (int h = 1; h <= 2; h++) {
+                uint32_t sz = (uint32_t)c * sp * h * 512;
+                if (sz > ST_MAX_SIZE) continue;
+                CHECK(st_check_size(sz, &info) == ST_OK && info.cylinders == c &&
+                      info.sectors == sp && info.heads == h);
+            }
 
     printf("boot sector checks\n");
     memset(img, 0xe5, sizeof(img));
@@ -58,6 +73,8 @@ int main(void)
     CHECK(st_check_image(img, 737280, &info) == ST_OK && info.bpb_ok);
     put16(img + 24, 10); put16(img + 19, 1600);   /* 10 sectors in a 720k-sized file */
     CHECK(st_check_image(img, 737280, &info) == ST_UNSUPPORTED);
+    put16(img + 24, 9); put16(img + 26, 1); put16(img + 19, 720);   /* 80 of 82 tracks used */
+    CHECK(st_check_image(img, 82 * 9 * 512, &info) == ST_OK && info.cylinders == 82 && info.bpb_ok);
 
     printf("real images\n");
     uint32_t size;
@@ -69,6 +86,13 @@ int main(void)
     }
     d = load("../../images/RETROLOFT_TEST_720K.ST", &size);
     CHECK(d && st_check_image(d, size, &info) == ST_OK && info.heads == 2 && info.bpb_ok);
+    d = load("../../images/NEBULUS.ST", &size);
+    if (d) {
+        CHECK(st_check_image(d, size, &info) == ST_OK && info.cylinders == 82 &&
+              info.heads == 1 && info.sectors == 10 && info.bpb_ok);
+    } else {
+        printf("  (NEBULUS.ST not present, skipped)\n");
+    }
 
     printf(failures ? "\n%d CHECK(S) FAILED\n" : "\nALL TESTS PASSED\n", failures);
     return failures != 0;

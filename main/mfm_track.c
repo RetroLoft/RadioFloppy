@@ -10,7 +10,8 @@
 #define GAP_4A      80      /* post-index */
 #define GAP_SYNC    12      /* 0x00 bytes before each sync */
 #define GAP_2       22      /* post-IDAM */
-#define GAP_3       84      /* post-data */
+/* Bytes per sector without GAP3: ID field + GAP2 + data field + CRC. */
+#define SECTOR_OVERHEAD (GAP_SYNC + 8 + 2 + GAP_2 + GAP_SYNC + 4 + MFM_SECTOR_SIZE + 2)
 #define SYNC_A1     0x4489  /* 0xA1 with missing clock bit */
 #define MFM_DAM_CRC 0xe295  /* CRC of A1 A1 A1 FB */
 
@@ -27,6 +28,23 @@ uint16_t mfm_crc16(const uint8_t *buf, int len, uint16_t crc)
 }
 
 /* ---- Encoder ------------------------------------------------------------ */
+
+mfm_layout_t mfm_layout(int sectors)
+{
+    /* FlashFloppy img_type[]: GAP3 and interleave per sector count. */
+    mfm_layout_t l = {
+        .sectors = sectors,
+        .gap3 = sectors <= 9 ? 84 : sectors == 10 ? 30 : 3,
+        .interleave = sectors >= 11 ? 2 : 1,
+    };
+    uint32_t bytes = GAP_4A + sectors * (SECTOR_OVERHEAD + l.gap3);
+    uint32_t cells = bytes * 16;
+    if (cells < MFM_TRACK_CELLS) {
+        cells = MFM_TRACK_CELLS;        /* pre-index gap fills the rest */
+    }
+    l.cells = (cells + 31) & ~31u;      /* as FlashFloppy: multiple of 32 */
+    return l;
+}
 
 typedef struct {
     uint8_t *raw;
@@ -79,25 +97,32 @@ static void emit_repeat(writer_t *w, uint8_t b, int n)
     }
 }
 
-/* Physical order of the sector numbers (1..9) on a track. */
-static void sector_order(uint8_t order[MFM_SECTORS], uint8_t cyl, uint8_t head)
+/* Physical order of the sector numbers on a track (FlashFloppy
+ * raw_seek_track: interleave, optional skew). */
+static void sector_order(uint8_t *order, const mfm_layout_t *l, uint8_t cyl, uint8_t head)
 {
+    int n = l->sectors;
+    unsigned pos = 0;
+
 #if MFM_USE_TOS_SKEW
-    /* Same as FlashFloppy raw_seek_track() with interleave 1. */
-    unsigned pos = (cyl * 4 + head * 2) % MFM_SECTORS;
-    for (int i = 0; i < MFM_SECTORS; i++) {
-        order[(pos + i) % MFM_SECTORS] = i + 1;
-    }
+    pos = (cyl * 4 + head * 2) % n;
 #else
     (void)cyl;
     (void)head;
-    for (int i = 0; i < MFM_SECTORS; i++) {
-        order[i] = i + 1;
-    }
 #endif
+    for (int i = 0; i < n; i++) {
+        order[i] = 0;
+    }
+    for (int i = 0; i < n; i++) {
+        while (order[pos]) {
+            pos = (pos + 1) % n;
+        }
+        order[pos] = i + 1;
+        pos = (pos + l->interleave) % n;
+    }
 }
 
-void mfm_build_track(uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
+void mfm_build_track(uint8_t *raw, const mfm_layout_t *l, const uint8_t *sectors,
                      uint8_t cyl, uint8_t head)
 {
     if (mfm_table[0] == 0) {
@@ -105,13 +130,13 @@ void mfm_build_track(uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
     }
     /* The track is a ring: it ends with 0x4E (last data bit 0). */
     writer_t w = { .raw = raw, .pos = 0, .prev = 0 };
-    uint8_t order[MFM_SECTORS];
+    uint8_t order[MFM_MAX_SECTORS];
 
-    sector_order(order, cyl, head);
+    sector_order(order, l, cyl, head);
 
     emit_repeat(&w, 0x4e, GAP_4A);      /* no IAM on ST disks (FlashFloppy) */
 
-    for (int s = 0; s < MFM_SECTORS; s++) {
+    for (int s = 0; s < l->sectors; s++) {
         uint8_t r = order[s];
         const uint8_t *data = sectors + (r - 1) * MFM_SECTOR_SIZE;
 
@@ -141,33 +166,35 @@ void mfm_build_track(uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
         crc = mfm_crc16(data, MFM_SECTOR_SIZE, MFM_DAM_CRC);
         emit_byte(&w, crc >> 8);
         emit_byte(&w, crc & 0xff);
-        emit_repeat(&w, 0x4e, GAP_3);
+        emit_repeat(&w, 0x4e, l->gap3);
     }
 
-    /* Pre-index gap up to exactly 100000 bitcells (FlashFloppy: gap_4). */
-    while (w.pos < MFM_TRACK_BYTES) {
+    /* Pre-index gap up to the track length (FlashFloppy: gap_4). */
+    while (w.pos < (int)(l->cells / 8)) {
         emit_byte(&w, 0x4e);
     }
 }
 
-void mfm_build_blank_track(uint8_t raw[MFM_TRACK_BYTES])
+void mfm_build_blank_track(uint8_t *raw, uint32_t cells)
 {
     if (mfm_table[0] == 0) {
         init_table();
     }
     writer_t w = { .raw = raw, .pos = 0, .prev = 0 };
 
-    while (w.pos < MFM_TRACK_BYTES) {
+    while (w.pos < (int)(cells / 8)) {
         emit_byte(&w, 0x4e);
     }
 }
 
 /* ---- Verifier (independent decoder) ------------------------------------ */
 
+static int track_cells;     /* length of the track being verified */
+
 static inline unsigned cell(const uint8_t *raw, int i)
 {
-    if (i >= MFM_TRACK_CELLS) {
-        i -= MFM_TRACK_CELLS;
+    if (i >= track_cells) {
+        i -= track_cells;
     }
     return (raw[i >> 3] >> (7 - (i & 7))) & 1;
 }
@@ -191,15 +218,17 @@ static bool is_sync(const uint8_t *raw, int i)
     return w == SYNC_A1;
 }
 
-int mfm_verify_track(const uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
+int mfm_verify_track(const uint8_t *raw, const mfm_layout_t *l, const uint8_t *sectors,
                      uint8_t cyl, uint8_t head)
 {
     int good = 0;
-    int seen[MFM_SECTORS + 1] = { 0 };
+    int seen[MFM_MAX_SECTORS + 1] = { 0 };
+
+    track_cells = l->cells;
     uint8_t buf[4 + MFM_SECTOR_SIZE + 2];
 
     /* Also reject adjacent transitions (invalid MFM). */
-    for (int i = 0; i < MFM_TRACK_CELLS; i++) {
+    for (int i = 0; i < track_cells; i++) {
         if (cell(raw, i) && cell(raw, i + 1)) {
             return -1;
         }
@@ -207,7 +236,7 @@ int mfm_verify_track(const uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
 
     /* Rolling 16-cell window; only on a first sync the next two are checked. */
     uint16_t window = 0;
-    for (int i = 0; i < MFM_TRACK_CELLS + 16; i++) {
+    for (int i = 0; i < track_cells + 16; i++) {
         window = (window << 1) | cell(raw, i);
         if (window != SYNC_A1) {
             continue;
@@ -229,7 +258,7 @@ int mfm_verify_track(const uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
             id[k] = read_byte(raw, p + 16 * (k - 3));
         }
         if (mfm_crc16(id, 10, 0xffff) != 0 || id[4] != cyl || id[5] != head ||
-            id[6] < 1 || id[6] > MFM_SECTORS || id[7] != 2) {
+            id[6] < 1 || id[6] > l->sectors || id[7] != 2) {
             return -2;
         }
         uint8_t r = id[6];

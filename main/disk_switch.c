@@ -37,7 +37,7 @@ static int64_t load_us;            /* time spent reading the image, for the log 
 static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, switch_error_t *e)
 {
     int64_t t0 = esp_timer_get_time();
-    esp_err_t err = disk_prepare(raw, info->heads);
+    esp_err_t err = disk_prepare(raw, info);
     if (err != ESP_OK) {
         return fail(e, "INSUFFICIENT_MEMORY", "no memory to encode the tracks%s", "");
     }
@@ -52,7 +52,7 @@ static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, sw
     printf("Disk switch: load %lld ms, encode %lld ms, wait for drive %lld ms\n",
            load_us / 1000, (t1 - t0) / 1000, (t2 - t1) / 1000);
     load_us = 0;
-    disk_verify_active(raw, info->size, info->heads);      /* background, log only */
+    disk_verify_active(raw, info);      /* background, log only */
     return ESP_OK;
 }
 
@@ -84,7 +84,9 @@ static esp_err_t slot_locked(int slot, switch_error_t *e)
         e->code = "UNSUPPORTED_GEOMETRY";
         snprintf(e->msg, sizeof(e->msg), "%s", st.detail);
     } else {
+        info.cylinders = st.cylinders;
         info.heads = st.heads;
+        info.sectors = st.sectors;
         err = activate_locked(raw, &info, e);
     }
     free(raw);

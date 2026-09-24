@@ -24,8 +24,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-/* Highest virtual head position; later per drive/image configuration. */
-#define DRIVE_MAX_TRACK 79
+/* Highest virtual head position (a real drive reaches about 83). */
+#define DRIVE_MAX_TRACK 83
 
 typedef struct {
     bool armed;

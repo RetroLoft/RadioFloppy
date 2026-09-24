@@ -16,7 +16,7 @@
 #include "esp_err.h"
 
 #define FLUX_RESOLUTION_HZ  10000000    /* 0.1 us per RMT tick */
-#define FLUX_CELL_TICKS     20          /* 2 us MFM bitcell */
+#define FLUX_REV_TICKS      2000000     /* one revolution: 200 ms (300 rpm) */
 #define FLUX_PULSE_TICKS    8           /* 0.8 us /RDATA pulse */
 #define INDEX_PULSE_MS      3
 

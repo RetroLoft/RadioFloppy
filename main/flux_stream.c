@@ -3,9 +3,12 @@
  *
  * Each flux transition becomes one RMT symbol: LOW until the transition,
  * then a FLUX_PULSE_TICKS HIGH pulse (GPIO HIGH = ULN2003A pulls /RDATA
- * low), so the leading edge of every /RDATA pulse is exactly on the bitcell
- * grid. A revolution is exactly 100000 * 2 us = 200 ms of symbols, equal to
- * the INDEX loop period, so both channels stay locked.
+ * low), so the leading edge of every /RDATA pulse is on the bitcell grid.
+ * A track of N bitcells is spread over exactly FLUX_REV_TICKS (200 ms):
+ * each cell lasts FLUX_REV_TICKS / N ticks, the remainder carried from
+ * interval to interval (20 ticks = 2 us for the standard 100000 cells;
+ * slightly less for the longer 11-sector tracks). A revolution therefore
+ * always equals the INDEX loop period and both channels stay locked.
  *
  * The simple-encoder callback runs in the RMT/DMA ISR. It reads the raw
  * track (PSRAM) of the current cylinder and the live SIDE input for each
@@ -37,8 +40,11 @@
 static uint32_t rdata_rmt_sel;      /* GPIO matrix value with RMT connected */
 static uint32_t index_rmt_sel;
 
-static uint32_t cell_pos;           /* rotational position, 0..MFM_TRACK_CELLS-1 */
+static uint32_t cell_pos;           /* rotational position, 0..cells-1 */
 static uint32_t cells_since_flux;
+static uint32_t tick_frac;          /* timing remainder, in 1/cells ticks */
+
+_Static_assert(DRIVE_MAX_TRACK < DISK_MAX_CYLS, "head position within the track buffers");
 static volatile uint32_t revolutions;
 
 static rmt_symbol_word_t index_symbols[INDEX_MEM_SYMBOLS];
@@ -64,12 +70,14 @@ static size_t IRAM_ATTR flux_encode(const void *data, size_t data_size,
 {
     const uint8_t *raw = disk_track_raw(drive_cylinder(),
                                         gpio_ll_get_level(&GPIO, PIN_FDD_SIDE) ? 0 : 1);
-    uint32_t pos = cell_pos;
+    const uint32_t cells = disk_track_cells;
+    uint32_t pos = cell_pos < cells ? cell_pos : 0;     /* track length may change */
     uint32_t dist = cells_since_flux;
+    uint32_t frac = tick_frac % cells;
     size_t n = 0;
 
     while (n < symbols_free) {
-        if (++pos == MFM_TRACK_CELLS) {
+        if (++pos == cells) {
             pos = 0;
             revolutions++;
         }
@@ -77,14 +85,21 @@ static size_t IRAM_ATTR flux_encode(const void *data, size_t data_size,
         /* dist >= 2: never two transitions 2 us apart, even right after a
          * track switch joins two different bitstreams. */
         if ((raw[pos >> 3] & (0x80 >> (pos & 7))) && dist >= 2) {
+            if (dist > 1000) {
+                dist = 1000;    /* no overflow; within the 15-bit RMT duration */
+            }
+            uint32_t num = frac + dist * FLUX_REV_TICKS;
+            uint32_t ticks = num / cells;
+            frac = num % cells;
             symbols[n++] = (rmt_symbol_word_t) {
-                .level0 = 0, .duration0 = dist * FLUX_CELL_TICKS - FLUX_PULSE_TICKS,
+                .level0 = 0, .duration0 = ticks - FLUX_PULSE_TICKS,
                 .level1 = 1, .duration1 = FLUX_PULSE_TICKS,
             };
             dist = 0;
         }
     }
 
+    tick_frac = frac;
     cell_pos = pos;
     cells_since_flux = dist;
     return n;
@@ -94,7 +109,7 @@ static size_t IRAM_ATTR flux_encode(const void *data, size_t data_size,
 static size_t build_index_symbols(void)
 {
     uint32_t high = INDEX_PULSE_MS * (FLUX_RESOLUTION_HZ / 1000);
-    uint32_t total = (uint32_t)MFM_TRACK_CELLS * FLUX_CELL_TICKS;
+    uint32_t total = FLUX_REV_TICKS;
     uint32_t parts[2 * INDEX_MEM_SYMBOLS];
     uint8_t levels[2 * INDEX_MEM_SYMBOLS];
     size_t np = 0;

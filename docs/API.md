@@ -102,17 +102,31 @@ slots are all free for new uploads.
 
 ### Supported images
 
-Raw `.ST` images (sector dumps without header) of
+Raw `.ST` images (sector dumps without header) with
 
-| Size          | Geometry                                     |
-| ------------- | -------------------------------------------- |
-| 368 640 bytes | 80 cylinders, 1 side, 9 sectors of 512 bytes |
-| 737 280 bytes | 80 cylinders, 2 sides, 9 sectors of 512 bytes |
+| Property          | Supported                                      |
+| ----------------- | ---------------------------------------------- |
+| Cylinders         | 80–84                                          |
+| Sectors per track | 9, 10 or 11 (512 bytes)                        |
+| Sides             | 1 or 2                                         |
+| File size         | up to 819 200 bytes (800 KiB, one flash slot)  |
 
-Other `.ST` geometries (10 or 11 sectors, 82 cylinders, …) are recognised
-but not supported yet (`UNSUPPORTED_GEOMETRY`). `.MSA` and `.HFE` are not
-supported. The drive is **read-only** for the Atari: it reports the disk as
-write-protected.
+Examples: 360 KiB (80/1/9), 400 KiB (80/1/10), 410 KiB (82/1/10, e.g.
+Nebulus), 440 KiB (80/1/11), 720 KiB (80/2/9), 800 KiB (80/2/10).
+Double-sided images with 10 sectors and more than 80 cylinders, or with
+11 sectors, are larger than 800 KiB and are refused (`IMAGE_TOO_LARGE`).
+
+The geometry follows from the file size; a valid boot sector (BPB) must
+agree with it (its sectors per track and sides; the file system may use
+fewer tracks than the file holds). Other geometries (8 sectors, 40 or 70
+cylinders, …) are recognised but not supported (`UNSUPPORTED_GEOMETRY`).
+`.MSA` and `.HFE` are not supported. The drive is **read-only** for the
+Atari: it reports the disk as write-protected.
+
+The track layout follows FlashFloppy: GAP3 84 (9 sectors), 30 (10
+sectors) or 3 with interleave 2 (11 sectors). An 11-sector track is
+longer than a standard track and is played with slightly shorter bitcells
+(1.945 µs instead of 2 µs), so a revolution still takes 200 ms.
 
 ### Disk changes
 
@@ -231,8 +245,9 @@ All 20 slots, slot 1 first.
 The active disk.
 
 ```json
-{ "inserted": true, "source": "flash", "slot": 1, "slot_changed_since": false,
-  "name": "Crystal Castles", "size": 368640, "crc32": "42ce7eed", "sides": 1 }
+{ "inserted": true, "source": "flash", "slot": 4, "slot_changed_since": false,
+  "name": "Nebulus", "size": 419840, "crc32": "40881c6a", "sides": 1,
+  "cylinders": 82, "sectors": 10 }
 ```
 
 | Field                | Meaning                                                          |
@@ -242,7 +257,7 @@ The active disk.
 | `slot`               | Only for `flash`: the slot it was loaded from                    |
 | `slot_changed_since` | Only for `flash`: that slot was overwritten or freed since; the drive still plays the disk as it was when activated |
 | `name`, `size`, `crc32` | The disk image                                                |
-| `sides`              | 1 or 2                                                           |
+| `sides`, `cylinders`, `sectors` | Geometry: 1 or 2 sides, 80–84 cylinders, 9–11 sectors per track |
 
 ---
 
@@ -464,7 +479,7 @@ change. A failed upload carries the same `error` inside its upload object.
 | 409  | `DRIVE_BUSY`           | Retry when the Atari is idle (see above)               |
 | 413  | `IMAGE_TOO_LARGE`      | Only images up to 819 200 bytes                        |
 | 422  | `INVALID_IMAGE`        | The file is not a floppy image                         |
-| 422  | `UNSUPPORTED_GEOMETRY` | Use a 360 KB or 720 KB (9 sector, 80 track) image      |
+| 422  | `UNSUPPORTED_GEOMETRY` | Use an image with 80–84 tracks and 9–11 sectors        |
 | 422  | `CHECKSUM_MISMATCH`    | The file was damaged in transit — send it again        |
 | 500  | `FLASH_ERROR`          | Storage problem — retry; check the device log          |
 | 500  | `PREPARE_FAILED`       | Internal problem — check the device log                |
@@ -546,7 +561,7 @@ A complete test suite that exercises every endpoint and error is in
 
 | Item                          | Value                                             |
 | ----------------------------- | ------------------------------------------------- |
-| Image size                    | 368 640 or 737 280 bytes (max. accepted 819 200)  |
+| Image size / geometry         | up to 819 200 bytes; 80–84 cyl, 9–11 sectors, 1–2 sides |
 | Flash slots                   | 20                                                |
 | PSRAM images                  | 1                                                 |
 | Uploads at the same time      | 1                                                 |

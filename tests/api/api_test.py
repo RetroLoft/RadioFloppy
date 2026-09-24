@@ -115,9 +115,12 @@ def main():
     r = call("POST", "/api/v1/uploads", {"filename": "big.st", "size": 819201,
                                         "destination": "flash"})
     check(r[0] == 413 and err(r) == "IMAGE_TOO_LARGE", "819201 bytes: IMAGE_TOO_LARGE")
-    r = call("POST", "/api/v1/uploads", {"filename": "ten.st", "size": 409600,
+    r = call("POST", "/api/v1/uploads", {"filename": "seventy.st", "size": 645120,
                                         "destination": "flash"})
-    check(r[0] == 422 and err(r) == "UNSUPPORTED_GEOMETRY", "80/1/10 size: UNSUPPORTED_GEOMETRY")
+    check(r[0] == 422 and err(r) == "UNSUPPORTED_GEOMETRY", "70/2/9 size: UNSUPPORTED_GEOMETRY")
+    r = call("POST", "/api/v1/uploads", {"filename": "82-2-10.st", "size": 839680,
+                                        "destination": "psram"})
+    check(r[0] == 413 and err(r) == "IMAGE_TOO_LARGE", "82/2/10 (820 KiB): IMAGE_TOO_LARGE")
     r = call("POST", "/api/v1/uploads", {"filename": "odd.st", "size": 1000,
                                         "destination": "flash"})
     check(r[0] == 422 and err(r) == "INVALID_IMAGE", "1000 bytes: INVALID_IMAGE")

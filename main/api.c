@@ -301,6 +301,8 @@ static cJSON *current_json(void)
         cJSON_AddNumberToObject(c, "size", d.size);
         cJSON_AddStringToObject(c, "crc32", crc);
         cJSON_AddNumberToObject(c, "sides", d.heads);
+        cJSON_AddNumberToObject(c, "cylinders", d.cylinders);
+        cJSON_AddNumberToObject(c, "sectors", d.sectors);
     }
     return c;
 }
@@ -387,7 +389,8 @@ static void process_upload(uint8_t **rawp)
     }
 
     disk_info_t info = { .source = up.to_flash ? DISK_SRC_FLASH : DISK_SRC_PSRAM,
-                         .slot = -1, .size = up.size, .crc32 = up.crc32, .heads = st.heads };
+                         .slot = -1, .size = up.size, .crc32 = up.crc32,
+                         .cylinders = st.cylinders, .heads = st.heads, .sectors = st.sectors };
     memcpy(info.name, up.name, sizeof(info.name));
 
     if (up.to_flash) {
@@ -497,6 +500,8 @@ static esp_err_t get_status(httpd_req_t *req)
         cJSON_AddNumberToObject(p, "size", pi.size);
         cJSON_AddStringToObject(p, "crc32", crc);
         cJSON_AddNumberToObject(p, "sides", pi.heads);
+        cJSON_AddNumberToObject(p, "cylinders", pi.cylinders);
+        cJSON_AddNumberToObject(p, "sectors", pi.sectors);
     }
     cJSON_AddNumberToObject(root, "psram_free", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddBoolToObject(root, "auth_required", CONFIG_RADIOFLOPPY_API_TOKEN[0] != 0);

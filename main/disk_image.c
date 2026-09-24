@@ -24,6 +24,7 @@
 #include "slot_store.h"
 
 uint8_t *volatile disk_tracks;
+volatile uint32_t disk_track_cells = MFM_TRACK_CELLS;
 
 static uint8_t *track_buf[2];       /* A/B track buffers in PSRAM */
 static int active_buf;              /* index of the buffer in use */
@@ -31,39 +32,54 @@ static disk_info_t current = { .source = DISK_SRC_NONE, .slot = -1 };
 static portMUX_TYPE info_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /* .ST order: cylinder, then head, then sectors 1..9. */
-static const uint8_t *sector_data(const uint8_t *raw, int heads, int cyl, int head)
+static const uint8_t *sector_data(const uint8_t *raw, const disk_info_t *g, int cyl, int head)
 {
-    return raw + (size_t)(cyl * heads + head) * MFM_SECTORS * MFM_SECTOR_SIZE;
+    return raw + (size_t)(cyl * g->heads + head) * g->sectors * MFM_SECTOR_SIZE;
 }
 
-/* Encode all tracks of raw into buf (side 1 unformatted for 1 head). */
-static esp_err_t build_tracks(uint8_t *buf, const uint8_t *raw, int heads)
+static uint8_t *track_ptr(uint8_t *buf, int cyl, int head)
 {
-    static uint8_t *blank;          /* unformatted track, built once */
-    uint8_t *work = heap_caps_malloc(MFM_TRACK_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return buf + (size_t)(cyl * DISK_MAX_HEADS + head) * MFM_MAX_BYTES;
+}
+
+static uint32_t prepared_cells;     /* track length in the inactive buffer */
+
+/*
+ * Encode all tracks of raw into buf. Side 1 of a single-sided image and the
+ * cylinders beyond the image up to DISK_MAX_CYLS are unformatted tracks
+ * of the same length. raw NULL: no disk, all tracks unformatted.
+ */
+static esp_err_t build_tracks(uint8_t *buf, const uint8_t *raw, const disk_info_t *g,
+                              uint32_t *cells_out)
+{
+    static uint8_t *blank;          /* unformatted track, rebuilt per length */
+    static uint32_t blank_cells;
+    mfm_layout_t layout = mfm_layout(raw ? g->sectors : MFM_MIN_SECTORS);
+    uint8_t *work = heap_caps_malloc(MFM_MAX_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
     if (!blank) {
-        blank = heap_caps_malloc(MFM_TRACK_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (blank) {
-            mfm_build_blank_track(blank);
-        }
+        blank = heap_caps_malloc(MFM_MAX_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
     if (!work || !blank) {
         free(work);
         return ESP_ERR_NO_MEM;
     }
-    for (int cyl = 0; cyl < DISK_CYLINDERS; cyl++) {
+    if (blank_cells != layout.cells) {
+        mfm_build_blank_track(blank, layout.cells);
+        blank_cells = layout.cells;
+    }
+    for (int cyl = 0; cyl < DISK_MAX_CYLS; cyl++) {
         for (int head = 0; head < DISK_MAX_HEADS; head++) {
             const uint8_t *src = blank;
-            if (raw && head < heads) {
-                mfm_build_track(work, sector_data(raw, heads, cyl, head), cyl, head);
+            if (raw && cyl < g->cylinders && head < g->heads) {
+                mfm_build_track(work, &layout, sector_data(raw, g, cyl, head), cyl, head);
                 src = work;
             }
-            memcpy(buf + (size_t)(cyl * DISK_MAX_HEADS + head) * MFM_TRACK_BYTES,
-                   src, MFM_TRACK_BYTES);
+            memcpy(track_ptr(buf, cyl, head), src, layout.cells / 8);
         }
     }
     free(work);
+    *cells_out = layout.cells;
     return ESP_OK;
 }
 
@@ -74,7 +90,7 @@ static esp_err_t build_tracks(uint8_t *buf, const uint8_t *raw, int heads)
  */
 static struct {
     uint8_t *raw;               /* own copy, freed by the task */
-    int heads;
+    disk_info_t geo;
     const uint8_t *tracks;
 } verify_job;
 static volatile bool verify_running;
@@ -85,11 +101,14 @@ static void verify_task(void *arg)
     int64_t t0 = esp_timer_get_time();
     int bad = 0, done = 0;
 
-    for (int cyl = 0; cyl < DISK_CYLINDERS && !verify_abort; cyl++) {
-        for (int head = 0; head < verify_job.heads; head++) {
-            const uint8_t *t = verify_job.tracks + (size_t)(cyl * DISK_MAX_HEADS + head) * MFM_TRACK_BYTES;
-            if (mfm_verify_track(t, sector_data(verify_job.raw, verify_job.heads, cyl, head),
-                                 cyl, head) != MFM_SECTORS) {
+    const disk_info_t *g = &verify_job.geo;
+    mfm_layout_t layout = mfm_layout(g->sectors);
+
+    for (int cyl = 0; cyl < g->cylinders && !verify_abort; cyl++) {
+        for (int head = 0; head < g->heads; head++) {
+            const uint8_t *t = track_ptr((uint8_t *)verify_job.tracks, cyl, head);
+            if (mfm_verify_track(t, &layout, sector_data(verify_job.raw, g, cyl, head),
+                                 cyl, head) != g->sectors) {
                 bad++;
             }
             done++;
@@ -119,8 +138,9 @@ static void verify_stop(void)
 }
 
 /* Check the active tracks against raw in the background (raw is copied). */
-static void verify_start(const uint8_t *raw, uint32_t size, int heads)
+static void verify_start(const uint8_t *raw, const disk_info_t *g)
 {
+    uint32_t size = g->size;
     verify_stop();
     if (!DISK_BACKGROUND_VERIFY) {
         return;
@@ -132,7 +152,7 @@ static void verify_start(const uint8_t *raw, uint32_t size, int heads)
     }
     memcpy(copy, raw, size);
     verify_job.raw = copy;
-    verify_job.heads = heads;
+    verify_job.geo = *g;
     verify_job.tracks = track_buf[active_buf];
     verify_running = true;
     /* Lowest priority, on the core that does not run the GPIO/RMT ISRs. */
@@ -315,10 +335,12 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
     return err;
 }
 
+/* Runs under the drive lock: buffer and track length change together. */
 static void set_active_buffer(void *arg)
 {
     active_buf = *(int *)arg;
     disk_tracks = track_buf[active_buf];
+    disk_track_cells = prepared_cells;
 }
 
 esp_err_t disk_image_init(void)
@@ -350,16 +372,18 @@ esp_err_t disk_image_init(void)
         strcpy(info.name, "(no disk)");
         printf("No disk inserted - upload or activate one through the API.\n");
     }
+    info.cylinders = raw ? st.cylinders : 0;
     info.heads = raw ? st.heads : 0;
+    info.sectors = raw ? st.sectors : 0;
 
     printf("Generating MFM tracks...\n");
     int64_t t0 = esp_timer_get_time();
-    esp_err_t err = build_tracks(track_buf[0], raw, info.heads);
+    esp_err_t err = build_tracks(track_buf[0], raw, &info, &prepared_cells);
     if (err != ESP_OK) {
         free(raw);
         return err;
     }
-    printf("MFM tracks: %d generated in %lld ms\n", DISK_CYLINDERS * DISK_MAX_HEADS,
+    printf("MFM tracks: %d generated in %lld ms\n", DISK_MAX_CYLS * DISK_MAX_HEADS,
            (esp_timer_get_time() - t0) / 1000);
 
     int idx = 0;
@@ -368,22 +392,22 @@ esp_err_t disk_image_init(void)
     set_current(&info);
 
     if (raw) {
-        verify_start(raw, info.size, info.heads);
+        verify_start(raw, &info);
         free(raw);
     }
     return ESP_OK;
 }
 
-esp_err_t disk_prepare(const uint8_t *raw, int heads)
+esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info)
 {
     /* The verifier may be reading the buffer that is about to be reused. */
     verify_stop();
-    return build_tracks(track_buf[active_buf ^ 1], raw, heads);
+    return build_tracks(track_buf[active_buf ^ 1], raw, info, &prepared_cells);
 }
 
-void disk_verify_active(const uint8_t *raw, uint32_t size, int heads)
+void disk_verify_active(const uint8_t *raw, const disk_info_t *info)
 {
-    verify_start(raw, size, heads);
+    verify_start(raw, info);
 }
 
 esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
