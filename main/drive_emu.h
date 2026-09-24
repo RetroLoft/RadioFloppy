@@ -5,11 +5,16 @@
  * levels, so they never wait for logging or a background task:
  *
  *   active  = armed && selected (EMU_SELECT_LINE LOW)
+ *   disk    = a disk is inserted and no disk change is being signalled
  *   TRACK0  = active && cylinder == 0
- *   WPROT   = active                        (read-only disk)
- *   INDEX   = active && MOTOR on
- *   RDATA   = active && MOTOR on && WGATE inactive
+ *   WPROT   = active && !changing           (read-only disk)
+ *   INDEX   = active && disk && MOTOR on
+ *   RDATA   = active && disk && MOTOR on && WGATE inactive
  *   READY, DSKCHG: never driven
+ *
+ * Disk change: for DRIVE_MEDIA_CHANGE_MS after a swap WPROT is released
+ * and INDEX/RDATA stay off, as with an open drive door. TOS notices a
+ * disk change through that write-protect transition.
  */
 #pragma once
 
@@ -66,6 +71,15 @@ uint32_t drive_select_edges(void);
 
 /* STEP pulses ignored because the drive was not armed/selected. */
 uint32_t drive_ignored_steps(void);
+
+#define DRIVE_MEDIA_CHANGE_MS   700
+
+/*
+ * Swap the disk: runs swap(arg) under the drive lock, but only while our
+ * drive is not selected, then signals a disk change. present: a disk is
+ * inserted afterwards. Returns false (nothing done) while selected.
+ */
+bool drive_swap_media(void (*swap)(void *), void *arg, bool present);
 
 /* Armed by the start-up guard. */
 bool drive_is_armed(void);

@@ -27,6 +27,8 @@ static volatile int current_track = 0;  /* assumed at track 0 at start-up */
 static QueueHandle_t event_queue;
 static volatile uint32_t select_edges;
 static volatile uint32_t ignored_steps;
+static bool disk_present;
+static int64_t media_change_until_us;
 
 int IRAM_ATTR drive_cylinder(void)
 {
@@ -37,15 +39,17 @@ int IRAM_ATTR drive_cylinder(void)
 static void IRAM_ATTR update_outputs_locked(drive_status_t *st)
 {
     bool active = armed && emulator_is_selected();
+    bool changing = media_change_until_us && esp_timer_get_time() < media_change_until_us;
+    bool disk = disk_present && !changing;
 
     st->armed = armed;
     st->selected = emulator_is_selected();
     st->motor = gpio_ll_get_level(&GPIO, PIN_FDD_MOTOR) == 0;
     st->wgate = gpio_ll_get_level(&GPIO, PIN_FDD_WGATE) == 0;
     st->track0 = active && current_track == 0;
-    st->wprot = active;
-    st->index = active && st->motor;
-    st->rdata = active && st->motor && !st->wgate;
+    st->wprot = active && !changing;
+    st->index = active && disk && st->motor;
+    st->rdata = active && disk && st->motor && !st->wgate;
     st->cyl = current_track;
     st->side = gpio_ll_get_level(&GPIO, PIN_FDD_SIDE) ? 0 : 1;
 
@@ -160,6 +164,23 @@ QueueHandle_t drive_events(void)
 uint32_t drive_select_edges(void)
 {
     return select_edges;
+}
+
+bool drive_swap_media(void (*swap)(void *), void *arg, bool present)
+{
+    drive_status_t st;
+    bool done = false;
+
+    portENTER_CRITICAL(&drive_lock);
+    if (!(armed && emulator_is_selected())) {
+        swap(arg);
+        disk_present = present;
+        media_change_until_us = esp_timer_get_time() + DRIVE_MEDIA_CHANGE_MS * 1000LL;
+        update_outputs_locked(&st);
+        done = true;
+    }
+    portEXIT_CRITICAL(&drive_lock);
+    return done;
 }
 
 bool drive_is_armed(void)

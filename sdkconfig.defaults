@@ -34,3 +34,7 @@ CONFIG_SPIRAM_SPEED_80M=y
 # -O2: faster flux encoder callback (RMT ISR) and track encoding at start-up.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# WiFi, lwIP and the HTTP server on core 1; floppy ISRs and flux stream on core 0.
+CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_1=y
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU1=y

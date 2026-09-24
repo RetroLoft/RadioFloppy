@@ -97,6 +97,15 @@ void IRAM_ATTR step_sound_step_isr(void)
 #endif
 }
 
+void step_sound_click(void)
+{
+    portENTER_CRITICAL(&sound_lock);
+    if (state == SOUND_IDLE) {
+        start_click_locked();
+    }
+    portEXIT_CRITICAL(&sound_lock);
+}
+
 void IRAM_ATTR step_sound_stop_isr(void)
 {
     portENTER_CRITICAL_ISR(&sound_lock);

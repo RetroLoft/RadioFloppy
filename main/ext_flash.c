@@ -12,7 +12,7 @@
  * page, 4 KiB sectors, 64 KiB blocks and longer time-outs (600 ms sector,
  * 4.1 s block), and takes the size from ID byte 3 (0x18 = 16 MiB).
  *
- * Single SPI for now: WP#/IO2 and IO3 are driven HIGH as plain GPIOs so
+ * Single SPI (READ 03h) at 40 MHz. WP#/IO2 and IO3 are driven HIGH as plain GPIOs so
  * they can never protect or reset the chip.
  */
 #include <stdio.h>
@@ -27,10 +27,11 @@
 #include "ext_flash.h"
 
 #define EXT_FLASH_HOST      SPI2_HOST
-#define EXT_FLASH_FREQ_MHZ  20
+#define EXT_FLASH_FREQ_MHZ  40      /* READ 03h is specified up to 50 MHz */
 
 static esp_flash_t *chip;
 static uint32_t chip_size;
+static uint32_t chip_id;
 
 esp_err_t ext_flash_init(void)
 {
@@ -77,6 +78,7 @@ esp_err_t ext_flash_init(void)
 
     uint32_t id = 0;
     esp_flash_read_id(chip, &id);
+    chip_id = id;
     esp_flash_get_size(chip, &chip_size);
     if (id == 0 || id == 0xffffff) {
         printf("ERROR: external flash not responding (ID %06lx)\n", (unsigned long)id);
@@ -96,6 +98,11 @@ esp_err_t ext_flash_init(void)
 bool ext_flash_ready(void)
 {
     return chip != NULL;
+}
+
+uint32_t ext_flash_jedec_id(void)
+{
+    return chip ? chip_id : 0;
 }
 
 uint32_t ext_flash_size(void)

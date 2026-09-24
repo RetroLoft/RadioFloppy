@@ -1,0 +1,27 @@
+menu "RadioFloppy"
+
+    config RADIOFLOPPY_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            Network to join. Empty: WiFi and the HTTP API stay off.
+            Stored in sdkconfig, which is not committed to git.
+
+    config RADIOFLOPPY_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+
+    config RADIOFLOPPY_HOSTNAME
+        string "Hostname"
+        default "radiofloppy"
+
+    config RADIOFLOPPY_API_TOKEN
+        string "Optional API token for upload / delete / activate"
+        default ""
+        help
+            Empty (default): the API is open to everyone on the network.
+            Set a token only on a shared network; clients then send it as
+            "Authorization: Bearer <token>" and the web page asks for it.
+            Stored in sdkconfig, which is not committed to git.
+
+endmenu

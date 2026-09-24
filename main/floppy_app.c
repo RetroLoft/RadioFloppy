@@ -2,7 +2,7 @@
  * RadioFloppy - read-only floppy emulation.
  *
  * Emulates drive B: (EMU_SELECT_LINE) with a .ST image from the external
- * SPI flash image store (see disk_image.h):
+ * SPI flash slot store (see disk_image.h):
  * MFM tracks pre-encoded in PSRAM, flux stream and INDEX from RMT, drive
  * logic in drive_emu.c (ISR context). This file only sets things up and
  * does the (compact) logging, which never touches the timing path.
@@ -22,7 +22,10 @@
 #include "soc/gpio_periph.h"
 #include "soc/io_mux_reg.h"
 
+#include "api.h"
 #include "board_pins.h"
+#include "buttons.h"
+#include "disk_switch.h"
 #include "disk_image.h"
 #include "drive_config.h"
 #include "drive_emu.h"
@@ -30,6 +33,7 @@
 #include "status_led.h"
 #include "step_sound.h"
 #include "tests.h"
+#include "wifi_net.h"
 
 #define ARM_HIGH_MS         50      /* start-up guard, select line HIGH */
 #define SHORT_SELECT_MS     20      /* shorter, without activity: a "poll" */
@@ -283,16 +287,25 @@ void floppy_emu_run(void)
     printf("========================================\n\n");
 
     if (disk_image_init() != ESP_OK) {
-        printf("Image not usable - emulator stays disabled.\n");
+        printf("Disk buffers not available - emulator stays disabled.\n");
         return;
     }
-    printf("Floppy image: %s (%s)\n", disk_image_name, disk_image_source);
-    printf("Geometry: %d/%d/%d/%d%s\n", DISK_CYLINDERS, disk_image_heads, MFM_SECTORS,
-           MFM_SECTOR_SIZE, disk_image_heads == 1 ? " (side 1 unformatted)" : "");
+    disk_info_t disk;
+    disk_get_current(&disk);
+    printf("Floppy image: %s (%s)\n", disk.name,
+           disk.source == DISK_SRC_FLASH ? "EXTERNAL SPI FLASH" : "none");
+    if (disk.heads) {
+        printf("Geometry: %d/%d/%d/%d%s\n", DISK_CYLINDERS, disk.heads, MFM_SECTORS,
+               MFM_SECTOR_SIZE, disk.heads == 1 ? " (side 1 unformatted)" : "");
+    }
     printf("MFM: 250 kbit/s, %d bitcells/track, sector skew %s\n", MFM_TRACK_CELLS,
            MFM_USE_TOS_SKEW ? "TOS (4/2)" : "none");
     printf("RPM: 300 (200 ms, INDEX %d ms)\n", INDEX_PULSE_MS);
     printf("Read-only: YES\n");
+
+    /* Before the flux stream: the one-time PHY calibration write to the
+     * internal flash must not happen while RMT is streaming. */
+    bool wifi = wifi_net_start() == ESP_OK;
 
     step_sound_init();              /* buzzer off before any interrupt */
     drive_init();                   /* inputs + interrupts, not armed */
@@ -308,6 +321,11 @@ void floppy_emu_run(void)
         printf("Output check failed - emulator stays disabled.\n");
         return;
     }
+    disk_switch_init();
+    if (wifi) {
+        api_start();
+    }
+    buttons_start();
     printf("Ready.\n\n");
 
     wait_until_armed();

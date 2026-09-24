@@ -16,5 +16,8 @@ void step_sound_init(void);
 /* ISR: our drive processed a STEP pulse. Never blocks. */
 void step_sound_step_isr(void);
 
+/* Task context: one click (e.g. to acknowledge a button press). */
+void step_sound_click(void);
+
 /* ISR: our drive is no longer active: buzzer off, pending click dropped. */
 void step_sound_stop_isr(void);

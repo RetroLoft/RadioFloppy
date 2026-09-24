@@ -45,21 +45,31 @@ static void emit_raw(writer_t *w, uint16_t word)
     w->prev = word & 1;
 }
 
+/*
+ * MFM word of each byte value, with the first clock bit computed as if the
+ * previous data bit were 0; emit_raw() clears it after a data 1. Same
+ * approach as FlashFloppy's mfmtab[].
+ */
+static uint16_t mfm_table[256];
+
+static void init_table(void)
+{
+    for (int b = 0; b < 256; b++) {
+        uint16_t word = 0;
+        unsigned prev = 0;
+        for (int i = 7; i >= 0; i--) {
+            unsigned bit = (b >> i) & 1;
+            unsigned clk = !prev && !bit;       /* clock only between two 0 bits */
+            word = (word << 2) | (clk << 1) | bit;
+            prev = bit;
+        }
+        mfm_table[b] = word;
+    }
+}
+
 static void emit_byte(writer_t *w, uint8_t b)
 {
-    /* Standard MFM: data bit as is; clock bit 1 only between two 0 data
-     * bits. The first clock is resolved by emit_raw() against the previous
-     * byte. */
-    uint16_t word = 0;
-    unsigned prev = 0;
-
-    for (int i = 7; i >= 0; i--) {
-        unsigned bit = (b >> i) & 1;
-        unsigned clk = !prev && !bit;
-        word = (word << 2) | (clk << 1) | bit;
-        prev = bit;
-    }
-    emit_raw(w, word);
+    emit_raw(w, mfm_table[b]);
 }
 
 static void emit_repeat(writer_t *w, uint8_t b, int n)
@@ -90,6 +100,9 @@ static void sector_order(uint8_t order[MFM_SECTORS], uint8_t cyl, uint8_t head)
 void mfm_build_track(uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
                      uint8_t cyl, uint8_t head)
 {
+    if (mfm_table[0] == 0) {
+        init_table();       /* 0x00 encodes to 0xAAAA, never 0 once built */
+    }
     /* The track is a ring: it ends with 0x4E (last data bit 0). */
     writer_t w = { .raw = raw, .pos = 0, .prev = 0 };
     uint8_t order[MFM_SECTORS];
@@ -139,6 +152,9 @@ void mfm_build_track(uint8_t raw[MFM_TRACK_BYTES], const uint8_t *sectors,
 
 void mfm_build_blank_track(uint8_t raw[MFM_TRACK_BYTES])
 {
+    if (mfm_table[0] == 0) {
+        init_table();
+    }
     writer_t w = { .raw = raw, .pos = 0, .prev = 0 };
 
     while (w.pos < MFM_TRACK_BYTES) {

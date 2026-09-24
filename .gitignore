@@ -16,3 +16,8 @@ images/*
 *.swp
 *~
 .DS_Store
+tests/host/test_slot_store
+tests/host/test_st_image
+
+# Python
+__pycache__/

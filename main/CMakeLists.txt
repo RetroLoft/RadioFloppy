@@ -8,11 +8,19 @@ idf_component_register(SRCS "main.c"
                             "mfm_track.c"
                             "disk_image.c"
                             "ext_flash.c"
-                            "image_store.c"
+                            "slot_store.c"
+                            "legacy_catalog.c"
                             "step_sound.c"
                             "status_led.c"
                             "led_test.c"
+                            "st_image.c"
+                            "wifi_net.c"
+                            "api.c"
+                            "disk_switch.c"
+                            "buttons.c"
                        INCLUDE_DIRS "."
+                       EMBED_TXTFILES "../web/index.html"
                        PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_driver_spi esp_rom
-                                     esp_timer esp_psram heap spi_flash)
+                                     esp_timer esp_psram heap spi_flash
+                                     esp_wifi esp_netif esp_event nvs_flash esp_http_server json)
 

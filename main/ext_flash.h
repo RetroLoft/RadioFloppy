@@ -24,6 +24,7 @@ esp_err_t ext_flash_init(void);
 
 bool ext_flash_ready(void);
 uint32_t ext_flash_size(void);
+uint32_t ext_flash_jedec_id(void);
 
 esp_err_t ext_flash_read(uint32_t addr, void *buf, size_t len);
 esp_err_t ext_flash_write(uint32_t addr, const void *buf, size_t len);
