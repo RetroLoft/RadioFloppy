@@ -1,7 +1,8 @@
 /*
- * FloppyEmulator-ESP32S3 - first read-only floppy emulation.
+ * RadioFloppy - read-only floppy emulation.
  *
- * Emulates drive B: (EMU_SELECT_LINE) with the embedded .ST image:
+ * Emulates drive B: (EMU_SELECT_LINE) with a .ST image from the external
+ * SPI flash image store (or the embedded image, see disk_image.h):
  * MFM tracks pre-encoded in PSRAM, flux stream and INDEX from RMT, drive
  * logic in drive_emu.c (ISR context). This file only sets things up and
  * does the (compact) logging, which never touches the timing path.
@@ -275,7 +276,7 @@ static void handle_event(log_state_t *ls, const drive_event_t *ev)
 void floppy_emu_run(void)
 {
     printf("\n========================================\n");
-    printf(" ESP32-S3 Floppy Emulator\n");
+    printf(" RadioFloppy\n");
     printf(" Read-only drive %s\n", EMU_SELECT_LINE == EMU_DS1 ? "B: (DS1)" : "(DS0)");
     printf("========================================\n\n");
 
@@ -283,7 +284,7 @@ void floppy_emu_run(void)
         printf("Image not usable - emulator stays disabled.\n");
         return;
     }
-    printf("Floppy image: %s\n", disk_image_name);
+    printf("Floppy image: %s (%s)\n", disk_image_name, disk_image_source);
     printf("Geometry: %d/%d/%d/%d%s\n", DISK_CYLINDERS, disk_image_heads, MFM_SECTORS,
            MFM_SECTOR_SIZE, disk_image_heads == 1 ? " (side 1 unformatted)" : "");
     printf("MFM: 250 kbit/s, %d bitcells/track, sector skew %s\n", MFM_TRACK_CELLS,
@@ -303,7 +304,7 @@ void floppy_emu_run(void)
         printf("Output check failed - emulator stays disabled.\n");
         return;
     }
-    printf("\n");
+    printf("Ready.\n\n");
 
     wait_until_armed();
     drive_status_t st;

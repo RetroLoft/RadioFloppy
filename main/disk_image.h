@@ -9,7 +9,23 @@
 #include "mfm_track.h"
 
 /*
- * Embedded images (images/ directory). Change only this line to select
+ * Image source. With DISK_SOURCE_EXTERNAL the image named
+ * DISK_EXTERNAL_IMAGE is read from the external SPI flash (image store,
+ * see image_store.h) into PSRAM before the MFM tracks are built.
+ *
+ * DISK_PROVISION_EMBEDDED: if that image is not in the store yet, write
+ *   the embedded Crystal Castles image into it once (erase/program/verify).
+ * DISK_EMBEDDED_FALLBACK: if loading from the external flash fails, use
+ *   the embedded image instead (clearly reported). 0 = stay disabled.
+ */
+#define DISK_SOURCE_EXTERNAL        1
+#define DISK_EXTERNAL_IMAGE         "Crystal Castles"
+#define DISK_PROVISION_EMBEDDED     1
+#define DISK_EMBEDDED_FALLBACK      1
+
+/*
+ * Embedded images (images/ directory), used when DISK_SOURCE_EXTERNAL is 0,
+ * for provisioning and as fallback. Change only this line to select
  * the image the emulator presents:
  *   DISK_IMAGE_CRYSTAL_CASTLES  CRYSTAL_CASTLES.ST      (360 kB, 80/1/9)
  *                               local only, not in the repository
@@ -24,8 +40,9 @@
 #define DISK_CYLINDERS      80
 #define DISK_MAX_HEADS      2   /* the drive always has two heads */
 
-/* Name and number of sides of the selected image (valid after init). */
+/* Name, source and number of sides of the image in use (after init). */
 extern const char *disk_image_name;
+extern const char *disk_image_source;
 extern int disk_image_heads;
 
 /* All tracks as raw MFM bitcells, [cyl][head][MFM_TRACK_BYTES], in PSRAM. */

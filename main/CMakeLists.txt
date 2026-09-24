@@ -16,10 +16,12 @@ idf_component_register(SRCS "main.c"
                             "flux_stream.c"
                             "mfm_track.c"
                             "disk_image.c"
+                            "ext_flash.c"
+                            "image_store.c"
                        INCLUDE_DIRS "."
                        EMBED_FILES ${images}
-                       PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_rom esp_timer
-                                     esp_psram heap)
+                       PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_driver_spi esp_rom
+                                     esp_timer esp_psram heap spi_flash)
 
 if(have_crystal_castles)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE HAVE_CRYSTAL_CASTLES=1)

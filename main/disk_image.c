@@ -1,6 +1,8 @@
 /*
- * Embedded floppy images: raw .ST sector dumps, 80 cylinders, 9 sectors of
- * 512 bytes, one or two sides (derived from the file size).
+ * Floppy image source and MFM track generation. Images are raw .ST sector
+ * dumps, 80 cylinders, 9 sectors of 512 bytes, one or two sides (derived
+ * from the file size). They come from the external SPI flash image store
+ * (loaded into PSRAM) or, when configured, from the firmware itself.
  *
  * At start-up every track is encoded once into PSRAM (80 x 2 x 12500
  * bytes), so a STEP or SIDE change never has to wait for encoding. For a
@@ -18,6 +20,8 @@
 #include "esp_timer.h"
 
 #include "disk_image.h"
+#include "ext_flash.h"
+#include "image_store.h"
 
 extern const uint8_t retroloft_start[] asm("_binary_RETROLOFT_TEST_720K_ST_start");
 extern const uint8_t retroloft_end[] asm("_binary_RETROLOFT_TEST_720K_ST_end");
@@ -42,6 +46,7 @@ static const embedded_image_t image = { "RETROLOFT_TEST_720K.ST", retroloft_star
 #endif
 
 const char *disk_image_name;
+const char *disk_image_source;
 int disk_image_heads;
 uint8_t *disk_tracks;
 
@@ -74,13 +79,107 @@ static void verify_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/*
+ * Get the raw image from the external flash (image store) into PSRAM.
+ * Provisions the embedded image first when enabled and still missing.
+ */
+static esp_err_t load_external(const uint8_t **data, size_t *size)
+{
+    esp_err_t err = ext_flash_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = image_store_open();
+    const rf_catalog_t *cat = image_store_catalog();
+    if (cat) {
+        int n = 0;
+        for (int i = 0; i < RF_CAT_RECORDS; i++) {
+            n += cat->rec[i].status == RF_ST_VALID;
+        }
+        printf("Image catalog: OK (format v%d, generation %lu, %d image%s)\n",
+               cat->hdr.version, (unsigned long)cat->hdr.generation, n, n == 1 ? "" : "s");
+    } else {
+        printf("Image catalog: none found (empty image store)\n");
+    }
+
+    const rf_record_t *rec = image_store_find(DISK_EXTERNAL_IMAGE);
+#if DISK_PROVISION_EMBEDDED && HAVE_CRYSTAL_CASTLES
+    if (!rec) {
+        size_t len = crystal_end - crystal_start;
+        printf("\"%s\" not in the image store: writing the embedded image "
+               "(%u bytes, CRC32 %08lx)\n", DISK_EXTERNAL_IMAGE, (unsigned)len,
+               (unsigned long)image_store_crc32(crystal_start, len));
+        err = image_store_add(DISK_EXTERNAL_IMAGE, RF_FMT_ST, crystal_start, len);
+        if (err != ESP_OK) {
+            return err;
+        }
+        rec = image_store_find(DISK_EXTERNAL_IMAGE);
+    }
+#endif
+    if (!rec) {
+        printf("ERROR: image \"%s\" not found in the image store\n", DISK_EXTERNAL_IMAGE);
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (rec->format != RF_FMT_ST) {
+        printf("ERROR: image \"%s\" has unsupported format %u\n", rec->name, rec->format);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    uint8_t *buf = heap_caps_malloc(rec->size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    int64_t t0 = esp_timer_get_time();
+    err = image_store_load(rec, buf);
+    if (err != ESP_OK) {
+        printf("ERROR: reading \"%s\" failed: %s\n", rec->name,
+               err == ESP_ERR_INVALID_CRC ? "CRC mismatch" : esp_err_to_name(err));
+        free(buf);
+        return err;
+    }
+
+    printf("Selected image: %s\n", rec->name);
+    printf("Source: EXTERNAL SPI FLASH (0x%06lx)\n", (unsigned long)rec->start);
+    printf("Image size: %lu bytes\n", (unsigned long)rec->size);
+    printf("Image CRC: OK (%08lx, read in %lld ms)\n", (unsigned long)rec->crc32,
+           (esp_timer_get_time() - t0) / 1000);
+
+    disk_image_name = rec->name;
+    *data = buf;
+    *size = rec->size;
+    return ESP_OK;
+}
+
 esp_err_t disk_image_init(void)
 {
     const size_t side_bytes = (size_t)DISK_CYLINDERS * MFM_SECTORS * MFM_SECTOR_SIZE;
-    size_t size = image.end - image.start;
+    size_t size = 0;
 
-    disk_image_name = image.name;
-    image_data = image.start;
+#if DISK_SOURCE_EXTERNAL
+    const uint8_t *data = NULL;
+    if (load_external(&data, &size) == ESP_OK) {
+        image_data = data;
+        disk_image_source = "EXTERNAL SPI FLASH";
+    } else {
+#if DISK_EMBEDDED_FALLBACK
+        printf("External image NOT used - FALLBACK to the embedded image %s\n", image.name);
+#else
+        printf("External image not available and no fallback enabled.\n");
+        return ESP_ERR_NOT_FOUND;
+#endif
+    }
+#endif
+    if (!disk_image_source) {
+        disk_image_name = image.name;
+        image_data = image.start;
+        size = image.end - image.start;
+        disk_image_source = "EMBEDDED FIRMWARE IMAGE";
+        printf("Selected image: %s\n", disk_image_name);
+        printf("Source: %s%s\n", disk_image_source, DISK_SOURCE_EXTERNAL ? " (FALLBACK)" : "");
+        printf("Image size: %u bytes\n", (unsigned)size);
+    }
+
     if (size == side_bytes) {
         disk_image_heads = 1;
     } else if (size == 2 * side_bytes) {
@@ -100,6 +199,7 @@ esp_err_t disk_image_init(void)
     }
 
     /* Encode in internal RAM, then copy the finished track to PSRAM. */
+    printf("Generating MFM tracks...\n");
     int64_t t0 = esp_timer_get_time();
     for (int cyl = 0; cyl < DISK_CYLINDERS; cyl++) {
         for (int head = 0; head < DISK_MAX_HEADS; head++) {
@@ -112,7 +212,7 @@ esp_err_t disk_image_init(void)
         }
     }
     free(work);
-    printf("MFM tracks: %d encoded in %lld ms (verification runs in background)\n",
+    printf("MFM tracks: %d generated in %lld ms (verification runs in background)\n",
            DISK_CYLINDERS * DISK_MAX_HEADS, (esp_timer_get_time() - t0) / 1000);
 
     /* Lowest priority, on the core that does not run the GPIO/RMT ISRs. */

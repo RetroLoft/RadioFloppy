@@ -1,5 +1,5 @@
-# FloppyEmulator-ESP32S3 - top-level ESP-IDF project file
+# RadioFloppy - top-level ESP-IDF project file
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(FloppyEmulator-ESP32S3)
+project(RadioFloppy)
