@@ -2,7 +2,7 @@
  * On-board addressable RGB LED, driven by its own RMT TX channel (bytes
  * encoder, GRB order). See status_led.h.
  *
- * A low-priority task polls the MOTOR line every STATUS_POLL_MS and only
+ * A low-priority task polls selection and MOTOR every STATUS_POLL_MS and only
  * sends to the LED when the state changes, so the floppy interrupts and
  * the flux stream are never involved. The channel uses the same 10 MHz
  * resolution as the flux channels (the RMT group clock is shared).
@@ -17,6 +17,8 @@
 #include "driver/rmt_encoder.h"
 
 #include "board_pins.h"
+#include "drive_config.h"
+#include "drive_emu.h"
 #include "flux_stream.h"
 #include "status_led.h"
 
@@ -50,13 +52,14 @@ static void status_led_task(void *arg)
     int shown = -1;
 
     while (true) {
-        bool motor = gpio_get_level(PIN_FDD_MOTOR) == 0;   /* active low */
+        /* Our drive selected (EMU_SELECT_LINE) and MOTOR active (LOW);
+         * armed, so an unpowered Atari (all lines LOW) does not count. */
+        bool on = drive_is_armed() && emulator_is_selected() &&
+                  gpio_get_level(PIN_FDD_MOTOR) == 0;
 
-        if (motor != shown) {
-            shown = motor;
-            printf("MOTOR %s -> LED %s\n", motor ? "on (LOW)" : "off (HIGH)",
-                   motor ? "on" : "off");
-            if (motor) {
+        if (on != shown) {
+            shown = on;
+            if (on) {
                 led_set(STATUS_LED_R, STATUS_LED_G, STATUS_LED_B);
             } else {
                 led_set(0, 0, 0);
@@ -91,6 +94,7 @@ esp_err_t status_led_init(void)
 
     led_set(0, 0, 0);
     xTaskCreate(status_led_task, "status_led", 3072, NULL, 2, NULL);
-    printf("Status LED: GPIO%d, on while MOTOR is active (LOW)\n", STATUS_LED_GPIO);
+    printf("Status LED: GPIO%d, on while %s is selected and MOTOR is active\n",
+           STATUS_LED_GPIO, EMU_SELECT_NAME);
     return ESP_OK;
 }

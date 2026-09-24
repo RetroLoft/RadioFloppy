@@ -1,6 +1,6 @@
 /*
- * On-board addressable RGB LED (WS2812-type) of the DevKitC: orange for as
- * long as the floppy MOTOR line is active (LOW).
+ * On-board addressable RGB LED (WS2812-type) of the DevKitC: orange while
+ * our drive is selected (EMU_SELECT_LINE) and the MOTOR line is active.
  */
 #pragma once
 
@@ -11,9 +11,10 @@
  * unfitted LED_STATUS connector. */
 #define STATUS_LED_GPIO     48
 
-/* Red-orange, dimmed (addressable LEDs are very bright). */
-#define STATUS_LED_R        64
-#define STATUS_LED_G        8
+/* Orange, dimmed (addressable LEDs are very bright; green is the brightest
+ * die, hence a little less green than red). */
+#define STATUS_LED_R        8
+#define STATUS_LED_G        2
 #define STATUS_LED_B        0
 
 /* Start the LED (off) and its update task. */
