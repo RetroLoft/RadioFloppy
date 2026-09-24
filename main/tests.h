@@ -18,3 +18,6 @@ void loopback_test_run(void);
 
 /* Read-only floppy emulation of a .ST image from the external flash (drive B:). */
 void floppy_emu_run(void);
+
+/* Blink an RGB LED on GPIO38 (blue) and GPIO48 (red) to locate it. */
+void led_test_run(void);

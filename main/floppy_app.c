@@ -27,6 +27,8 @@
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "flux_stream.h"
+#include "status_led.h"
+#include "step_sound.h"
 #include "tests.h"
 
 #define ARM_HIGH_MS         50      /* start-up guard, select line HIGH */
@@ -292,6 +294,7 @@ void floppy_emu_run(void)
     printf("RPM: 300 (200 ms, INDEX %d ms)\n", INDEX_PULSE_MS);
     printf("Read-only: YES\n");
 
+    step_sound_init();              /* buzzer off before any interrupt */
     drive_init();                   /* inputs + interrupts, not armed */
     if (flux_stream_init() != ESP_OK) {
         printf("RMT failed - emulator stays disabled.\n");
@@ -299,6 +302,7 @@ void floppy_emu_run(void)
     }
     printf("RMT ready (%d MHz, RDATA pulse %d.%d us, stream running, outputs gated).\n",
            FLUX_RESOLUTION_HZ / 1000000, FLUX_PULSE_TICKS / 10, FLUX_PULSE_TICKS % 10);
+    status_led_init();              /* indication only: failure is not fatal */
 
     if (!verify_outputs_released()) {
         printf("Output check failed - emulator stays disabled.\n");

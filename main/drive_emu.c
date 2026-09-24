@@ -17,6 +17,7 @@
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "flux_stream.h"
+#include "step_sound.h"
 
 #define EVENT_QUEUE_LEN 256
 
@@ -52,6 +53,10 @@ static void IRAM_ATTR update_outputs_locked(drive_status_t *st)
     gpio_ll_set_level(&GPIO, PIN_FDD_TRK0, st->track0);
     gpio_ll_set_level(&GPIO, PIN_FDD_WPROT, st->wprot);
     flux_gate(st->rdata, st->index);
+
+    if (!active) {
+        step_sound_stop_isr();      /* no sound from us for another drive */
+    }
 }
 
 static void IRAM_ATTR drive_isr(void *arg)
@@ -68,6 +73,7 @@ static void IRAM_ATTR drive_isr(void *arg)
         } else if (current_track > 0) {
             current_track--;            /* DIR HIGH: towards track 0 */
         }
+        step_sound_step_isr();          /* also at a limit: the motor still clicks */
         log = true;
     } else {
         log = ev.type == DRV_EV_SELECT ? armed : armed && emulator_is_selected();
@@ -154,6 +160,11 @@ QueueHandle_t drive_events(void)
 uint32_t drive_select_edges(void)
 {
     return select_edges;
+}
+
+bool drive_is_armed(void)
+{
+    return armed;
 }
 
 uint32_t drive_ignored_steps(void)

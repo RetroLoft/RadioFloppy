@@ -9,6 +9,9 @@ idf_component_register(SRCS "main.c"
                             "disk_image.c"
                             "ext_flash.c"
                             "image_store.c"
+                            "step_sound.c"
+                            "status_led.c"
+                            "led_test.c"
                        INCLUDE_DIRS "."
                        PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_driver_spi esp_rom
                                      esp_timer esp_psram heap spi_flash)

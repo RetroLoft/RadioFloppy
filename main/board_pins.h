@@ -57,8 +57,7 @@
 /* Active 5 V buzzer via BC817 (also native USB D+). */
 #define PIN_BUZZER          GPIO_NUM_20
 
-/* External status LEDs (not fitted yet). Note: the DevKitC on-board RGB
- * LED sits on GPIO48 (board v1.0) or GPIO38 (board v1.1), which overlaps
- * with these. */
+/* External status LEDs (not fitted yet). Note: the on-board RGB LED of
+ * this DevKitC clone is on GPIO48 (v1.0 layout), shared with LED_STATUS. */
 #define PIN_LED_ACTIVITY    GPIO_NUM_38
 #define PIN_LED_STATUS      GPIO_NUM_48

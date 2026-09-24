@@ -67,5 +67,8 @@ uint32_t drive_select_edges(void);
 /* STEP pulses ignored because the drive was not armed/selected. */
 uint32_t drive_ignored_steps(void);
 
+/* Armed by the start-up guard. */
+bool drive_is_armed(void);
+
 /* Current virtual cylinder. ISR/IRAM safe. */
 int drive_cylinder(void);

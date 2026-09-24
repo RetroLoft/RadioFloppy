@@ -194,5 +194,10 @@ esp_err_t flux_stream_init(void)
     ESP_ERROR_CHECK(rmt_transmit(data_chan, data_enc, &dummy_payload,
                                  sizeof(dummy_payload), &data_tx));
 
+    /* Both channels now run forever. The hardware start synchronisation
+     * (group-wide tx_sim_en) is no longer needed and must not affect the
+     * other RMT channels (status LED), so remove it again. */
+    ESP_ERROR_CHECK(rmt_del_sync_manager(sync));
+
     return ESP_OK;
 }

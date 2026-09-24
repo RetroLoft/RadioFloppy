@@ -10,6 +10,7 @@ WiFi-floppy-emulator voor de Atari ST op basis van een ESP32-S3 (Otronic DevKitC
 | Test | Bestand | Wat |
 | ---- | ------- | --- |
 | `floppy_emu_run()` (actief) | `main/floppy_app.c`, `ext_flash.c`, `image_store.c`, `drive_emu.c`, `flux_stream.c`, `mfm_track.c`, `disk_image.c` | **Read-only** floppy-emulatie als drive B: (`EMU_SELECT_LINE`). De image komt uitsluitend uit de image store op de externe SPI-flash U2 (S25FL128L, zie `docs/IMAGE_STORE.md`). Alle 160 sporen worden bij het opstarten naar MFM gecodeerd in PSRAM (FlashFloppy-layout voor .ST: geen IAM, GAP4a 80, GAP2 22, GAP3 84). RMT+DMA speelt de fluxstroom op GPIO41 (0,8 us pulsen, 10 MHz), een tweede RMT-kanaal de INDEX-puls op GPIO1 (3 ms per 200 ms, synchroon gestart). WPROT actief zodra geselecteerd; schrijven is uitgeschakeld. |
+| `led_test_run()` | `main/led_test.c` | Laat een RGB-LED op GPIO38 blauw en op GPIO48 rood knipperen (om de on-board LED te vinden; op dit board: GPIO48). |
 | (oud) `legacy/input_monitor.c` | niet gebouwd | Selectiebewuste monitor met TRACK0 uit de vorige fase, ter referentie. |
 | `loopback_test_run()` | `main/loopback_test.c` | Zoekt continu welke Shugart-uitgang (ULN2003A) via een jumper op J1 met welke ingang (SN74LVC245A) verbonden is. |
 | `button_test_run()` | `main/button_test.c` | Knoppen: GPIO19 = links (SW_NEXT), GPIO8 = rechts (SW_PREV); piept 0,5 s bij opstarten. |
@@ -17,6 +18,8 @@ WiFi-floppy-emulator voor de Atari ST op basis van een ESP32-S3 (Otronic DevKitC
 **Loopbacktest:** de Shugart-lijnen hebben op de PCB geen pull-ups. Plaats op de jumper een
 pull-up van 4,7–10 kΩ naar +3V3 (bijv. J3 pin 3, displayconnector), anders komt de lijn na het
 vrijgeven van de uitgang niet betrouwbaar HIGH en wordt er niets gemeld.
+
+**STEP-geluid en status-LED:** bij iedere verwerkte STEP-puls van drive B: geeft de buzzer een tik van 3 ms (`main/step_sound.h`); de on-board RGB-LED (GPIO48) brandt rood-oranje zolang MOTOR actief is (`main/status_led.h`).
 
 **Buzzer:** hangt aan het +5V-net van de PCB, dat alleen via J2 (floppyvoeding / Atari) gevoed
 wordt: de 5V-pin van de Otronic-clone is alleen een ingang. Bij voeding via USB alleen is de
