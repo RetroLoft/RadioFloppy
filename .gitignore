@@ -16,10 +16,11 @@ images/*
 *.swp
 *~
 .DS_Store
-tests/host/test_slot_store
+tests/host/test_image_store
 tests/host/test_st_image
 
 # Python
 __pycache__/
 tests/host/test_mfm
 tests/host/test_title
+tests/host/test_settings

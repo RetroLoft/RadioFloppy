@@ -1,6 +1,9 @@
 /*
- * Emulated drive configuration (compile time for now; later via the web
- * interface). Replaces the DS0/DS1 jumpers of a real floppy drive.
+ * Emulated drive configuration: which drive-select line the emulator
+ * answers to, like the DS0/DS1 jumper of a real floppy drive. Chosen in
+ * the settings (external flash, settings.h), set once at start-up by
+ * drive_set_select_line() before drive_init(), never changed while the
+ * drive runs.
  */
 #pragma once
 
@@ -12,14 +15,18 @@
 #define EMU_DS0 PIN_FDD_DS0     /* Shugart pin 10, GPIO4 */
 #define EMU_DS1 PIN_FDD_DS1     /* Shugart pin 12, GPIO5 */
 
-// Verander alleen deze regel om de drive-select-ingang te kiezen:
-#define EMU_SELECT_LINE EMU_DS1
-
-#if EMU_SELECT_LINE != EMU_DS0 && EMU_SELECT_LINE != EMU_DS1
-#error "EMU_SELECT_LINE must be EMU_DS0 or EMU_DS1"
-#endif
+/* The select line in use (DRAM, read by the GPIO ISR). Default DS1 = B:. */
+extern gpio_num_t emu_select_line;
+#define EMU_SELECT_LINE emu_select_line
 
 #define EMU_SELECT_NAME ((EMU_SELECT_LINE) == EMU_DS0 ? "DS0" : "DS1")
+#define EMU_DRIVE_NAME  ((EMU_SELECT_LINE) == EMU_DS0 ? "A:" : "B:")
+
+/* ds: 0 = DS0 (drive A:), 1 = DS1 (drive B:). Only before drive_init(). */
+static inline void drive_set_select_line(int ds)
+{
+    emu_select_line = ds == 0 ? EMU_DS0 : EMU_DS1;
+}
 
 /*
  * The one place that decides whether the Atari is talking to our drive.

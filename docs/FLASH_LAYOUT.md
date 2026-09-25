@@ -1,135 +1,181 @@
-# RadioFloppy external flash layout — slot store
+# RadioFloppy external flash layout — block-based image library
 
 Floppy images live on the external SPI NOR flash U2, separate from the
-ESP32-S3 firmware flash. No file system: a 64 KiB metadata area and 20 fixed
-image slots. All addresses and sizes are defined once, in
-`main/flash_layout.h`.
+ESP32-S3 firmware flash. No file system: the flash is divided into logical
+blocks; block 0 holds the catalog and the settings, all other blocks hold
+image data. An image is an ordered list of blocks, which do not have to be
+contiguous. All constants are in `main/flash_layout.h`, the code in
+`main/image_store.c` (host tests: `tests/host/test_image_store.c`).
 
-Fitted chip: Infineon/Cypress **S25FL128L** (JEDEC `01 60 18`), 16 MiB =
-16 777 216 bytes, 4 KiB erase sectors (`20h`), 64 KiB blocks (`D8h`),
-256-byte pages (`02h`), erased = `0xFF`. Driven by the ESP-IDF generic chip
-driver in single SPI mode (see `main/ext_flash.c`).
+Fitted chip: Infineon/Cypress **S25FL128L** (JEDEC `01 60 18`), 16 MiB,
+4 KiB erase sectors, 64 KiB erase blocks, 256-byte pages, erased = `0xFF`.
+Driven by the ESP-IDF generic chip driver in single SPI mode
+(`main/ext_flash.c`). Nothing depends on this chip or on 16 MiB: the
+capacity is detected at run time (`esp_flash_get_size`, from the JEDEC ID).
 
-## Memory map
+## Block geometry
 
-| Start      | End        | Size         | Use                                         |
-| ---------- | ---------- | ------------ | ------------------------------------------- |
-| `0x000000` | `0x000FFF` | 4 KiB        | Legacy v1 catalog copy A (read-only)        |
-| `0x001000` | `0x001FFF` | 4 KiB        | Legacy v1 catalog copy B (read-only)        |
-| `0x002000` | `0x002FFF` | 4 KiB        | Slot catalog copy A                         |
-| `0x003000` | `0x003FFF` | 4 KiB        | Slot catalog copy B                         |
-| `0x004000` | `0x00FFFF` | 48 KiB       | Reserved (settings, future metadata)        |
-| `0x010000` | `0xFAFFFF` | 20 × 800 KiB | Image slots 1–20                            |
-| `0xFB0000` | `0xFFFFFF` | 320 KiB      | Reserved, not used                          |
+Block numbers are stored as `uint8_t`, so there are at most **256 logical
+blocks**: block 0 (metadata) plus at most **255 data blocks** (1…255). The
+block size is the smallest power of two of at least 64 KiB for which the
+capacity needs at most 256 blocks:
 
-Slot *n* (index 0–19, shown as 1–20) starts at `0x010000 + n × 0x0C8000`:
+| Flash capacity | Block size | Data blocks | Blocks for 1.5 MiB |
+| -------------: | ---------: | ----------: | -----------------: |
+|          8 MiB |     64 KiB |         127 |                 24 |
+|         16 MiB |     64 KiB |         255 |                 24 |
+|         32 MiB |    128 KiB |         255 |                 12 |
+|         64 MiB |    256 KiB |         255 |                  6 |
+|        128 MiB |    512 KiB |         255 |                  3 |
 
-| Slot | Start      | Slot | Start      | Slot | Start      | Slot | Start      |
-| ---- | ---------- | ---- | ---------- | ---- | ---------- | ---- | ---------- |
-| 1    | `0x010000` | 6    | `0x3F8000` | 11   | `0x7E0000` | 16   | `0xBC8000` |
-| 2    | `0x0D8000` | 7    | `0x4C0000` | 12   | `0x8A8000` | 17   | `0xC90000` |
-| 3    | `0x1A0000` | 8    | `0x588000` | 13   | `0x970000` | 18   | `0xD58000` |
-| 4    | `0x268000` | 9    | `0x650000` | 14   | `0xA38000` | 19   | `0xE20000` |
-| 5    | `0x330000` | 10   | `0x718000` | 15   | `0xB00000` | 20   | `0xEE8000` |
+Block *n* starts at `n × block_size`. A logical block is not an erase unit:
+it is erased in 4 KiB sectors / 64 KiB erase blocks as needed, and only as
+far as an image actually uses it.
 
-Each slot is 800 KiB = 819 200 bytes = 200 erase sectors and holds at most
-one unmodified image of 1 byte … 800 KiB. Only the real image length is
-part of the disk: the rest of the slot is never read, checksummed or used
-for the geometry.
+The fitted 16 MiB chip: **64 KiB blocks, 255 data blocks** (blocks 1–255 =
+`0x010000`–`0xFFFFFF`).
 
-## Slot catalog (one 4 KiB sector per copy, little endian)
+## Block 0
 
-| Offset | Size    | Content                                              |
-| ------ | ------- | ---------------------------------------------------- |
-| 0      | 32      | Header                                               |
-| 32     | 20 × 64 | Slot records, slot 1 first                           |
-| 1312   | 2780    | Unused (`0xFF`)                                      |
-| 4092   | 4       | Commit word `0x21544D43` ("CMT!"), written **last**  |
+Whatever the block size, only the first 64 KiB of block 0 are used:
+
+| Start      | End        | Size   | Use                 |
+| ---------- | ---------- | ------ | ------------------- |
+| `0x000000` | `0x005FFF` | 24 KiB | Catalog copy A      |
+| `0x006000` | `0x00BFFF` | 24 KiB | Catalog copy B      |
+| `0x00C000` | `0x00CFFF` | 4 KiB  | Settings copy A     |
+| `0x00D000` | `0x00DFFF` | 4 KiB  | Settings copy B     |
+| `0x00E000` | `0x00FFFF` | 8 KiB  | Reserved            |
+
+## Catalog (one 24 KiB copy, little endian)
+
+| Offset | Size     | Content                                               |
+| ------ | -------- | ----------------------------------------------------- |
+| 0      | 64       | Header                                                |
+| 64     | 255 × 96 | Image records (at most one image per data block)      |
+| 24 544 | 28       | Unused (`0xFF`)                                       |
+| 24 572 | 4        | Commit word `0x21544D43` ("CMT!"), written **last**   |
 
 Header:
 
-| Offset | Type | Field       | Value                                             |
-| ------ | ---- | ----------- | ------------------------------------------------- |
-| 0      | u32  | magic       | `0x4C534652` ("RFSL")                             |
-| 4      | u16  | version     | 1                                                 |
-| 6      | u16  | header_size | 32                                                |
-| 8      | u32  | generation  | +1 on every catalog write; highest valid wins     |
-| 12     | u16  | record_size | 64                                                |
-| 14     | u16  | slot_count  | 20                                                |
-| 16     | u32  | slot_base   | `0x010000`                                        |
-| 20     | u32  | slot_size   | `0x0C8000`                                        |
-| 24     | u32  | crc32       | CRC-32 over header + records, this field as 0     |
-| 28     | 4    | pad         | `0xFF`                                            |
+| Offset | Type | Field                | Value                                         |
+| ------ | ---- | -------------------- | --------------------------------------------- |
+| 0      | u32  | magic                | `0x4C494652` ("RFIL")                         |
+| 4      | u16  | version              | 2 (1 was the 20-slot catalog "RFSL")          |
+| 6      | u16  | header_size          | 64                                            |
+| 8      | u32  | generation           | +1 on every catalog write; highest valid wins |
+| 12     | u32  | crc32                | CRC-32 over header + records, this field = 0  |
+| 16     | u32  | capacity             | Flash size the catalog was made for           |
+| 20     | u32  | block_size           | Logical block size                            |
+| 24     | u16  | data_blocks          | Number of data blocks                         |
+| 26     | u16  | record_size          | 96                                            |
+| 28     | u16  | record_count         | 255                                           |
+| 30     | u8   | max_blocks_per_image | 24                                            |
+| 31     | u8   | reserved             | 0                                             |
+| 32     | u32  | max_image_size       | 1 572 864 (1.5 MiB)                           |
+| 36     | u16  | next_id              | Id for the next new image                     |
+| 38     | 26   | reserved             | 0                                             |
 
-Slot record:
+Image record (96 bytes):
 
-| Offset | Type     | Field  | Meaning                                              |
-| ------ | -------- | ------ | ---------------------------------------------------- |
-| 0      | char[40] | name   | title, first 40 characters; NUL terminated if shorter |
-| 40     | u32      | size   | real image length in bytes                           |
-| 44     | u32      | crc32  | CRC-32 (IEEE, as zlib `crc32()`) over `size` bytes   |
-| 48     | u8       | format | 1 = `.ST`                                            |
-| 49     | u8       | status | `0xFF` empty, 1 valid, 2 building, 3 deleted         |
-| 50     | char[14] | name_ext | title continuation (characters 41-52), NUL terminated; `0xFF` = none (older records) |
+| Offset | Type      | Field          | Meaning                                                     |
+| ------ | --------- | -------------- | ----------------------------------------------------------- |
+| 0      | u16       | id             | Image id 1–65535, fixed for the life of the image           |
+| 2      | u16       | sequence       | Display order; changing it never moves data                 |
+| 4      | u8        | status         | `0xFF` unused record, `0x01` valid, `0x02` incomplete       |
+| 5      | u8        | format         | `0x01` = `.ST`                                              |
+| 6      | u8        | storage_format | `0x00` = RAW (the only one for now; reserved for compression) |
+| 7      | u8        | block_count    | Blocks used (0 when incomplete)                             |
+| 8      | u32       | original_size  | Image size in bytes                                         |
+| 12     | u32       | stored_size    | Bytes in the blocks (RAW: = original_size)                  |
+| 16     | u32       | crc32          | CRC-32 (IEEE, as zlib `crc32()`) of the image               |
+| 20     | u8[24]    | blocks         | Block numbers in image byte order (unused entries 0)        |
+| 44     | char[52]  | name           | Title, NUL terminated when shorter than 52 characters       |
 
-Titles are at most 52 characters. A record written before `name_ext` existed has `0xFF` there
-and reads as its 40-character `name`.
+Image byte *o* is in block `blocks[o / block_size]` at offset
+`o % block_size`. `main/image_store.c` (`image_store_read`) is the only code
+that turns image offsets into flash addresses; the MFM encoder gets the
+whole image from PSRAM and knows nothing about blocks.
 
-The start address is not stored: it follows from the slot number.
+### Validation when loading
 
-### Validation at start-up
+A catalog copy is used only if magic, version, sizes, CRC and commit word
+are right, the geometry in the header equals the detected one, and every
+record is consistent:
 
-1. Read both copies. A copy is valid when magic, version, header/record
-   size, slot count, slot base, slot size, CRC-32 and commit word all match.
-2. The valid copy with the highest generation is used.
-3. No valid copy: if both catalog sectors are erased the store is **blank**
-   (not initialised); otherwise it is **invalid/unknown** and nothing in the
-   metadata area is ever written.
-4. A slot is only used when its status is *valid*, its size is 1 … 800 KiB,
-   its format is known and its name is NUL terminated; when loading, the
-   CRC-32 of the `size` bytes must match.
+- status valid or incomplete (or unused); ids unique and not 0;
+- valid: `1 ≤ original_size ≤ 1.5 MiB`, `storage_format` RAW,
+  `stored_size == original_size`, `block_count` = the blocks that size
+  needs, at most 24 and at most the blocks of 1.5 MiB at this block size;
+- every block number in 1…`data_blocks`, and no block used twice (across
+  all valid records);
+- incomplete: `block_count` 0.
 
-### Writing the catalog
+Otherwise the other copy is used; if neither is usable, nothing is written
+(see *States* below).
 
-The current copy is never modified: the new catalog (generation + 1) is
-written to the other sector — erase, program, read back and compare — and
-only then does it get its commit word.
+### Updates
 
-## Slot operations (`main/slot_store.h`)
+A catalog update never touches the copy in use: the new catalog
+(generation + 1) is written to the other copy, read back and only then
+given its commit word. A power cut during an update leaves the previous
+generation in place.
 
-| Operation     | What happens                                                         |
-| ------------- | -------------------------------------------------------------------- |
-| prepare       | slot must be empty/deleted/building; record → *building*; erase only `ceil(size / 4 KiB)` sectors from the slot start |
-| write         | program data, bounds checked against the announced size              |
-| commit        | read the whole image back, compare CRC-32, only then → *valid*       |
-| delete        | record → *deleted* (catalog only; bytes erased when the slot is reused) |
-| find free     | empty first, then deleted, then interrupted (*building*)             |
-| load          | *valid* only; reads exactly `size` bytes and checks the CRC-32       |
+**New image:** size ≤ 1.5 MiB → pick free blocks (lowest numbers first,
+not necessarily contiguous; free = not in any valid record) → erase and
+program only those blocks (the last one only as far as needed) → read the
+image back through its block list and check the CRC-32 → catalog update
+with the record *valid*. A power cut before that leaves no record; the
+blocks count as free again.
 
-An interrupted upload stays *building* and is never used. Replacing a *valid*
-slot in place is refused (delete first); a power-fail-safe replace is not
-implemented yet. Erases never leave the target slot: ESP-IDF only uses a
-64 KiB block erase for blocks that lie completely inside the requested range.
+**Delete:** catalog update without the record. The blocks are free at
+once; they are erased only when reused.
 
-## Legacy v1 catalog
+**Replace** (keeps id and sequence): first check that the old blocks plus
+the free blocks suffice (else nothing changes) → catalog update with the
+old record *incomplete* and without blocks → use the old blocks first, then
+free ones → erase, program, read back, CRC → catalog update with the record
+*valid*. Replacing therefore works on a nearly full flash. If it fails, the
+old image is lost, but the record stays *incomplete* and is never offered
+as a disk.
 
-The first external-flash firmware used a variable-length layout ("RFCT"
-catalog at `0x000000` / `0x001000`, images from `0x010000`). The slot
-firmware only reads it:
+**Order:** the image moves to a position and all sequences are renumbered
+1…n (catalog update only).
 
-- If the slot store is blank and a legacy image named `DISK_EXTERNAL_IMAGE`
-  exists, it is loaded through the legacy catalog and the log says
-  `MIGRATION TO SLOTS PENDING`.
-- With `DISK_MIGRATE_LEGACY 1` (`main/disk_image.h`) a blank slot store takes
-  over every legacy image that already starts at a slot address and fits a
-  slot, after checking its CRC-32. Only the slot catalog is written; image
-  bytes and legacy sectors are not touched.
+### States
 
-## Tests
+| State        | Condition                                                     | Action                          |
+| ------------ | ------------------------------------------------------------- | ------------------------------- |
+| `valid`      | A usable catalog copy                                         | —                               |
+| `blank`      | Both catalog copies erased                                    | Empty catalog written at once   |
+| `old_format` | 20-slot catalog ("RFSL" at `0x2000`/`0x3000`) or first catalog ("RFCT" at `0x0000`/`0x1000`) | Not read; `POST /api/v1/storage/format` |
+| `invalid`    | Unknown/damaged data, or a catalog for another flash size     | Not touched; format on request only |
 
-`tests/host/run.sh` builds `main/slot_store.c` and `main/legacy_catalog.c`
-against a RAM model of the NOR flash (program only clears bits, erase per
-4 KiB sector, every erase recorded) and checks the layout bounds, blank /
-invalid detection, upload, erase ranges, untouched neighbours and reserved
-tail, CRC failure, interrupted upload, delete/reuse, A/B fallback and the
-legacy migration.
+Formatting erases both catalog copies and writes an empty catalog
+(generation 1) to copy A; image data is not erased (its blocks are free and
+get erased when reused). There is no migration from the 20-slot format.
+
+## Settings (one 4 KiB sector per copy, little endian)
+
+Device settings (`main/settings.c`): same scheme as the catalog. A save
+erases and writes the copy *not* in use (generation + 1), reads it back and
+only then writes the commit word; the valid copy with the highest generation
+wins. Until anything is saved, the firmware uses its menuconfig defaults.
+
+| Offset | Type     | Field          | Meaning                                         |
+| ------ | -------- | -------------- | ----------------------------------------------- |
+| 0      | u32      | magic          | `0x54534652` ("RFST")                           |
+| 4      | u16      | version        | 2 (version 1 = 148 bytes without drive_select, still read as DS1) |
+| 6      | u16      | size           | record size in bytes (152)                      |
+| 8      | u32      | generation     | +1 on every save                                |
+| 12     | u32      | crc32          | CRC-32 over the record with this field = 0      |
+| 16     | char[33] | hostname       | NUL terminated                                  |
+| 49     | char[33] | wifi_ssid      | NUL terminated, empty = no network              |
+| 82     | char[65] | wifi_pass      | NUL terminated (plain text)                     |
+| 147    | u8       | wifi_security  | 0 WPA2/WPA3, 1 WPA3 only, 2 WPA/WPA2, 3 open    |
+| 148    | u8       | drive_select   | 0 = DS0 (drive A:), 1 = DS1 (drive B:)          |
+| 149    | 3        | padding        | 0                                               |
+| 4092   | u32      | commit         | `0x21544D43` ("CMT!"), written last             |
+
+The WiFi password is stored in plain text: anyone with the board in hand can
+read the flash chip.

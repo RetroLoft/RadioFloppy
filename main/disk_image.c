@@ -1,8 +1,9 @@
 /*
  * The active floppy. See disk_image.h.
  *
- * Images are raw .ST sector dumps (80 cylinders, 9 x 512 bytes, 1 or 2
- * sides), from the external flash slot store or a temporary upload. Every
+ * Images are raw .ST sector dumps (79-84 cylinders, 9-11 x 512 bytes, 1 or
+ * 2 sides), from the external flash image library (read completely into
+ * PSRAM through the image reader) or a temporary upload. Every
  * track is encoded once into a PSRAM track buffer (80 x 2 x 12500 bytes),
  * so a STEP or SIDE change never waits for encoding; side 1 of a
  * single-sided image is an unformatted track. New images go into the
@@ -20,15 +21,14 @@
 #include "drive_emu.h"
 #include "st_image.h"
 #include "ext_flash.h"
-#include "legacy_catalog.h"
-#include "slot_store.h"
+#include "image_store.h"
 
 uint8_t *volatile disk_tracks;
 volatile uint32_t disk_track_cells = MFM_TRACK_CELLS;
 
 static uint8_t *track_buf[2];       /* A/B track buffers in PSRAM */
 static int active_buf;              /* index of the buffer in use */
-static disk_info_t current = { .source = DISK_SRC_NONE, .slot = -1 };
+static disk_info_t current = { .source = DISK_SRC_NONE };
 static portMUX_TYPE info_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /* .ST order: cylinder, then head, then sectors 1..9. */
@@ -183,105 +183,69 @@ void disk_get_current(disk_info_t *info)
     portEXIT_CRITICAL(&info_lock);
 }
 
-void disk_note_slot_changed(int slot)
+void disk_note_image_changed(uint16_t image_id)
 {
     portENTER_CRITICAL(&info_lock);
-    if (current.source == DISK_SRC_FLASH && current.slot == slot) {
-        current.slot_changed = true;
+    if (current.source == DISK_SRC_FLASH && current.image_id == image_id) {
+        current.image_changed = true;
     }
     portEXIT_CRITICAL(&info_lock);
 }
 
-/* Log the slot catalog and any legacy v1 catalog. */
-static void report_store(slot_store_state_t st)
+/* Log the image library. */
+static void report_store(store_state_t st)
 {
+    const rf_geometry_t *g = image_store_geometry();
+
     switch (st) {
-    case SLOT_STORE_VALID: {
-        int used = 0;
-        for (int i = 0; i < RF_SLOT_COUNT; i++) {
-            used += slot_store_is_valid(i);
-        }
-        printf("Slot catalog: OK (generation %lu, %d of %d slots in use)\n",
-               (unsigned long)slot_store_generation(), used, RF_SLOT_COUNT);
-        for (int i = 0; i < RF_SLOT_COUNT; i++) {
-            const slot_record_t *r = slot_store_record(i);
-            if (r->status == SLOT_EMPTY) {
-                continue;
+    case STORE_VALID: {
+        store_usage_t u;
+        image_store_usage(&u);
+        printf("Image library: OK (generation %lu), %u KiB blocks, %u of %u blocks used (%u%%), "
+               "%u image(s)\n", (unsigned long)image_store_generation(),
+               (unsigned)(g->block_size / 1024), u.blocks_used, u.blocks_total, u.used_percent,
+               u.images);
+        image_record_t *list = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*list),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        int n = list ? image_store_list(list, IMG_MAX_RECORDS) : 0;
+        for (int i = 0; i < n; i++) {
+            char title[IMG_TITLE_SIZE];
+            image_store_title(&list[i], title);
+            printf("  #%-3u id %-4u %-10s %-40.40s %8lu bytes, blocks", list[i].sequence,
+                   list[i].id, list[i].status == IMG_VALID ? "valid" : "incomplete", title,
+                   (unsigned long)list[i].original_size);
+            /* Block list as ranges, e.g. 1-6,20-26 (diagnostics only). */
+            for (int b = 0; b < list[i].block_count; b++) {
+                int e = b;
+                while (e + 1 < list[i].block_count && list[i].blocks[e + 1] == list[i].blocks[e] + 1) {
+                    e++;
+                }
+                printf("%s%u", b ? "," : " ", list[i].blocks[b]);
+                if (e > b) {
+                    printf("-%u", list[i].blocks[e]);
+                }
+                b = e;
             }
-            char title[SLOT_TITLE_SIZE];
-            slot_record_title(r, title);
-            printf("  Slot %2d: %-9s %-24s %7lu bytes\n", i + 1,
-                   r->status == SLOT_VALID ? (slot_store_is_valid(i) ? "valid" : "BAD")
-                   : r->status == SLOT_BUILDING ? "building"
-                   : r->status == SLOT_DELETED ? "deleted" : "unknown",
-                   title, (unsigned long)r->size);
+            printf("\n");
         }
+        free(list);
         break;
     }
-    case SLOT_STORE_BLANK:
-        printf("Slot catalog: empty (RadioFloppy slot storage not initialised)\n");
+    case STORE_OLD_FORMAT:
+        printf("Image library: external flash holds an OLD RadioFloppy format - not used.\n"
+               "  Initialise it (all images are erased): POST /api/v1/storage/format\n");
+        break;
+    case STORE_INVALID:
+        printf("Image library: INVALID or unknown data in block 0 (or other flash size) - "
+               "not touched\n");
         break;
     default:
-        printf("Slot catalog: INVALID or unknown data in the catalog sectors - not touched\n");
+        printf("Image library: not available\n");
         break;
     }
-
-    if (legacy_catalog_open()) {
-        printf("Legacy v1 catalog found (generation %lu):\n",
-               (unsigned long)legacy_catalog_generation());
-        for (int i = 0; i < LEGACY_RECORDS; i++) {
-            const legacy_record_t *l = legacy_catalog_record(i);
-            if (l->status != LEGACY_ST_VALID) {
-                continue;
-            }
-            int slot = -1;
-            for (int s = 0; s < RF_SLOT_COUNT; s++) {
-                if (l->start == rf_slot_start(s)) {
-                    slot = s;
-                }
-            }
-            printf("  \"%.*s\" %lu bytes at 0x%06lx", LEGACY_NAME_LEN, l->name,
-                   (unsigned long)l->size, (unsigned long)l->start);
-            if (slot >= 0 && l->size <= RF_IMAGE_MAX_SIZE) {
-                printf(" = start of slot %d (migratable without moving data)\n", slot + 1);
-            } else {
-                printf(" (not slot aligned: would have to be copied)\n");
-            }
-        }
-    }
 }
 
-/* Read size bytes from addr into a new PSRAM buffer and check the CRC. */
-static esp_err_t read_image(uint32_t addr, uint32_t size, uint32_t crc,
-                            const uint8_t **data)
-{
-    if (size == 0 || size > RF_IMAGE_MAX_SIZE) {
-        printf("ERROR: registered image size %lu is invalid\n", (unsigned long)size);
-        return ESP_ERR_INVALID_SIZE;
-    }
-    uint8_t *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        return ESP_ERR_NO_MEM;
-    }
-    int64_t t0 = esp_timer_get_time();
-    esp_err_t err = ext_flash_read(addr, buf, size);
-    if (err == ESP_OK && slot_store_crc32(0, buf, size) != crc) {
-        err = ESP_ERR_INVALID_CRC;
-    }
-    if (err != ESP_OK) {
-        printf("ERROR: reading the image failed: %s\n",
-               err == ESP_ERR_INVALID_CRC ? "CRC mismatch" : esp_err_to_name(err));
-        free(buf);
-        return err;
-    }
-    printf("Image size: %lu bytes\n", (unsigned long)size);
-    printf("Image CRC: OK (%08lx, read in %lld ms)\n", (unsigned long)crc,
-           (esp_timer_get_time() - t0) / 1000);
-    *data = buf;
-    return ESP_OK;
-}
-
-/* Find the start-up image: by name, else the first valid slot, else legacy. */
+/* Find the start-up image: by name, else the first valid image in sequence order. */
 static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
 {
     esp_err_t err = ext_flash_init();
@@ -289,64 +253,51 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
         return err;
     }
 
-    slot_store_state_t st = slot_store_open();
+    store_state_t st = image_store_open(ext_flash_size());
     report_store(st);
 
-#if DISK_MIGRATE_LEGACY
-    if (st == SLOT_STORE_BLANK && legacy_catalog_open()) {
-        int n = 0;
-        err = slot_store_migrate_legacy(&n);
-        printf("Legacy migration: %s, %d image(s) taken over into the slot catalog "
-               "(no image data moved)\n", err == ESP_OK ? "OK" : esp_err_to_name(err), n);
-        report_store(slot_store_state());
-    }
-#endif
-
-    int slot = slot_store_find_name(DISK_BOOT_IMAGE);
-    for (int i = 0; slot < 0 && i < RF_SLOT_COUNT; i++) {
-        if (slot_store_is_valid(i)) {
-            slot = i;
-        }
-    }
-    const uint8_t *data = NULL;
-    if (slot >= 0) {
-        const slot_record_t *r = slot_store_record(slot);
-        char title[SLOT_TITLE_SIZE];
-        slot_record_title(r, title);
-        printf("Selected image: %s\n", title);
-        printf("Source: EXTERNAL SPI FLASH, slot %d (0x%06lx)\n", slot + 1,
-               (unsigned long)rf_slot_start(slot));
-        err = read_image(rf_slot_start(slot), r->size, r->crc32, &data);
-        if (err == ESP_OK) {
-            *info = (disk_info_t) { .source = DISK_SRC_FLASH, .slot = slot,
-                                    .size = r->size, .crc32 = r->crc32 };
-            memcpy(info->name, title, sizeof(info->name));
-        }
-    } else if (legacy_catalog_open()) {
-        err = ESP_ERR_NOT_FOUND;
-        for (int i = 0; i < LEGACY_RECORDS; i++) {
-            const legacy_record_t *l = legacy_catalog_record(i);
-            if (l->status != LEGACY_ST_VALID ||
-                strncmp(l->name, DISK_BOOT_IMAGE, LEGACY_NAME_LEN) != 0) {
-                continue;
+    uint16_t id = image_store_find_name(DISK_BOOT_IMAGE);
+    if (!id) {
+        image_record_t *list = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*list),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        int n = list ? image_store_list(list, IMG_MAX_RECORDS) : 0;
+        for (int i = 0; i < n && !id; i++) {
+            if (list[i].status == IMG_VALID) {
+                id = list[i].id;
             }
-            printf("Selected image: %.*s\n", LEGACY_NAME_LEN, l->name);
-            printf("Source: EXTERNAL SPI FLASH, legacy v1 catalog (0x%06lx) - "
-                   "MIGRATION TO SLOTS PENDING\n", (unsigned long)l->start);
-            err = read_image(l->start, l->size, l->crc32, &data);
-            if (err == ESP_OK) {
-                *info = (disk_info_t) { .source = DISK_SRC_FLASH, .slot = -1,
-                                        .size = l->size, .crc32 = l->crc32 };
-                memcpy(info->name, l->name, sizeof(info->name) - 1);
-            }
-            break;
         }
-    } else {
+        free(list);
+    }
+    image_record_t r;
+    if (!id || !image_store_get(id, &r)) {
         printf("No image on the external flash.\n");
-        err = ESP_ERR_NOT_FOUND;
+        return ESP_ERR_NOT_FOUND;
     }
-    *raw = (uint8_t *)data;
-    return err;
+    char title[IMG_TITLE_SIZE];
+    image_store_title(&r, title);
+    printf("Selected image: %s\n", title);
+    printf("Source: EXTERNAL SPI FLASH, image id %u, %u block(s)\n", r.id, r.block_count);
+
+    uint8_t *buf = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    int64_t t0 = esp_timer_get_time();
+    err = image_store_load(id, buf);        /* reads through the block list, checks the CRC */
+    if (err != ESP_OK) {
+        printf("ERROR: reading the image failed: %s\n",
+               err == ESP_ERR_INVALID_CRC ? "CRC mismatch" : esp_err_to_name(err));
+        free(buf);
+        return err;
+    }
+    printf("Image size: %lu bytes\n", (unsigned long)r.original_size);
+    printf("Image CRC: OK (%08lx, read in %lld ms)\n", (unsigned long)r.crc32,
+           (esp_timer_get_time() - t0) / 1000);
+    *info = (disk_info_t) { .source = DISK_SRC_FLASH, .image_id = id,
+                            .size = r.original_size, .crc32 = r.crc32 };
+    memcpy(info->name, title, sizeof(info->name));
+    *raw = buf;
+    return ESP_OK;
 }
 
 /* Runs under the drive lock: buffer and track length change together. */
@@ -373,7 +324,7 @@ esp_err_t disk_image_init(void)
            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
     uint8_t *raw = NULL;
-    disk_info_t info = { .source = DISK_SRC_NONE, .slot = -1 };
+    disk_info_t info = { .source = DISK_SRC_NONE };
     st_info_t st = { 0 };
     if (load_boot_image(&raw, &info) == ESP_OK &&
         st_check_image(raw, info.size, &st) != ST_OK) {
@@ -382,7 +333,7 @@ esp_err_t disk_image_init(void)
         raw = NULL;
     }
     if (!raw) {
-        info = (disk_info_t) { .source = DISK_SRC_NONE, .slot = -1 };
+        info = (disk_info_t) { .source = DISK_SRC_NONE };
         strcpy(info.name, "(no disk)");
         printf("No disk inserted - upload or activate one through the API.\n");
     }
@@ -440,6 +391,6 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
      * before anybody may overwrite that buffer. */
     vTaskDelay(pdMS_TO_TICKS(20));
     printf("Active disk: %s (%s)\n", info->name,
-           info->source == DISK_SRC_PSRAM ? "PSRAM" : "flash slot");
+           info->source == DISK_SRC_PSRAM ? "PSRAM" : "image library");
     return ESP_OK;
 }

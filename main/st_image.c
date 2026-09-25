@@ -46,17 +46,25 @@ static int find_geometry(uint32_t size, int want_spt, int want_heads, int *cyl, 
     return 0;
 }
 
-/* Could size be a .ST dump with some Atari geometry at all? */
+/*
+ * Could size be a .ST dump with some Atari geometry at all? Double density
+ * (8-11 sectors) is tried first, so that e.g. 79/2/9 is not reported as
+ * 79/1/18; then HD/ED (12-21 sectors), reported as unsupported.
+ */
 static int plausible_geometry(uint32_t sectors, int *cyl, int *spt, int *heads)
 {
-    for (int h = 1; h <= 2; h++) {
-        for (int s = 8; s <= 11; s++) {
-            for (int c = 40; c <= 86; c++) {
-                if ((uint32_t)(c * s * h) == sectors) {
-                    *cyl = c;
-                    *spt = s;
-                    *heads = h;
-                    return 1;
+    static const int range[2][2] = { { 8, 11 }, { 12, 21 } };
+
+    for (int pass = 0; pass < 2; pass++) {
+        for (int h = 1; h <= 2; h++) {
+            for (int s = range[pass][0]; s <= range[pass][1]; s++) {
+                for (int c = 40; c <= 86; c++) {
+                    if ((uint32_t)(c * s * h) == sectors) {
+                        *cyl = c;
+                        *spt = s;
+                        *heads = h;
+                        return 1;
+                    }
                 }
             }
         }
@@ -89,7 +97,7 @@ st_result_t st_check_size(uint32_t size, st_info_t *info)
     if (plausible_geometry(size / SECTOR, &c, &s, &h)) {
         snprintf(info->detail, sizeof(info->detail),
                  "%lu bytes looks like %d cyl / %d sides / %d sectors; supported is "
-                 "80-84 cyl / 1-2 sides / 9-11 sectors", (unsigned long)size, c, h, s);
+                 "79-84 cyl / 1-2 sides / 9-11 sectors", (unsigned long)size, c, h, s);
         return ST_UNSUPPORTED;
     }
     snprintf(info->detail, sizeof(info->detail),
@@ -105,32 +113,28 @@ st_result_t st_check_image(const uint8_t *data, uint32_t size, st_info_t *info)
     }
 
     /*
-     * Boot sector BPB. Many game disks have a custom boot sector, so a
-     * missing or odd BPB is only a remark and the size decides. A
-     * consistent BPB picks the geometry: its sectors per track and sides
-     * must fit the file; its total sector count may be smaller (more
-     * tracks formatted than the file system uses), not larger.
+     * The size alone decides the geometry: no supported size fits two
+     * geometries. The boot sector (BPB) is only reported: many game disks
+     * have a custom or stale one, and bad dumps can be shorter than their
+     * file system (the missing tracks then read as unformatted, as on the
+     * real disk).
      */
     int bps = le16(data + 11), spt = le16(data + 24), heads = le16(data + 26);
     int total = le16(data + 19);
-    if (bps == SECTOR && spt >= 8 && spt <= 11 && heads >= 1 && heads <= 2 &&
-        total > 0 && total % (spt * heads) == 0) {
-        int c, s, h;
-        if ((uint32_t)total * SECTOR <= size &&
-            find_geometry(size, spt, heads, &c, &s, &h)) {
-            info->cylinders = c;
-            info->sectors = s;
-            info->heads = h;
-            info->bpb_ok = 1;
-            return ST_OK;
-        }
+    if (bps != SECTOR || spt < 8 || spt > 11 || heads < 1 || heads > 2 || total <= 0) {
         snprintf(info->detail, sizeof(info->detail),
-                 "boot sector describes %d sides / %d sectors / %d total sectors, which does "
-                 "not fit a supported layout of this %lu byte file", heads, spt, total,
-                 (unsigned long)size);
-        return ST_UNSUPPORTED;
+                 "no standard BPB in the boot sector (custom boot sector?)");
+        return ST_OK;
+    }
+    if (spt == info->sectors && heads == info->heads &&
+        (uint32_t)total * SECTOR <= size) {
+        info->bpb_ok = 1;
+        return ST_OK;
     }
     snprintf(info->detail, sizeof(info->detail),
-             "no standard BPB in the boot sector (custom boot sector?)");
+             "boot sector: %d sides / %d sectors / %d total; played as the file size says: "
+             "%d cyl / %d sides / %d sectors%s", heads, spt, total,
+             info->cylinders, info->heads, info->sectors,
+             (uint32_t)total * SECTOR > size ? " (image shorter than file system)" : "");
     return ST_OK;
 }

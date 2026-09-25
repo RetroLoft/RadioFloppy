@@ -2,16 +2,18 @@
  * .ST image validation (plain C, also built in the host tests).
  *
  * A .ST file is a raw sector dump without a header, so its geometry
- * follows from the size, refined by the boot sector (BPB). Supported:
- * 80..84 cylinders, 9..11 sectors of 512 bytes, 1 or 2 sides, at most
- * ST_MAX_SIZE bytes (one flash slot).
+ * follows from the size (unambiguous for the supported range); the boot
+ * sector (BPB) is only checked and reported, never a reason to refuse. Supported:
+ * 79..84 cylinders, 9..11 sectors of 512 bytes, 1 or 2 sides, at most
+ * ST_MAX_SIZE bytes (the image library limit, RF_MAX_IMAGE_SIZE; the
+ * largest supported geometry, 84/2/11, is 946 176 bytes).
  */
 #pragma once
 
 #include <stdint.h>
 
-#define ST_MAX_SIZE         819200u     /* 800 KiB = one flash slot */
-#define ST_MIN_CYLS         80
+#define ST_MAX_SIZE         (1536u * 1024u) /* = RF_MAX_IMAGE_SIZE */
+#define ST_MIN_CYLS         79      /* 79: track 79 is played unformatted */
 #define ST_MAX_CYLS         84
 #define ST_MIN_SECTORS      9
 #define ST_MAX_SECTORS      11

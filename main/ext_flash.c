@@ -33,7 +33,22 @@ static esp_flash_t *chip;
 static uint32_t chip_size;
 static uint32_t chip_id;
 
+static esp_err_t ext_flash_probe(void);
+
 esp_err_t ext_flash_init(void)
+{
+    static bool tried;
+    static esp_err_t result;
+
+    if (tried) {                        /* settings and slot store both call it */
+        return result;
+    }
+    tried = true;
+    result = ext_flash_probe();
+    return result;
+}
+
+static esp_err_t ext_flash_probe(void)
 {
     /* WP#/IO2 and IO3/RESET# HIGH: inactive in single SPI mode. */
     gpio_set_level(PIN_NOR_WP, 1);

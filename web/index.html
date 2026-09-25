@@ -52,12 +52,22 @@
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .grow { flex: 1 1 200px; min-width: 0; }
   ul.slots { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-  ul.slots li { display: grid; grid-template-columns: 2.4em 1fr auto; gap: 10px; align-items: center;
+  ul.slots li { display: grid; grid-template-columns: 2.4em minmax(0, 1fr) auto; gap: 10px; align-items: center;
                 padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
   ul.slots li.free { padding: 4px 10px; color: var(--muted); }
   ul.slots li.active { border: 2px solid var(--active); background: var(--active-bg); }
   .slotno { font-weight: 700; text-align: right; color: var(--muted); }
   .slotname { font-weight: 600; word-break: break-word; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .actions button { padding: 5px 10px; }
+  button.icon { padding: 5px 8px; min-width: 32px; }
+  button.danger { background: transparent; color: var(--err); border-color: var(--line); }
+  .meter { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 6px 0 4px; }
+  .meter > div { height: 100%; background: var(--accent); }
+  @media (max-width: 560px) {
+    ul.slots li { grid-template-columns: 2em minmax(0, 1fr); }
+    ul.slots li .actions { grid-column: 1 / -1; justify-content: flex-start; }
+  }
   fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 0; }
   legend { padding: 0 6px; }
   label.opt { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; }
@@ -65,22 +75,44 @@
   progress { width: 100%; height: 14px; }
   .code { font-family: ui-monospace, monospace; font-size: 12px; }
   details summary { cursor: pointer; }
+  .hdr-right { display: flex; align-items: center; gap: 10px; }
+  a.iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px;
+              border-radius: 8px; border: 1px solid var(--line); color: var(--text); }
+  a.iconbtn:hover, a.iconbtn[aria-current=page] { color: var(--accent); border-color: var(--accent); }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 16px; }
+  #offline { margin-top: 16px; }
+  dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  dl.kv dt { color: var(--muted); }
+  dl.kv dd { margin: 0; word-break: break-word; }
+  a { color: var(--accent); }
 </style>
 </head>
 <body>
 <header>
   <h1>RadioFloppy</h1>
-  <span id="conn" class="conn">Connecting…</span>
+  <div class="hdr-right">
+    <span id="conn" class="conn">Connecting…</span>
+    <a id="gear" class="iconbtn" href="#settings" title="Settings" aria-label="Settings">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </a>
+  </div>
 </header>
 
-<main>
+<div class="wrap">
   <div id="offline" class="banner err hidden" role="alert">
     <strong>Connection lost.</strong> RadioFloppy cannot be reached; the information shown may be
     out of date. Reconnecting automatically…
   </div>
+</div>
+
+<main id="home">
 
   <section aria-labelledby="h-current">
-    <h2 id="h-current">Current Floppy <span class="muted small">— what the Atari sees in drive B: right now</span></h2>
+    <h2 id="h-current">Current Floppy <span class="muted small">— what the Atari sees in drive <span id="drvname">B:</span> right now</span></h2>
     <div id="current" class="current" aria-live="polite"><span class="muted">Loading…</span></div>
   </section>
 
@@ -93,21 +125,18 @@
         <input id="file" type="file" accept=".st,.ST" class="grow" aria-label="Choose a .ST file">
       </div>
       <p id="fileinfo" class="small muted" style="margin:0">
-        Supported: <strong>.ST</strong> images with <strong>80–84 tracks</strong>,
-        <strong>9, 10 or 11 sectors</strong> per track and 1 or 2 sides, up to <strong>800 KiB</strong>
-        (e.g. 360, 400, 410, 440, 720 or 800 KiB). .MSA and .HFE are not supported yet.
+        Supported: <strong>.ST</strong> images with <strong>79–84 tracks</strong>,
+        <strong>9, 10 or 11 sectors</strong> per track and 1 or 2 sides (up to 924 KiB)
+        (e.g. 360, 400, 410, 440, 720, 800 or 880 KiB). .MSA and .HFE are not supported yet.
       </p>
       <fieldset>
         <legend>Destination</legend>
         <label class="opt"><input type="radio" name="dest" value="psram" checked>
           <span><strong>Load temporarily</strong> — straight into the drive, not stored.
           <span class="muted small">Gone after a restart; ideal for quickly trying something.</span></span></label>
-        <label class="opt"><input type="radio" name="dest" value="free">
-          <span><strong>Store in the first free slot</strong></span></label>
-        <label class="opt"><input type="radio" name="dest" value="slot">
-          <span><strong>Store in slot</strong>
-          <select id="slotsel" aria-label="Slot number"></select>
-          <span class="muted small">(an existing image is overwritten)</span></span></label>
+        <label class="opt"><input type="radio" name="dest" value="flash">
+          <span><strong>Add to my floppy images</strong>
+          <span class="muted small">Stored on RadioFloppy; to replace an image, use its Replace button.</span></span></label>
         <label class="opt" id="actrow"><input type="checkbox" id="activate">
           <span>Also load after uploading</span></label>
       </fieldset>
@@ -119,9 +148,12 @@
     </form>
   </section>
 
-  <section aria-labelledby="h-slots">
-    <h2 id="h-slots">Flash slots <span id="slotcount" class="muted small"></span></h2>
-    <ul id="slots" class="slots"><li class="free">Loading…</li></ul>
+  <section aria-labelledby="h-images">
+    <h2 id="h-images">My floppy images <span id="imgcount" class="muted small"></span></h2>
+    <div id="storage" class="small" style="margin-bottom:12px"></div>
+    <div id="storefix" class="banner err hidden" style="margin-bottom:12px"></div>
+    <ul id="images" class="slots"><li class="free">Loading…</li></ul>
+    <input type="file" id="replacefile" accept=".st,.ST" class="hidden" aria-hidden="true" tabindex="-1">
   </section>
 
   <section aria-labelledby="h-auth" id="authsec" class="hidden">
@@ -140,6 +172,72 @@
   <p class="small muted" style="text-align:center">RadioFloppy — API <span class="code">/api/v1/</span></p>
 </main>
 
+<main id="settings" class="hidden">
+  <div class="row"><a href="#">← Back to the floppies</a></div>
+  <h2 style="margin:0;font-size:20px">Settings</h2>
+
+  <div id="setmsg" class="banner hidden" role="status" aria-live="polite"></div>
+
+  <div id="restartbox" class="banner warn hidden">
+    <div class="row" style="justify-content:space-between">
+      <span>A restart is needed for the new settings to take effect.</span>
+      <button type="button" id="restart">Restart now</button>
+    </div>
+  </div>
+
+  <section aria-labelledby="h-device">
+    <h2 id="h-device">Device</h2>
+    <form id="hostform" class="current" autocomplete="off">
+      <label for="hostname"><strong>Host name</strong></label>
+      <div class="row">
+        <input id="hostname" type="text" class="grow" maxlength="32" spellcheck="false" autocapitalize="off"
+               pattern="[A-Za-z0-9]([A-Za-z0-9\-]{0,30}[A-Za-z0-9])?" required>
+        <button id="hostsave" type="submit">Save</button>
+      </div>
+      <p class="small muted" style="margin:0">The name of RadioFloppy on your network, also used for its
+        WiFi setup network. Letters, digits and ‘-’, up to 32 characters. Takes effect after a restart.</p>
+    </form>
+  </section>
+
+  <section aria-labelledby="h-drive">
+    <h2 id="h-drive">Floppy drive</h2>
+    <form id="driveform" class="current" autocomplete="off">
+      <label class="opt"><input type="radio" name="ds" value="DS1">
+        <span><strong>Drive B:</strong> (DS1) <span class="muted small">— external second drive, next to the
+        internal drive A:. Usual choice.</span></span></label>
+      <label class="opt"><input type="radio" name="ds" value="DS0">
+        <span><strong>Drive A:</strong> (DS0) <span class="muted small">— only when the Atari has no working
+        internal drive A: (disconnected), or RadioFloppy replaces it.</span></span></label>
+      <div class="row"><button id="drivesave" type="submit">Save</button>
+        <span id="driveinfo" class="small muted"></span></div>
+    </form>
+  </section>
+
+  <section aria-labelledby="h-wifi">
+    <h2 id="h-wifi">WiFi</h2>
+    <dl class="kv">
+      <dt>Network</dt><dd id="w-ssid">–</dd>
+      <dt>Address</dt><dd id="w-ip">–</dd>
+      <dt>Signal</dt><dd id="w-rssi">–</dd>
+    </dl>
+    <p class="small muted" style="margin-bottom:0">To join another network, hold both buttons for
+      <strong>10 seconds</strong>: RadioFloppy restarts in WiFi setup mode (the floppy drive is off
+      meanwhile). The display shows which network to join.</p>
+  </section>
+
+  <section aria-labelledby="h-fw">
+    <h2 id="h-fw">Firmware</h2>
+    <dl class="kv">
+      <dt>Version</dt><dd id="fw-ver">–</dd>
+      <dt>ESP-IDF</dt><dd id="fw-idf">–</dd>
+    </dl>
+    <div class="row" style="margin-top:12px">
+      <button type="button" id="updcheck" class="secondary">Check for updates</button>
+      <span id="updresult" class="small muted"></span>
+    </div>
+  </section>
+</main>
+
 <script>
 "use strict";
 
@@ -148,23 +246,26 @@
 const S = {
   token: "",            // only in memory
   authRequired: false,  // from /status: a token is configured on the device
-  slots: null,          // last /slots answer
+  images: null,         // last /images answer: images in sequence order
+  storage: null,        // storage use from /images
   current: null,        // last /current answer
   busy: false,          // own load or upload in progress: no polling
   online: null,
+  drive: "B:",          // drive letter RadioFloppy answers as (from /status)
+  driveDirty: false,    // settings: drive choice changed, not saved yet
   failures: 0,
 };
 
 const POLL_CURRENT_MS = 3000;
-const POLL_SLOTS_MS = 15000;
-const MAX_SIZE = 819200;
-// Same rule as the firmware (st_image.c): 80-84 tracks, 9-11 sectors, 1-2 sides.
+const POLL_IMAGES_MS = 15000;
+const MAX_SIZE = 1572864;               // 1.5 MiB: storage limit of the image library
+// Same rule as the firmware (st_image.c): 79-84 tracks, 9-11 sectors, 1-2 sides.
 function geometryOf(size) {
   if (size % 512 || size > MAX_SIZE) return null;
   const n = size / 512;
   for (let s = 9; s <= 11; s++)
     for (let h = 1; h <= 2; h++)
-      if (n % (s * h) === 0 && n / (s * h) >= 80 && n / (s * h) <= 84)
+      if (n % (s * h) === 0 && n / (s * h) >= 79 && n / (s * h) <= 84)
         return { cylinders: n / (s * h), sectors: s, sides: h };
   return null;
 }
@@ -210,26 +311,30 @@ function api(method, path, body, timeoutMs = 12000, auth = false) {
 
 const ERRORS = {
   UNAUTHORIZED: "The API token is missing or wrong. Enter the correct token under Admin access.",
-  NO_FREE_SLOT: "All 20 slots are in use. Choose ‘Store in slot’ to overwrite an existing image.",
+  NO_SPACE: "Not enough free storage. Delete an image first, or replace an existing one.",
   INVALID_IMAGE: "This file is not a valid .ST disk image.",
-  UNSUPPORTED_GEOMETRY: "This .ST format is not supported. Images need 80–84 tracks, 9–11 sectors per track and 1 or 2 sides.",
-  IMAGE_TOO_LARGE: "The file is too large: 800 KiB at most.",
-  DRIVE_BUSY: "The Atari is still using drive B:. The current floppy was not replaced.",
+  UNSUPPORTED_GEOMETRY: "This .ST format is not supported. Images need 79–84 tracks, 9–11 sectors per track and 1 or 2 sides.",
+  IMAGE_TOO_LARGE: "The file is too large: 1.5 MiB at most.",
+  DRIVE_BUSY: "The Atari is still using drive {drive}. The current floppy was not replaced.",
   CHECKSUM_MISMATCH: "The file was damaged in transit. Please try again.",
   UPLOAD_INCOMPLETE: "The upload was interrupted. Please try again.",
   UPLOAD_BUSY: "Another upload is in progress. Wait a moment and try again.",
   UPLOAD_EXPIRED: "The upload expired. Please try again.",
-  SLOT_EMPTY: "This slot holds no valid image.",
-  INVALID_SLOT: "Invalid slot number.",
+  IMAGE_NOT_FOUND: "This image does not exist (any more).",
+  STORAGE_NOT_READY: "The image storage is not ready. See the message under My floppy images.",
+  CONFIRMATION_REQUIRED: "Confirmation missing.",
   INVALID_REQUEST: "The request was not accepted.",
   FLASH_ERROR: "Error reading or writing the flash memory.",
   INSUFFICIENT_MEMORY: "RadioFloppy does not have enough free memory.",
   PREPARE_FAILED: "The floppy could not be prepared.",
+  INVALID_DRIVE_SELECT: "Choose drive A: (DS0) or B: (DS1).",
+  INVALID_HOSTNAME: "Invalid host name: use letters, digits and ‘-’ (not at the start or end), up to 32 characters.",
 };
 
 function errorText(data, status) {
   const e = (data && data.error) || {};
-  const text = ERRORS[e.code] || e.message || ("Unexpected error (HTTP " + status + ").");
+  const text = (ERRORS[e.code] || e.message || ("Unexpected error (HTTP " + status + ")."))
+    .replace("{drive}", S.drive);
   return { text, code: e.code || ("HTTP " + status), detail: e.message || "" };
 }
 
@@ -266,7 +371,7 @@ function setOnline(ok) {
   $("offline").classList.toggle("hidden", ok);
   $("conn").textContent = ok ? "Connected" : "No connection";
   $("conn").className = "conn " + (ok ? "ok" : "bad");
-  document.querySelectorAll("#current, #slots").forEach((el) => el.classList.toggle("stale", !ok));
+  document.querySelectorAll("#current, #images").forEach((el) => el.classList.toggle("stale", !ok));
 }
 
 // ---- Rendering ---------------------------------------------------------------
@@ -282,12 +387,11 @@ function renderCurrent() {
   let origin;
   if (c.source === "psram") {
     origin = '<span class="badge temp">Temporary</span> in working memory (PSRAM), not stored — gone after a restart.';
-  } else if (c.slot) {
-    origin = "From flash slot " + c.slot + ".";
-    if (c.slot_changed_since) {
-      origin += '<div class="banner warn small" style="margin-top:6px">Note: slot ' + c.slot +
-        " has been overwritten or freed since it was loaded. The Atari still reads the version loaded " +
-        "earlier, which no longer matches the current contents of that slot.</div>";
+  } else if (c.image_id) {
+    origin = "From my floppy images.";
+    if (c.image_changed_since) {
+      origin += '<div class="banner warn small" style="margin-top:6px">Note: this image has been ' +
+        "replaced or deleted since it was loaded. The Atari still reads the version loaded earlier.</div>";
     }
   } else {
     origin = "From the flash memory.";
@@ -297,52 +401,76 @@ function renderCurrent() {
     ' · CRC32 <span class="code">' + esc(c.crc32 || "") + "</span></div><div>" + origin + "</div>";
 }
 
-const STATUS_TEXT = { valid: "in use", empty: "empty", deleted: "deleted", incomplete: "incomplete", invalid: "invalid" };
-
-function renderSlots() {
-  const list = $("slots");
-  if (!S.slots) return;
-  const canChange = (!S.authRequired || !!S.token) && !S.busy && S.online !== false;
-  let used = 0;
-  list.innerHTML = "";
-  for (const s of S.slots) {
-    const li = document.createElement("li");
-    const status = STATUS_TEXT[s.status] || s.status;
-    if (s.status === "valid") {
-      used++;
-      li.className = s.active ? "active" : "";
-      li.innerHTML = '<span class="slotno">' + s.slot + '</span>' +
-        '<span><span class="slotname">' + esc(s.name) + '</span>' +
-        (s.active ? ' <span class="badge active">Active</span>' : "") +
-        '<br><span class="small muted">' + kib(s.size) + " · " + status + "</span></span>";
-      const b = document.createElement("button");
-      b.textContent = "Load";
-      b.disabled = !canChange || s.active;
-      b.title = s.active ? "This image is already active"
-              : (S.authRequired && !S.token ? "Enter the API token first" : "");
-      b.addEventListener("click", () => loadSlot(s.slot, s.name));
-      li.appendChild(b);
-    } else {
-      li.className = "free";
-      li.innerHTML = '<span class="slotno">' + s.slot + '</span><span class="small">' + status + "</span><span></span>";
-    }
-    list.appendChild(li);
+function renderStorage() {
+  const st = S.storage;
+  const el = $("storage"), fix = $("storefix");
+  if (!st) { el.textContent = ""; return; }
+  if (st.state !== "valid") {
+    el.textContent = "";
+    fix.classList.remove("hidden");
+    const why = st.state === "old_format"
+      ? "The flash memory still holds the old RadioFloppy slot format."
+      : st.state === "no_flash" ? "No external flash memory was found."
+      : "The flash memory holds unknown or damaged data, or a different flash size.";
+    fix.innerHTML = "<strong>Storage not ready.</strong> " + esc(why) +
+      (st.state === "no_flash" ? "" : ' <button type="button" id="format">Initialise storage (erases all images)</button>');
+    if ($("format")) $("format").addEventListener("click", formatStorage);
+    return;
   }
-  $("slotcount").textContent = "(" + used + " of " + S.slots.length + " in use)";
-  renderSlotSelect();
+  fix.classList.add("hidden");
+  const freeMb = (st.free_bytes / 1048576).toFixed(1);
+  el.innerHTML = "<strong>Storage: " + st.used_percent + "% used</strong>" +
+    '<div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+    st.used_percent + '"><div style="width:' + st.used_percent + '%"></div></div>' +
+    '<span class="muted">' + freeMb + " MB free · " + st.blocks_used + " of " + st.blocks_total +
+    " blocks of " + (st.block_size / 1024) + " KiB</span>";
 }
 
-function renderSlotSelect() {
-  const sel = $("slotsel");
-  const keep = sel.value;
-  sel.innerHTML = "";
-  for (const s of S.slots || []) {
-    const o = document.createElement("option");
-    o.value = s.slot;
-    o.textContent = s.slot + (s.status === "valid" ? " — " + s.name : " — " + (STATUS_TEXT[s.status] || s.status));
-    sel.appendChild(o);
+function button(text, cls, title, disabled, onClick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = text;
+  if (cls) b.className = cls;
+  if (title) { b.title = title; b.setAttribute("aria-label", title); }
+  b.disabled = disabled;
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function renderImages() {
+  const list = $("images");
+  renderStorage();
+  if (!S.images) return;
+  const canChange = (!S.authRequired || !!S.token) && !S.busy && S.online !== false;
+  const lock = S.authRequired && !S.token ? "Enter the API token first" : "";
+  list.innerHTML = "";
+  if (!S.images.length) {
+    list.innerHTML = '<li class="free">No images yet. Add one above.</li>';
   }
-  if (keep) sel.value = keep;
+  S.images.forEach((im, i) => {
+    const li = document.createElement("li");
+    const valid = im.status === "valid";
+    li.className = im.active ? "active" : "";
+    li.innerHTML = '<span class="slotno">' + (i + 1) + '</span>' +
+      '<span><span class="slotname">' + esc(im.name) + '</span>' +
+      (im.active ? ' <span class="badge active">Active</span>' : "") +
+      '<br><span class="small muted">' +
+      (valid ? kib(im.size) : '<span style="color:var(--err)">incomplete — replacing failed; replace or delete it</span>') +
+      "</span></span>";
+    const a = document.createElement("div");
+    a.className = "actions";
+    a.append(
+      button("↑", "secondary icon", "Move up", !canChange || i === 0, () => moveImage(im, i)),
+      button("↓", "secondary icon", "Move down", !canChange || i === S.images.length - 1, () => moveImage(im, i + 2)),
+      button("Load", "", im.active ? "This image is already active" : lock, !canChange || !valid || im.active,
+             () => loadImage(im.id, im.name)),
+      button("Replace…", "secondary", lock, !canChange, () => chooseReplacement(im)),
+      button("Delete", "danger", lock, !canChange, () => deleteImage(im)));
+    li.appendChild(a);
+    list.appendChild(li);
+  });
+  const n = S.images.filter((x) => x.status === "valid").length;
+  $("imgcount").textContent = "(" + n + (n === 1 ? " image)" : " images)");
 }
 
 function renderAuth() {
@@ -354,7 +482,7 @@ function renderAuth() {
     st.innerHTML = '<span class="muted">No token entered — view only. Loading and uploading are disabled.</span>';
   }
   $("upbtn").disabled = (S.authRequired && !S.token) || S.busy;
-  renderSlots();
+  renderImages();
 }
 
 function setBusy(b) {
@@ -374,18 +502,19 @@ async function refreshCurrent() {
     S.current = r.data;
     if (changed) {
       renderCurrent();
-      // The active mark in the list comes from /slots: fetch it when the disk changed.
+      // The active mark in the list comes from /images: fetch it when the disk changed.
       return true;
     }
   }
   return false;
 }
 
-async function refreshSlots() {
-  const r = await api("GET", "/api/v1/slots");
-  if (r.status === 200 && r.data && r.data.slots) {
-    S.slots = r.data.slots;
-    renderSlots();
+async function refreshImages() {
+  const r = await api("GET", "/api/v1/images");
+  if (r.status === 200 && r.data && r.data.images) {
+    S.images = r.data.images;
+    S.storage = r.data.storage;
+    renderImages();
   }
 }
 
@@ -393,6 +522,8 @@ async function refreshStatus() {
   const r = await api("GET", "/api/v1/status");
   if (r.status === 200 && r.data) {
     S.authRequired = !!r.data.auth_required;
+    S.drive = r.data.drive && r.data.drive.select_line === "DS0" ? "A:" : "B:";
+    $("drvname").textContent = S.drive;
     renderAuth();
   }
 }
@@ -400,22 +531,22 @@ async function refreshStatus() {
 async function refreshAll() {
   try {
     await refreshCurrent();
-    await refreshSlots();
+    await refreshImages();
     setOnline(true);
   } catch (e) {
     setOnline(false);
   }
 }
 
-let lastSlots = 0;
+let lastImages = 0;
 async function pollLoop() {
   if (!S.busy) {
     try {
       const changed = await refreshCurrent();
       const now = Date.now();
-      if (changed || now - lastSlots > POLL_SLOTS_MS) {
-        lastSlots = now;
-        await refreshSlots();
+      if (changed || now - lastImages > POLL_IMAGES_MS) {
+        lastImages = now;
+        await refreshImages();
       }
       setOnline(true);
     } catch (e) {
@@ -425,25 +556,84 @@ async function pollLoop() {
   setTimeout(pollLoop, POLL_CURRENT_MS);
 }
 
-// ---- Load a stored slot ------------------------------------------------------
+// ---- My floppy images: load, move, delete, replace ----------------------------
 
-async function loadSlot(slot, name) {
+async function loadImage(id, name) {
   if (S.busy) return;
   setBusy(true);
-  showMsg("warn", "Loading floppy… (slot " + slot + ": " + esc(name) + ")");
+  showMsg("warn", "Loading floppy… (" + esc(name) + ")");
   try {
-    const r = await api("PUT", "/api/v1/current", { slot }, 30000, true);
+    const r = await api("PUT", "/api/v1/current", { image_id: id }, 30000, true);
     if (r.status === 200) {
-      showMsg("ok", "Slot " + slot + " (" + esc(name) + ") is now the active floppy.");
+      showMsg("ok", "“" + esc(name) + "” is now the active floppy.");
     } else if (r.data && r.data.error && r.data.error.code === "DRIVE_BUSY") {
-      showMsg("err", esc(ERRORS.DRIVE_BUSY) + ' <button type="button" id="retry">Try again</button>');
-      $("retry").addEventListener("click", () => loadSlot(slot, name));
+      showMsg("err", esc(ERRORS.DRIVE_BUSY.replace("{drive}", S.drive)) + ' <button type="button" id="retry">Try again</button>');
+      $("retry").addEventListener("click", () => loadImage(id, name));
     } else {
-      showError(r.data, r.status, "Loading slot " + slot + " failed.");
+      showError(r.data, r.status, "Loading “" + name + "” failed.");
     }
   } catch (e) {
     setOnline(false);
     showMsg("err", "No connection to RadioFloppy; it is unknown whether the floppy was changed.");
+  }
+  setBusy(false);
+}
+
+// Only the order changes; no image data is moved.
+async function moveImage(im, position) {
+  if (S.busy) return;
+  setBusy(true);
+  try {
+    const r = await api("PUT", "/api/v1/images/" + im.id, { sequence: position }, 12000, true);
+    if (r.status !== 200) showError(r.data, r.status, "Moving “" + im.name + "” failed.");
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);
+}
+
+async function deleteImage(im) {
+  if (S.busy) return;
+  if (!confirm("Delete “" + im.name + "”?\n\nThe image is removed from RadioFloppy." +
+               (im.active ? " The Atari keeps reading the loaded copy until another floppy is loaded." : ""))) return;
+  setBusy(true);
+  try {
+    const r = await api("DELETE", "/api/v1/images/" + im.id, undefined, 12000, true);
+    if (r.status === 200) showMsg("ok", "“" + esc(im.name) + "” deleted.");
+    else showError(r.data, r.status, "Deleting “" + im.name + "” failed.");
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);
+}
+
+let replaceTarget = null;
+function chooseReplacement(im) {
+  replaceTarget = im;
+  $("replacefile").value = "";
+  $("replacefile").click();
+}
+$("replacefile").addEventListener("change", () => {
+  const file = $("replacefile").files[0];
+  const im = replaceTarget;
+  replaceTarget = null;
+  if (!file || !im) return;
+  if (!confirm("Replace “" + im.name + "” with “" + file.name + "”?\n\nThe old image is lost, " +
+               "even if the upload fails.")) return;
+  uploadFile(file, { filename: file.name, size: file.size, destination: "flash", replace: im.id,
+                     activate: !!im.active });
+});
+
+async function formatStorage() {
+  if (!confirm("Initialise the image storage?\n\nALL images on RadioFloppy are erased. " +
+               "The floppy in the drive stays loaded until the next restart.")) return;
+  setBusy(true);
+  try {
+    const r = await api("POST", "/api/v1/storage/format", { confirm: "ERASE ALL IMAGES" }, 30000, true);
+    if (r.status === 200) showMsg("ok", "The image storage is initialised and empty.");
+    else showError(r.data, r.status, "Initialising failed.");
+  } catch (e) {
+    setOnline(false);
   }
   setBusy(false);
 }
@@ -472,16 +662,15 @@ function destination() {
 function updateUploadForm() {
   const dest = destination();
   $("actrow").classList.toggle("hidden", dest === "psram");
-  $("slotsel").disabled = dest !== "slot";
   const f = $("file").files[0];
   const info = $("fileinfo");
   if (!f) return;
   if (f.size > MAX_SIZE) {
     info.innerHTML = '<span style="color:var(--err)">' + esc(f.name) + " is " + kib(f.size) +
-      ": too large (800 KiB at most).</span>";
+      ": too large (1.5 MiB at most).</span>";
   } else if (!geometryOf(f.size)) {
     info.innerHTML = '<span style="color:var(--warn)">' + esc(f.name) + " is " + f.size +
-      " bytes: probably a format that is not supported yet (80–84 tracks, 9–11 sectors). " +
+      " bytes: probably a format that is not supported yet (79–84 tracks, 9–11 sectors). " +
       "RadioFloppy makes the final check.</span>";
   } else {
     info.innerHTML = esc(f.name) + ": " + kib(f.size) + ", " + geometryText(geometryOf(f.size)) + ".";
@@ -525,20 +714,16 @@ async function upload(ev) {
   ev.preventDefault();
   const file = $("file").files[0];
   if (!file) { showMsg("err", "Choose a .ST file first."); return; }
-  if (file.size > MAX_SIZE) { showMsg("err", esc(ERRORS.IMAGE_TOO_LARGE)); return; }
   const dest = destination();
-  const body = { filename: file.name, size: file.size, destination: dest === "psram" ? "psram" : "flash" };
-  if (dest === "slot") {
-    body.slot = Number($("slotsel").value);
-    const s = (S.slots || []).find((x) => x.slot === body.slot);
-    if (s && s.status === "valid" &&
-        !confirm("Slot " + body.slot + " holds “" + s.name + "”.\n\nThis image will be overwritten and lost, " +
-                 "even if the upload fails. Continue?")) {
-      return;
-    }
-  }
+  const body = { filename: file.name, size: file.size, destination: dest };
   if (dest !== "psram") body.activate = $("activate").checked;
+  await uploadFile(file, body);
+}
 
+// Upload file with the options in body (POST /uploads, then PUT the bytes).
+async function uploadFile(file, body) {
+  if (file.size > MAX_SIZE) { showMsg("err", esc(ERRORS.IMAGE_TOO_LARGE)); return; }
+  if (S.busy) return;
   setBusy(true);
   setStage("Reading file…", null);
   $("msg").classList.add("hidden");
@@ -558,17 +743,16 @@ async function upload(ev) {
       if (u.destination === "psram") {
         showMsg("ok", "“" + esc(u.name) + "” is loaded as a temporary floppy (PSRAM, not stored).");
       } else {
-        showMsg("ok", "“" + esc(u.name) + "” is stored in slot " + u.stored_in_slot +
+        showMsg("ok", "“" + esc(u.name) + "” is " + (body.replace ? "stored (replaced)" : "added to my floppy images") +
           (u.active ? " and is now the active floppy." : "."));
       }
-      $("file").value = "";
-    } else if (u.error && u.error.code === "DRIVE_BUSY" && u.stored_in_slot) {
+      if (!body.replace) $("file").value = "";
+    } else if (u.error && u.error.code === "DRIVE_BUSY" && u.image_id) {
       setStage("");
-      showMsg("warn", "“" + esc(u.name) + "” <strong>is stored</strong> in slot " + u.stored_in_slot +
-        ", but not loaded: the Atari is still using drive B:. " +
-        '<button type="button" id="later">Load slot ' + u.stored_in_slot + " now</button>");
-      const slot = u.stored_in_slot, name = u.name;
-      $("later").addEventListener("click", () => loadSlot(slot, name));
+      showMsg("warn", "“" + esc(u.name) + "” <strong>is stored</strong>, but not loaded: the Atari is still " +
+        'using drive ' + S.drive + '. <button type="button" id="later">Load it now</button>');
+      const id = u.image_id, name = u.name;
+      $("later").addEventListener("click", () => loadImage(id, name));
     } else {
       setStage("");
       showError(u, r.status, "Upload failed.");
@@ -576,11 +760,138 @@ async function upload(ev) {
   } catch (e) {
     setStage("");
     setOnline(false);
-    showMsg("err", "The connection to RadioFloppy was lost during the upload. Check the slot list afterwards.");
+    showMsg("err", "The connection to RadioFloppy was lost during the upload. Check My floppy images afterwards.");
   } finally {
     if (S.busy) setBusy(false);
   }
 }
+
+// ---- Settings ----------------------------------------------------------------
+
+function showSetMsg(kind, text) {
+  const m = $("setmsg");
+  m.className = "banner " + kind;
+  m.textContent = text;
+  m.classList.toggle("hidden", !text);
+}
+
+function signalText(rssi) {
+  if (!rssi) return "–";
+  const q = rssi >= -60 ? "good" : rssi >= -72 ? "fair" : "weak";
+  return q + " (" + rssi + " dBm)";
+}
+
+function renderSettings(d) {
+  if (document.activeElement !== $("hostname")) $("hostname").value = d.hostname;
+  $("w-ssid").textContent = d.wifi.ssid || "–";
+  $("w-ip").textContent = d.wifi.connected ? d.wifi.ip : "not connected";
+  $("w-rssi").textContent = d.wifi.connected ? signalText(d.wifi.rssi) : "–";
+  $("fw-ver").textContent = d.firmware.version;
+  $("fw-idf").textContent = d.firmware.idf;
+  $("restartbox").classList.toggle("hidden", !d.restart_required);
+  if (!S.driveDirty) {
+    document.querySelectorAll("input[name=ds]").forEach((r) => { r.checked = r.value === d.drive_select; });
+  }
+  $("driveinfo").textContent = d.drive_select !== d.drive_select_active
+    ? "Now answering as " + (d.drive_select_active === "DS0" ? "A:" : "B:") + " until the restart."
+    : "";
+  const locked = S.authRequired && !S.token;
+  $("hostsave").disabled = locked;
+  $("drivesave").disabled = locked;
+  $("restart").disabled = locked;
+}
+
+async function refreshSettings() {
+  try {
+    const r = await api("GET", "/api/v1/settings");
+    if (r.status === 200 && r.data) renderSettings(r.data);
+    setOnline(true);
+  } catch (e) {
+    setOnline(false);
+  }
+}
+
+$("hostform").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  showSetMsg("", "");
+  $("hostsave").disabled = true;
+  try {
+    const r = await api("PUT", "/api/v1/settings", { hostname: $("hostname").value.trim() }, 12000, true);
+    if (r.status === 200) {
+      renderSettings(r.data);
+      showSetMsg("ok", "Host name saved.");
+    } else {
+      showSetMsg("err", errorText(r.data, r.status).text);
+    }
+  } catch (e) {
+    showSetMsg("err", "RadioFloppy cannot be reached.");
+  }
+  $("hostsave").disabled = false;
+});
+
+document.querySelectorAll("input[name=ds]").forEach((r) =>
+  r.addEventListener("change", () => { S.driveDirty = true; }));
+$("driveform").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const sel = document.querySelector("input[name=ds]:checked");
+  if (!sel) return;
+  showSetMsg("", "");
+  $("drivesave").disabled = true;
+  try {
+    const r = await api("PUT", "/api/v1/settings", { drive_select: sel.value }, 12000, true);
+    if (r.status === 200) {
+      S.driveDirty = false;
+      renderSettings(r.data);
+      showSetMsg("ok", "Floppy drive saved: " + (sel.value === "DS0" ? "A: (DS0)" : "B: (DS1)") + ".");
+    } else {
+      showSetMsg("err", errorText(r.data, r.status).text);
+    }
+  } catch (e) {
+    showSetMsg("err", "RadioFloppy cannot be reached.");
+  }
+  $("drivesave").disabled = false;
+});
+
+$("restart").addEventListener("click", async () => {
+  if (!confirm("Restart RadioFloppy now? The Atari loses the floppy drive for a few seconds.")) return;
+  try {
+    const r = await api("POST", "/api/v1/system/restart", {}, 12000, true);
+    if (r.status === 202) {
+      $("restartbox").classList.add("hidden");
+      showSetMsg("warn", "RadioFloppy is restarting. This page reconnects by itself.");
+      setTimeout(refreshSettings, 8000);
+    } else {
+      showSetMsg("err", errorText(r.data, r.status).text);
+    }
+  } catch (e) {
+    showSetMsg("err", "RadioFloppy cannot be reached.");
+  }
+});
+
+$("updcheck").addEventListener("click", async () => {
+  $("updresult").textContent = "Checking…";
+  try {
+    const r = await api("GET", "/api/v1/system/update");
+    $("updresult").textContent = r.data && r.data.message ? r.data.message : "Check failed.";
+  } catch (e) {
+    $("updresult").textContent = "RadioFloppy cannot be reached.";
+  }
+});
+
+function route() {
+  const settings = location.hash === "#settings";
+  $("home").classList.toggle("hidden", settings);
+  $("settings").classList.toggle("hidden", !settings);
+  if (settings) {
+    $("gear").setAttribute("aria-current", "page");
+    showSetMsg("", "");
+    $("updresult").textContent = "";
+    refreshSettings();
+  } else {
+    $("gear").removeAttribute("aria-current");
+  }
+}
+window.addEventListener("hashchange", route);
 
 // ---- Start -------------------------------------------------------------------
 
@@ -603,11 +914,12 @@ updateUploadForm();
   try {
     await refreshStatus();
     await refreshAll();
-    lastSlots = Date.now();
+    lastImages = Date.now();
   } catch (e) {
     setOnline(false);
   }
   renderAuth();
+  route();
   setTimeout(pollLoop, POLL_CURRENT_MS);
 })();
 </script>

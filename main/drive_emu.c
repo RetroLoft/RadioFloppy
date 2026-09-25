@@ -26,6 +26,7 @@ static bool armed;
 static volatile int current_track = 0;  /* assumed at track 0 at start-up */
 static QueueHandle_t event_queue;
 static volatile uint32_t select_edges;
+gpio_num_t emu_select_line = EMU_DS1;
 static volatile uint32_t ignored_steps;
 static bool disk_present;
 static int64_t media_change_until_us;
@@ -121,7 +122,7 @@ void drive_init(void)
     };
     ESP_ERROR_CHECK(gpio_config(&cfg));
 
-    static const struct {
+    const struct {                  /* select line: from the settings */
         gpio_num_t pin;
         gpio_int_type_t edge;
         drive_event_type_t type;

@@ -33,3 +33,10 @@ void oled_start_disk_title(void);
 void oled_show_network(void);
 
 #define OLED_INFO_MS    10000
+
+/* Two lines in the large font; stays until the next restart (used just
+ * before one). Any task. */
+void oled_show_message(const char *line1, const char *line2);
+
+/* Four lines in the small font (setup mode, no title task running). */
+void oled_show_lines(const char *l0, const char *l1, const char *l2, const char *l3);

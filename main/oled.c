@@ -216,6 +216,19 @@ static void draw_disk_title(int wifi)
 
 #define EV_TITLE        (1u << 0)   /* active disk changed */
 #define EV_NETWORK      (1u << 1)   /* show network info */
+#define EV_MESSAGE      (1u << 2)   /* fixed message until restart */
+
+static char message[2][OLED_COLS + 1];
+
+static void draw_message(void)
+{
+    oled_gfx_clear();
+    oled_gfx_text_wrapped((TITLE_PITCH - TITLE_HEIGHT) / 2, 1, TITLE_HEIGHT, TITLE_PITCH,
+                          message[0]);
+    oled_gfx_text_wrapped(TITLE_PITCH + (TITLE_PITCH - TITLE_HEIGHT) / 2, 1, TITLE_HEIGHT,
+                          TITLE_PITCH, message[1]);
+    oled_flush();
+}
 
 static void draw_network(void)
 {
@@ -224,7 +237,7 @@ static void draw_network(void)
     wifi_net_get_status(&w);
     oled_gfx_clear();
     oled_gfx_text_wrapped((TITLE_PITCH - TITLE_HEIGHT) / 2, 1, TITLE_HEIGHT, TITLE_PITCH,
-                          CONFIG_RADIOFLOPPY_HOSTNAME);
+                          w.hostname);
     oled_gfx_text_wrapped(TITLE_PITCH + (TITLE_PITCH - TITLE_HEIGHT) / 2, 1, TITLE_HEIGHT,
                           TITLE_PITCH, !w.configured ? "WiFi off"
                                        : w.connected ? w.ip : "No connection");
@@ -311,6 +324,13 @@ static void title_task_fn(void *arg)
         xTaskNotifyWait(0, UINT32_MAX, &ev, pdMS_TO_TICKS(POLL_MS));
         TickType_t now = xTaskGetTickCount();
 
+        if (ev & EV_MESSAGE) {
+            draw_message();
+            while (ready) {                 /* until the restart */
+                xTaskNotifyWait(0, UINT32_MAX, NULL, portMAX_DELAY);
+            }
+            break;
+        }
         if (ev & EV_NETWORK) {
             network = true;
             network_until = now + pdMS_TO_TICKS(OLED_INFO_MS);
@@ -369,4 +389,32 @@ void oled_start_disk_title(void)
     disk_set_change_callback(disk_changed);
     /* Low priority, on core 1 with WiFi: away from the floppy ISRs. */
     xTaskCreatePinnedToCore(title_task_fn, "oled", 3072, NULL, 2, &title_task, 1);
+}
+
+void oled_show_message(const char *line1, const char *line2)
+{
+    if (!ready) {
+        return;
+    }
+    snprintf(message[0], sizeof(message[0]), "%s", line1);
+    snprintf(message[1], sizeof(message[1]), "%s", line2);
+    if (title_task) {
+        xTaskNotify(title_task, EV_MESSAGE, eSetBits);
+    } else {
+        draw_message();
+    }
+}
+
+void oled_show_lines(const char *l0, const char *l1, const char *l2, const char *l3)
+{
+    const char *lines[] = { l0, l1, l2, l3 };
+
+    if (!ready || title_task) {
+        return;
+    }
+    oled_gfx_clear();
+    for (int i = 0; i < OLED_ROWS && i < 4; i++) {
+        oled_gfx_text(0, i * OLED_LINE_H, lines[i]);
+    }
+    oled_flush();
 }

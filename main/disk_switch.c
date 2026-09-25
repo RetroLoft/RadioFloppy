@@ -16,7 +16,7 @@
 #include "esp_timer.h"
 
 #include "disk_switch.h"
-#include "slot_store.h"
+#include "image_store.h"
 #include "st_image.h"
 
 #define ACTIVATE_TIMEOUT_MS 3000    /* wait for our drive to be deselected */
@@ -56,30 +56,30 @@ static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, sw
     return ESP_OK;
 }
 
-static esp_err_t slot_locked(int slot, switch_error_t *e)
+static esp_err_t image_locked(uint16_t id, switch_error_t *e)
 {
     char name[12];
-    snprintf(name, sizeof(name), "%d", slot + 1);
+    image_record_t r;
+    snprintf(name, sizeof(name), "%u", id);
 
-    if (!slot_store_is_valid(slot)) {
-        return fail(e, "SLOT_EMPTY", "slot %s holds no valid image", name);
+    if (!image_store_get(id, &r) || !image_store_is_valid(&r)) {
+        return fail(e, "IMAGE_NOT_FOUND", "image %s does not exist or holds no valid data", name);
     }
-    const slot_record_t *r = slot_store_record(slot);
-    disk_info_t info = { .source = DISK_SRC_FLASH, .slot = slot,
-                         .size = r->size, .crc32 = r->crc32 };
-    slot_record_title(r, info.name);
+    disk_info_t info = { .source = DISK_SRC_FLASH, .image_id = id,
+                         .size = r.original_size, .crc32 = r.crc32 };
+    image_store_title(&r, info.name);
 
-    uint8_t *raw = heap_caps_malloc(r->size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *raw = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!raw) {
-        return fail(e, "INSUFFICIENT_MEMORY", "no PSRAM to load slot %s", name);
+        return fail(e, "INSUFFICIENT_MEMORY", "no PSRAM to load image %s", name);
     }
     int64_t t0 = esp_timer_get_time();
-    esp_err_t err = slot_store_load(slot, raw);     /* checks the CRC */
+    esp_err_t err = image_store_load(id, raw);      /* whole image, CRC checked */
     load_us = esp_timer_get_time() - t0;
     st_info_t st;
     if (err != ESP_OK) {
-        fail(e, "FLASH_ERROR", "reading slot %s failed", name);
-    } else if (st_check_image(raw, r->size, &st) != ST_OK) {
+        fail(e, "FLASH_ERROR", "reading image %s failed", name);
+    } else if (st_check_image(raw, r.original_size, &st) != ST_OK) {
         err = ESP_FAIL;
         e->code = "UNSUPPORTED_GEOMETRY";
         snprintf(e->msg, sizeof(e->msg), "%s", st.detail);
@@ -96,7 +96,7 @@ static esp_err_t slot_locked(int slot, switch_error_t *e)
 static esp_err_t psram_locked(switch_error_t *e)
 {
     if (!psram_raw) {
-        return fail(e, "SLOT_EMPTY", "no PSRAM image%s", "");
+        return fail(e, "IMAGE_NOT_FOUND", "no PSRAM image%s", "");
     }
     return activate_locked(psram_raw, &psram_info, e);
 }
@@ -106,10 +106,10 @@ void disk_switch_init(void)
     lock = xSemaphoreCreateMutex();
 }
 
-esp_err_t disk_switch_slot(int slot, switch_error_t *e)
+esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e)
 {
     xSemaphoreTake(lock, portMAX_DELAY);
-    esp_err_t err = slot_locked(slot, e);
+    esp_err_t err = image_locked(image_id, e);
     xSemaphoreGive(lock);
     return err;
 }
@@ -148,30 +148,38 @@ bool disk_switch_psram_info(disk_info_t *info)
 
 esp_err_t disk_switch_step(int dir, switch_error_t *e)
 {
-    /* List entries: -1 = PSRAM image, 0..19 = slot. */
-    int list[RF_SLOT_COUNT + 1];
+    /* List entries: 0 = PSRAM image, else a library image id. */
+    static image_record_t *recs;        /* 24 KiB: in PSRAM, not internal RAM */
+    static uint16_t list[IMG_MAX_RECORDS + 1];
     int n = 0;
 
+    if (!recs) {
+        recs = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*recs), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!recs) {
+            return fail(e, "INSUFFICIENT_MEMORY", "no memory for the image list%s", "");
+        }
+    }
     xSemaphoreTake(lock, portMAX_DELAY);
     if (psram_raw) {
-        list[n++] = -1;
+        list[n++] = 0;
     }
-    for (int i = 0; i < RF_SLOT_COUNT; i++) {
-        if (slot_store_is_valid(i)) {
-            list[n++] = i;
+    int count = image_store_list(recs, IMG_MAX_RECORDS);
+    for (int i = 0; i < count; i++) {
+        if (image_store_is_valid(&recs[i])) {
+            list[n++] = recs[i].id;
         }
     }
     if (n == 0) {
         xSemaphoreGive(lock);
-        return fail(e, "SLOT_EMPTY", "no images to choose from%s", "");
+        return fail(e, "IMAGE_NOT_FOUND", "no images to choose from%s", "");
     }
 
     disk_info_t cur;
     disk_get_current(&cur);
     int pos = -1;
     for (int i = 0; i < n; i++) {
-        if ((list[i] == -1 && cur.source == DISK_SRC_PSRAM) ||
-            (list[i] >= 0 && cur.source == DISK_SRC_FLASH && cur.slot == list[i])) {
+        if ((list[i] == 0 && cur.source == DISK_SRC_PSRAM) ||
+            (list[i] != 0 && cur.source == DISK_SRC_FLASH && cur.image_id == list[i])) {
             pos = i;
         }
     }
@@ -183,7 +191,7 @@ esp_err_t disk_switch_step(int dir, switch_error_t *e)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err = list[next] < 0 ? psram_locked(e) : slot_locked(list[next], e);
+    esp_err_t err = list[next] == 0 ? psram_locked(e) : image_locked(list[next], e);
     xSemaphoreGive(lock);
     return err;
 }

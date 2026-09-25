@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RadioFloppy WiFi setup</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #5f6878; --line: #d8dce3;
+    --accent: #1f6feb; --active: #1a7f37; --active-bg: #e8f5ec; --warn: #9a6700;
+    --warn-bg: #fff8e1; --err: #c62828; --err-bg: #fdecec; --btn: #1f6feb; --btn-text: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11141a; --card: #1b2029; --text: #e6e9ef; --muted: #9aa3b2; --line: #2e3542;
+      --accent: #58a6ff; --active: #3fb950; --active-bg: #16271c; --warn: #d29922;
+      --warn-bg: #2a2413; --err: #f85149; --err-bg: #2d1718; --btn: #2f81f7;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 12px 16px; background: var(--card); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 20px; }
+  main { max-width: 560px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  h2 { margin: 0 0 12px; font-size: 17px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .banner { padding: 10px 14px; border-radius: 8px; border: 1px solid; }
+  .banner.err { background: var(--err-bg); border-color: var(--err); color: var(--err); }
+  .banner.warn { background: var(--warn-bg); border-color: var(--warn); color: var(--warn); }
+  .banner.ok { background: var(--active-bg); border-color: var(--active); color: var(--active); }
+  .hidden { display: none !important; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; padding: 9px 16px;
+           border: 1px solid var(--btn); background: var(--btn); color: var(--btn-text); }
+  button.secondary { background: transparent; color: var(--accent); border-color: var(--line); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  label.field { display: grid; gap: 4px; font-weight: 600; }
+  input[type=text], input[type=password], select { font: inherit; font-weight: 400; width: 100%;
+           padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--text); }
+  form { display: grid; gap: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  ul.nets { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  ul.nets button { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 8px;
+                   text-align: left; background: transparent; color: var(--text);
+                   border: 1px solid var(--line); }
+  ul.nets button.sel { border: 2px solid var(--accent); }
+  ul.nets button:disabled { opacity: .5; }
+  .bars { font-family: ui-monospace, monospace; color: var(--muted); white-space: nowrap; }
+  label.check { display: flex; gap: 8px; align-items: center; font-weight: 400; }
+</style>
+</head>
+<body>
+<header><h1>RadioFloppy <span class="muted" style="font-weight:400">WiFi setup</span></h1></header>
+
+<main>
+  <div id="reason" class="banner warn hidden" role="status"></div>
+
+  <section id="setup" aria-labelledby="h-net">
+    <h2 id="h-net">Choose your WiFi network</h2>
+    <form id="form" autocomplete="off">
+      <div>
+        <div class="row" style="justify-content:space-between;margin-bottom:6px">
+          <strong>Networks nearby</strong>
+          <button type="button" id="scan" class="secondary">Scan again</button>
+        </div>
+        <ul id="nets" class="nets"><li class="muted small">Scanning…</li></ul>
+      </div>
+
+      <label class="field">Network name (SSID)
+        <input type="text" id="ssid" maxlength="32" required autocapitalize="off" spellcheck="false">
+      </label>
+
+      <label class="field">Security
+        <select id="security">
+          <option value="wpa2">WPA2/WPA3 Personal (recommended)</option>
+          <option value="wpa3">WPA3 Personal only</option>
+          <option value="wpa">WPA/WPA2 Personal (older routers)</option>
+          <option value="open">Open network (no password)</option>
+        </select>
+      </label>
+
+      <div id="passbox">
+        <label class="field">Password
+          <input type="password" id="password" maxlength="64" autocapitalize="off" spellcheck="false">
+        </label>
+        <label class="check small"><input type="checkbox" id="show"> Show password</label>
+        <div id="keep" class="small muted hidden">Leave empty to keep the saved password.</div>
+      </div>
+
+      <div id="err" class="banner err hidden" role="alert"></div>
+
+      <div class="row">
+        <button type="submit" id="save">Save and connect</button>
+        <button type="button" id="exit" class="secondary hidden">Leave setup without changes</button>
+      </div>
+    </form>
+  </section>
+
+  <section id="done" class="hidden" aria-live="polite">
+    <h2>Saved</h2>
+    <p id="donetext"></p>
+    <ol class="small">
+      <li>Connect this phone or computer to your own WiFi network again.</li>
+      <li>Hold both RadioFloppy buttons for 3 seconds: the display shows its address.</li>
+      <li>Open that address in your browser.</li>
+    </ol>
+    <p class="small muted">If RadioFloppy cannot connect, it returns to setup mode within a minute
+      and shows why. Join its setup network again to correct the settings.</p>
+  </section>
+
+  <p class="small muted" style="text-align:center">The floppy drive is off while setup mode is active.
+    <span id="fw"></span></p>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let info = null;
+
+async function api(method, path, body) {
+  const opt = { method, cache: "no-store", headers: {} };
+  if (body !== undefined) {
+    opt.headers["Content-Type"] = "application/json";
+    opt.body = JSON.stringify(body);
+  }
+  const resp = await fetch(path, opt);
+  let data = null;
+  try { data = await resp.json(); } catch (e) { data = null; }
+  return { status: resp.status, data };
+}
+
+const JOIN_ERRORS = {
+  not_found: "the network was not found. Check the name and that RadioFloppy is within range.",
+  wrong_password: "the password seems to be wrong.",
+  security: "the network uses a different security type. Check the Security setting.",
+  no_address: "the network did not hand out an address (DHCP).",
+  no_connection: "no connection could be made.",
+};
+
+function bars(rssi) {
+  const n = rssi >= -60 ? 3 : rssi >= -72 ? 2 : 1;
+  return "▂▄▆".slice(0, n) + "   ".slice(n);
+}
+
+function showErr(text) {
+  $("err").textContent = text;
+  $("err").classList.toggle("hidden", !text);
+}
+
+function updatePassbox() {
+  const open = $("security").value === "open";
+  $("passbox").classList.toggle("hidden", open);
+  const same = info && info.wifi.password_set && $("ssid").value === info.wifi.ssid;
+  $("keep").classList.toggle("hidden", !same || open);
+}
+
+function renderNets(list) {
+  const ul = $("nets");
+  ul.textContent = "";
+  if (!list.length) {
+    ul.innerHTML = '<li class="muted small">No networks found. Type the name below.</li>';
+    return;
+  }
+  for (const n of list) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.disabled = !n.supported;
+    const name = document.createElement("span");
+    name.textContent = n.ssid + (n.security === "open" ? "" : " 🔒");
+    const sig = document.createElement("span");
+    sig.className = "bars";
+    sig.textContent = n.supported ? bars(n.rssi) : "not supported";
+    b.append(name, sig);
+    b.addEventListener("click", () => {
+      document.querySelectorAll("ul.nets button").forEach((x) => x.classList.remove("sel"));
+      b.classList.add("sel");
+      $("ssid").value = n.ssid;
+      $("security").value = n.security;
+      updatePassbox();
+      if (n.security !== "open") $("password").focus();
+    });
+    if (n.ssid === $("ssid").value) b.classList.add("sel");
+    li.append(b);
+    ul.append(li);
+  }
+}
+
+async function scan() {
+  $("scan").disabled = true;
+  $("nets").innerHTML = '<li class="muted small">Scanning…</li>';
+  try {
+    const r = await api("GET", "/api/v1/setup/scan");
+    renderNets(r.status === 200 ? r.data.networks : []);
+  } catch (e) {
+    $("nets").innerHTML = '<li class="muted small">Scan failed. Type the name below.</li>';
+  }
+  $("scan").disabled = false;
+}
+
+async function load() {
+  const r = await api("GET", "/api/v1/setup");
+  info = r.data;
+  $("fw").textContent = "Firmware " + info.firmware + ".";
+  $("ssid").value = info.wifi.ssid;
+  $("security").value = info.wifi.security;
+  $("exit").classList.toggle("hidden", !info.can_exit);
+  const rb = $("reason");
+  if (info.join_error) {
+    rb.className = "banner err";
+    rb.textContent = "Could not connect to “" + info.join_error.ssid + "”: " +
+      (JOIN_ERRORS[info.join_error.reason] || JOIN_ERRORS.no_connection);
+  } else if (info.reason === "buttons") {
+    rb.className = "banner warn";
+    rb.textContent = "Setup mode was started with the buttons. Choose a network, or leave setup without changes.";
+  } else {
+    rb.className = "banner ok";
+    rb.textContent = "Welcome! Choose the WiFi network RadioFloppy should join.";
+  }
+  updatePassbox();
+}
+
+$("show").addEventListener("change", () => {
+  $("password").type = $("show").checked ? "text" : "password";
+});
+$("security").addEventListener("change", updatePassbox);
+$("ssid").addEventListener("input", updatePassbox);
+$("scan").addEventListener("click", scan);
+
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  showErr("");
+  const body = { ssid: $("ssid").value, security: $("security").value,
+                 password: $("security").value === "open" ? "" : $("password").value };
+  $("save").disabled = true;
+  try {
+    const r = await api("PUT", "/api/v1/setup/wifi", body);
+    if (r.status === 200) {
+      $("setup").classList.add("hidden");
+      $("reason").classList.add("hidden");
+      $("done").classList.remove("hidden");
+      $("donetext").textContent = "RadioFloppy restarts and connects to “" + r.data.ssid +
+        "”. Its setup network disappears.";
+      return;
+    }
+    showErr(r.data && r.data.error ? r.data.error.message : "Saving failed (HTTP " + r.status + ").");
+  } catch (e) {
+    showErr("RadioFloppy cannot be reached. Are you still connected to its setup network?");
+  }
+  $("save").disabled = false;
+});
+
+$("exit").addEventListener("click", async () => {
+  try {
+    const r = await api("POST", "/api/v1/setup/exit", {});
+    if (r.status === 200) {
+      $("setup").classList.add("hidden");
+      $("reason").className = "banner ok";
+      $("reason").textContent = "RadioFloppy restarts with its previous settings. Reconnect to your own WiFi network.";
+      return;
+    }
+    showErr(r.data && r.data.error ? r.data.error.message : "Failed (HTTP " + r.status + ").");
+  } catch (e) {
+    showErr("RadioFloppy cannot be reached.");
+  }
+});
+
+load().then(scan).catch(() => showErr("RadioFloppy cannot be reached."));
+</script>
+</body>
+</html>

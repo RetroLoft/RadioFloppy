@@ -1,8 +1,8 @@
 /*
  * RadioFloppy - read-only floppy emulation.
  *
- * Emulates drive B: (EMU_SELECT_LINE) with a .ST image from the external
- * SPI flash slot store (see disk_image.h):
+ * Emulates drive B: or A: (EMU_SELECT_LINE, from the settings) with a .ST image from the external
+ * SPI flash image library (see disk_image.h):
  * MFM tracks pre-encoded in PSRAM, flux stream and INDEX from RMT, drive
  * logic in drive_emu.c (ISR context). This file only sets things up and
  * does the (compact) logging, which never touches the timing path.
@@ -32,6 +32,8 @@
 #include "flux_stream.h"
 #include "oled.h"
 #include "status_led.h"
+#include "settings.h"
+#include "setup_mode.h"
 #include "step_sound.h"
 #include "tests.h"
 #include "wifi_net.h"
@@ -168,7 +170,7 @@ static void print_header(log_state_t *ls)
     ls->header_printed = true;
     printf("\n");
     print_ts(ls->start_us);
-    printf("B: selected (%s)\n", EMU_SELECT_NAME);
+    printf("%s selected (%s)\n", EMU_DRIVE_NAME, EMU_SELECT_NAME);
     print_ts(ls->start_us);
     printf("track=%d side=%d\n", st->cyl, st->side);
     print_ts(ls->start_us);
@@ -207,7 +209,7 @@ static void selection_end(log_state_t *ls, const drive_event_t *ev)
     }
     flush_steps(ls);
     print_ts(ev->time_us);
-    printf("B: deselected%s\n", ls->last_st.rdata ? ", RDATA stopped" : "");
+    printf("%s deselected%s\n", EMU_DRIVE_NAME, ls->last_st.rdata ? ", RDATA stopped" : "");
     printf("          %lld ms, %lu steps, %lu side changes, %lu revolutions, "
            "track=%d side=%d, WGATE %s\n",
            dur_us / 1000, (unsigned long)ls->steps, (unsigned long)ls->side_changes,
@@ -282,9 +284,21 @@ static void handle_event(log_state_t *ls, const drive_event_t *ev)
 
 void floppy_emu_run(void)
 {
+    /* Settings first: without a WiFi network (or on request) the setup
+     * page runs instead of the emulator. */
+    settings_init();
+    setup_mode_boot();
+    if (setup_mode_wanted()) {
+        setup_mode_run();
+        return;
+    }
+    settings_t cfg;
+    settings_get(&cfg);
+    drive_set_select_line(cfg.drive_select);    /* before any drive interrupt */
+
     printf("\n========================================\n");
     printf(" RadioFloppy\n");
-    printf(" Read-only drive %s\n", EMU_SELECT_LINE == EMU_DS1 ? "B: (DS1)" : "(DS0)");
+    printf(" Read-only drive %s (%s)\n", EMU_DRIVE_NAME, EMU_SELECT_NAME);
     printf("========================================\n\n");
 
     if (disk_image_init() != ESP_OK) {
@@ -307,7 +321,7 @@ void floppy_emu_run(void)
 
     /* Before the flux stream: the one-time PHY calibration write to the
      * internal flash must not happen while RMT is streaming. */
-    bool wifi = wifi_net_start() == ESP_OK;
+    bool wifi = wifi_net_start(setup_mode_verify_pending() ? SETUP_VERIFY_MS : 0) == ESP_OK;
 
     step_sound_init();              /* buzzer off before any interrupt */
     drive_init();                   /* inputs + interrupts, not armed */
@@ -363,7 +377,7 @@ void floppy_emu_run(void)
         }
         if (ls.polls && now - ls.polls_since_us >= POLL_REPORT_MS * 1000LL) {
             print_ts(now);
-            printf("B: %lu short selections without activity (polls)\n",
+            printf("%s %lu short selections without activity (polls)\n", EMU_DRIVE_NAME,
                    (unsigned long)ls.polls);
             ls.polls = 0;
         }

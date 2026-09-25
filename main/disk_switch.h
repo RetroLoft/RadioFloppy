@@ -3,7 +3,7 @@
  * and the push buttons alike (serialised by one mutex).
  *
  * The disk list for the buttons: position 0 is the PSRAM image (if there
- * is one), then every valid flash slot in slot order. Left = -1,
+ * is one), then every valid library image in sequence order. Left = -1,
  * right = +1, wrapping around.
  */
 #pragma once
@@ -21,8 +21,8 @@ typedef struct {
 
 void disk_switch_init(void);
 
-/* Make a stored slot the active disk. */
-esp_err_t disk_switch_slot(int slot, switch_error_t *e);
+/* Make a stored library image the active disk. */
+esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e);
 
 /* Activate raw (a validated image) described by info (flash upload). */
 esp_err_t disk_switch_raw(const uint8_t *raw, const disk_info_t *info, switch_error_t *e);

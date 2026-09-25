@@ -5,16 +5,18 @@ End-to-end tests for the RadioFloppy HTTP API against a real device.
     RADIOFLOPPY_HOST=192.168.x.y [RADIOFLOPPY_TOKEN=...] tests/api/api_test.py
 
 Uses only the Python standard library. RADIOFLOPPY_TOKEN is only needed
-when the device has a token configured. Slot 1 must hold Crystal Castles.
-Images that are stored when the test starts are left alone: the test only
-uses the free slots, frees exactly the slots it filled, and ends with slot
-1 active.
+when the device has a token configured. The image library must be usable
+(state "valid") and have room for at least 30 blocks. Images that are
+stored when the test starts are left alone (same ids, order and data): the
+test adds its own images, deletes exactly those, and ends with the first
+original image active (if there is one).
 """
 import http.client
 import json
 import os
 import socket
 import sys
+import time
 import zlib
 
 HOST = os.environ.get("RADIOFLOPPY_HOST")
@@ -33,7 +35,7 @@ def check(cond, what):
 
 
 def call(method, path, body=None, token=True, raw=None, headers=None):
-    conn = http.client.HTTPConnection(HOST, 80, timeout=60)
+    conn = http.client.HTTPConnection(HOST, 80, timeout=120)
     hdr = dict(headers or {})
     if token and TOKEN:
         hdr["Authorization"] = "Bearer " + TOKEN
@@ -72,8 +74,23 @@ def current():
     return call("GET", "/api/v1/current")[1]
 
 
-def slots():
-    return call("GET", "/api/v1/slots")[1]["slots"]
+def library():
+    d = call("GET", "/api/v1/images")[1]
+    return d["images"], d["storage"]
+
+
+def synthetic(size, seed):
+    """Deterministic test image (no BPB: accepted with a remark)."""
+    out = bytearray()
+    block = seed.to_bytes(4, "little")
+    while len(out) < size:
+        block = zlib.compress(block + len(out).to_bytes(4, "little"))[-64:]
+        out += block
+    return bytes(out[:size])
+
+
+def crc(data):
+    return "%08x" % (zlib.crc32(data) & 0xffffffff)
 
 
 def main():
@@ -81,14 +98,21 @@ def main():
         sys.exit("set RADIOFLOPPY_HOST (and RADIOFLOPPY_TOKEN if the device has one)")
     cc = open(os.path.join(IMAGES, "CRYSTAL_CASTLES.ST"), "rb").read()
     rl = open(os.path.join(IMAGES, "RETROLOFT_TEST_720K.ST"), "rb").read()
+    big = synthetic(901120, 1)          # 80/2/11: more than the old 800 KiB slots
 
-    print("status / slots / current")
+    print("status / images / storage")
     s = call("GET", "/api/v1/status")
-    check(s[0] == 200 and s[1]["external_flash"]["slot_store"] == "valid", "GET /status")
-    sl = slots()
-    check(len(sl) == 20 and sl[0]["status"] == "valid", "GET /slots: 20 slots, slot 1 valid")
-    check(sl[0].get("crc32") == "%08x" % zlib.crc32(cc), "slot 1 holds Crystal Castles")
-    keep0 = [x["slot"] for x in sl if x["status"] == "valid"]
+    check(s[0] == 200 and s[1]["storage"]["state"] == "valid", "GET /status: storage valid")
+    orig, st0 = library()
+    check(st0["block_size"] >= 65536 and st0["blocks_total"] <= 255, "geometry: %d KiB blocks, %d data blocks"
+          % (st0["block_size"] // 1024, st0["blocks_total"]))
+    check((st0["blocks_total"] + 1) * st0["block_size"] <= st0["capacity"], "blocks inside the detected flash")
+    check(st0["max_image_size"] == 1572864, "max image size 1.5 MiB")
+    check(call("GET", "/api/v1/storage")[1] == st0, "GET /storage = storage of /images")
+    check(all(orig[i]["sequence"] <= orig[i + 1]["sequence"] for i in range(len(orig) - 1)),
+          "images sorted by sequence")
+    check(all("blocks" not in im for im in orig), "no block numbers exposed")
+    orig_ids = [im["id"] for im in orig]
 
     auth = s[1].get("auth_required", False)
     if auth:
@@ -96,44 +120,49 @@ def main():
         r = call("POST", "/api/v1/uploads", {"filename": "x.st", "size": len(cc),
                                             "destination": "psram"}, token=False)
         check(r[0] == 401 and err(r) == "UNAUTHORIZED", "upload without token refused")
-        r = call("DELETE", "/api/v1/slots/1", token=False)
+        r = call("DELETE", "/api/v1/images/1", token=False)
         check(r[0] == 401, "delete without token refused")
-        r = call("PUT", "/api/v1/current", {"slot": 1}, token=False)
+        r = call("PUT", "/api/v1/current", {"image_id": 1}, token=False)
         check(r[0] == 401, "activate without token refused")
     else:
         print("open API (no token configured)")
-        r = call("POST", "/api/v1/uploads", {"filename": "x.st", "size": 999999,
+        r = call("POST", "/api/v1/uploads", {"filename": "x.st", "size": 1572865,
                                             "destination": "psram"}, token=False)
         check(r[0] == 413, "modifying call accepted without token (reaches validation)")
     r = call("POST", "/api/v1/uploads", raw=json.dumps({"filename": "x.st", "size": len(cc),
              "destination": "psram"}).encode(), headers={})
     check(r[0] == 415 and err(r) == "UNSUPPORTED_MEDIA_TYPE",
           "JSON sent as octet-stream: 415 (no cross-site requests)")
-    check(call("GET", "/api/v1/slots/")[0] in (404, 405), "unknown path not served")
+    check(call("GET", "/api/v1/slots")[0] in (404, 405), "old /slots path is gone")
 
     print("invalid requests")
-    r = call("POST", "/api/v1/uploads", {"filename": "big.st", "size": 819201,
-                                        "destination": "flash"})
-    check(r[0] == 413 and err(r) == "IMAGE_TOO_LARGE", "819201 bytes: IMAGE_TOO_LARGE")
-    r = call("POST", "/api/v1/uploads", {"filename": "seventy.st", "size": 645120,
-                                        "destination": "flash"})
+    r = call("POST", "/api/v1/uploads", {"filename": "big.st", "size": 1572865, "destination": "flash"})
+    check(r[0] == 413 and err(r) == "IMAGE_TOO_LARGE", "1 572 865 bytes (> 1.5 MiB): IMAGE_TOO_LARGE")
+    r = call("POST", "/api/v1/uploads", {"filename": "hd.st", "size": 1474560, "destination": "flash"})
+    check(r[0] == 422 and err(r) == "UNSUPPORTED_GEOMETRY", "HD 80/2/18: UNSUPPORTED_GEOMETRY")
+    r = call("POST", "/api/v1/uploads", {"filename": "seventy.st", "size": 645120, "destination": "flash"})
     check(r[0] == 422 and err(r) == "UNSUPPORTED_GEOMETRY", "70/2/9 size: UNSUPPORTED_GEOMETRY")
-    r = call("POST", "/api/v1/uploads", {"filename": "82-2-10.st", "size": 839680,
-                                        "destination": "psram"})
-    check(r[0] == 413 and err(r) == "IMAGE_TOO_LARGE", "82/2/10 (820 KiB): IMAGE_TOO_LARGE")
-    r = call("POST", "/api/v1/uploads", {"filename": "odd.st", "size": 1000,
-                                        "destination": "flash"})
+    r = call("POST", "/api/v1/uploads", {"filename": "odd.st", "size": 1000, "destination": "flash"})
     check(r[0] == 422 and err(r) == "INVALID_IMAGE", "1000 bytes: INVALID_IMAGE")
     r = call("POST", "/api/v1/uploads", {"filename": "a.st", "size": len(cc),
-                                        "destination": "flash", "slot": 21})
-    check(r[0] == 400 and err(r) == "INVALID_SLOT", "slot 21: INVALID_SLOT")
+                                        "destination": "flash", "replace": 65000})
+    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "replace unknown image: IMAGE_NOT_FOUND")
+    r = call("POST", "/api/v1/uploads", {"filename": "a.st", "size": len(cc),
+                                        "destination": "psram", "replace": 1})
+    check(r[0] == 400, "replace with a PSRAM upload refused")
     r = call("POST", "/api/v1/uploads", {"filename": "a.st", "size": len(cc),
                                         "destination": "psram", "activate": False})
     check(r[0] == 400, "psram with activate:false refused")
-    r = call("PUT", "/api/v1/current", {"slot": 0})
-    check(r[0] == 400 and err(r) == "INVALID_SLOT", "activate slot 0: INVALID_SLOT")
-    r = call("DELETE", "/api/v1/slots/abc")
-    check(r[0] == 400 and err(r) == "INVALID_SLOT", "delete slot abc: INVALID_SLOT")
+    r = call("PUT", "/api/v1/current", {"image_id": 0})
+    check(r[0] == 400 and err(r) == "INVALID_REQUEST", "activate image 0: INVALID_REQUEST")
+    r = call("PUT", "/api/v1/current", {"image_id": 65000})
+    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "activate unknown image: IMAGE_NOT_FOUND")
+    r = call("DELETE", "/api/v1/images/abc")
+    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "delete image abc: IMAGE_NOT_FOUND")
+    r = call("PUT", "/api/v1/images/65000", {"sequence": 1})
+    check(r[0] == 404, "move unknown image: 404")
+    r = call("POST", "/api/v1/storage/format", {})
+    check(r[0] == 400 and err(r) == "CONFIRMATION_REQUIRED", "format without confirmation refused")
 
     print("content checks")
     bad = bytearray(cc)
@@ -141,19 +170,17 @@ def main():
     bad[24:26] = (9).to_bytes(2, "little")
     bad[26:28] = (2).to_bytes(2, "little")      # BPB: 2 sides, file: 1 side
     bad[19:21] = (720).to_bytes(2, "little")
-    c, d = upload(bytes(bad), "Wrong BPB.st", destination="flash")
-    check(d and d[0] == 422 and d[1]["error"]["code"] == "UNSUPPORTED_GEOMETRY",
-          "BPB contradicts size: UNSUPPORTED_GEOMETRY, nothing stored")
+    c, d = upload(bytes(bad), "Wrong BPB.st", destination="psram")
+    check(d and d[0] == 200 and current()["sides"] == 1,
+          "BPB contradicts the size: accepted, geometry from the size (1 side)")
     c, d = upload(cc, "CRC.st", destination="flash", crc32="00000000")
     check(d and d[0] == 422 and d[1]["error"]["code"] == "CHECKSUM_MISMATCH",
           "wrong crc32: CHECKSUM_MISMATCH")
-    check([x["slot"] for x in slots() if x["status"] == "valid"] == keep0, "no slot filled by refused uploads")
+    check(library()[1]["blocks_used"] == st0["blocks_used"], "no blocks used by refused uploads")
 
     print("concurrent upload")
-    c1 = call("POST", "/api/v1/uploads", {"filename": "one.st", "size": len(cc),
-                                         "destination": "flash"})
-    c2 = call("POST", "/api/v1/uploads", {"filename": "two.st", "size": len(cc),
-                                         "destination": "flash"})
+    c1 = call("POST", "/api/v1/uploads", {"filename": "one.st", "size": len(cc), "destination": "flash"})
+    c2 = call("POST", "/api/v1/uploads", {"filename": "two.st", "size": len(cc), "destination": "flash"})
     check(c1[0] == 201 and c2[0] == 409 and err(c2) == "UPLOAD_BUSY", "second upload: UPLOAD_BUSY")
 
     print("interrupted upload")
@@ -169,11 +196,12 @@ def main():
         st = call("GET", "/api/v1/uploads/" + c1[1]["upload_id"])[1]
         if st["state"] in ("failed", "done"):
             break
-        import time
         time.sleep(1)
     check(st and st["state"] == "failed" and st["error"]["code"] == "UPLOAD_INCOMPLETE",
           "aborted after 100000 bytes: UPLOAD_INCOMPLETE")
-    check([x["slot"] for x in slots() if x["status"] == "valid"] == keep0, "no slot filled by aborted upload")
+    imgs, stg = library()
+    check([im["id"] for im in imgs] == orig_ids and stg["blocks_used"] == st0["blocks_used"],
+          "no image and no blocks added by the aborted upload")
     check(current() == before, "active disk unchanged by aborted upload")
 
     print("upload to PSRAM")
@@ -182,53 +210,92 @@ def main():
     cur = current()
     check(cur["source"] == "psram" and cur["name"] == "Retroloft test" and cur["sides"] == 2,
           "current: psram, Retroloft test, 2 sides")
+    check(library()[1]["blocks_used"] == st0["blocks_used"], "PSRAM upload uses no flash blocks")
 
-    keep = [x["slot"] for x in slots() if x["status"] == "valid"]    # not ours
-    free = [n for n in range(1, 21) if n not in keep]
     mine = []
+    bs = st0["block_size"]
+    blocks = lambda n: (n + bs - 1) // bs
 
-    print("upload to first free slot")
+    print("add images")
     c, d = upload(cc, "Castles copy.st", destination="flash")
-    check(d and d[0] == 200 and d[1].get("stored_in_slot") == free[0] and not d[1]["active"],
-          "stored in slot %d (first free), not activated" % free[0])
-    mine.append(free[0])
+    check(d and d[0] == 200 and d[1].get("image_id") and not d[1]["active"], "added, not activated")
+    a = d[1]["image_id"]
+    mine.append(a)
+    imgs, stg = library()
+    check(imgs[-1]["id"] == a and imgs[-1]["sequence"] > max([im["sequence"] for im in orig] or [0]),
+          "new image at the end of the order")
+    check(stg["blocks_used"] == st0["blocks_used"] + blocks(len(cc)), "uses %d blocks" % blocks(len(cc)))
     check(current()["source"] == "psram", "active disk still the PSRAM image")
+    c, d = upload(big, "Big 880K.st", destination="flash", activate=True)
+    check(d and d[0] == 200 and d[1]["active"], "901 120-byte image (80/2/11) stored and activated")
+    b = d[1]["image_id"]
+    mine.append(b)
+    cur = current()
+    check(cur["image_id"] == b and cur["crc32"] == crc(big) and cur["sectors"] == 11, "current: the big image")
 
-    print("explicit slot overwrite + activate")
-    t = free[-1]
-    c, d = upload(rl, "Slot test.st", destination="flash", slot=t)
-    check(d and d[0] == 200 and d[1].get("stored_in_slot") == t, "slot %d written" % t)
-    c, d = upload(cc, "Slot test again.st", destination="flash", slot=t, activate=True)
-    check(d and d[0] == 200 and d[1].get("stored_in_slot") == t and d[1]["active"],
-          "slot %d overwritten and activated" % t)
-    mine.append(t)
-    st = slots()[t - 1]
-    check(st["name"] == "Slot test again" and st["size"] == len(cc) and st["active"],
-          "slot %d shows the new image, active" % t)
+    print("sequence")
+    r = call("PUT", "/api/v1/images/%d" % b, {"sequence": 1})
+    check(r[0] == 200 and r[1]["sequence"] == 1, "moved to position 1")
+    imgs, _ = library()
+    check(imgs[0]["id"] == b and [im["sequence"] for im in imgs] == list(range(1, len(imgs) + 1)),
+          "first in the list, sequences renumbered 1..n")
+    check([im["id"] for im in imgs if im["id"] in orig_ids] == orig_ids, "original images keep their relative order")
+    r = call("PUT", "/api/v1/current", {"image_id": b})
+    check(r[0] == 200 and r[1]["crc32"] == crc(big), "data unchanged after the move (CRC)")
+    call("PUT", "/api/v1/images/%d" % b, {"sequence": 9999})
+    check(library()[0][-1]["id"] == b, "sequence 9999: moved to the end")
 
-    print("fill all slots")
-    for n in free:
-        if slots()[n - 1]["status"] != "valid":
-            c, d = upload(cc, "Fill %d.st" % n, destination="flash")
-            check(d and d[0] == 200 and d[1].get("stored_in_slot") == n, "slot %d filled" % n)
-            mine.append(n)
-    r = call("POST", "/api/v1/uploads", {"filename": "full.st", "size": len(cc),
-                                        "destination": "flash"})
-    check(r[0] == 409 and err(r) == "NO_FREE_SLOT", "all 20 in use: NO_FREE_SLOT")
+    print("replace")
+    r = call("GET", "/api/v1/images/%d" % a)[1]
+    seq_a = r["sequence"]
+    c, d = upload(rl, "Replacement.st", destination="flash", replace=a)
+    check(d and d[0] == 200 and d[1]["image_id"] == a, "image %d replaced (same id)" % a)
+    r = call("GET", "/api/v1/images/%d" % a)[1]
+    check(r["name"] == "Replacement" and r["size"] == len(rl) and r["crc32"] == crc(rl) and
+          r["sequence"] == seq_a, "new name, size and CRC; same sequence")
+    r = call("PUT", "/api/v1/current", {"image_id": a})
+    check(r[0] == 200 and r[1]["crc32"] == crc(rl), "replacement activates with the right data")
+    c, d = upload(cc, "Replace active.st", destination="flash", replace=a, activate=True)
+    check(d and d[0] == 200 and d[1]["active"] and current()["crc32"] == crc(cc),
+          "replacing the active image with activate: new data active")
 
-    print("activate existing slot, delete own slots")
-    r = call("PUT", "/api/v1/current", {"slot": 1})
-    check(r[0] == 200 and r[1]["source"] == "flash" and r[1]["slot"] == 1, "slot 1 activated")
-    for n in sorted(set(mine)):
-        r = call("DELETE", "/api/v1/slots/%d" % n)
-        check(r[0] == 200, "slot %d freed" % n)
-    r = call("DELETE", "/api/v1/slots/%d" % free[0])
-    check(r[0] == 404 and err(r) == "SLOT_EMPTY", "freeing a free slot: SLOT_EMPTY")
-    r = call("PUT", "/api/v1/current", {"slot": free[0]})
-    check(r[0] == 404 and err(r) == "SLOT_EMPTY", "activating a free slot: SLOT_EMPTY")
-    sl = slots()
-    check(sl[0]["active"] and [x["slot"] for x in sl if x["status"] == "valid"] == keep,
-          "end state: the original images, slot 1 active")
+    print("nearly full flash")
+    need = blocks(len(big))
+    fill = []
+    stg = library()[1]
+    while stg["blocks_free"] >= need:
+        c, d = upload(big, "Fill %d.st" % len(fill), destination="flash")
+        if not (d and d[0] == 200):
+            check(False, "fill upload failed: %s" % (d or c)[1])
+            break
+        fill.append(d[1]["image_id"])
+        stg = library()[1]
+    mine += fill
+    print("        filled with %d images, %d blocks free, %d%% used" % (len(fill), stg["blocks_free"], stg["used_percent"]))
+    r = call("POST", "/api/v1/uploads", {"filename": "nospace.st", "size": len(big), "destination": "flash"})
+    check(r[0] == 507 and err(r) == "NO_SPACE", "new %d-block image: NO_SPACE" % need)
+    if fill:
+        big2 = synthetic(len(big), 2)
+        c, d = upload(big2, "Replaced when full.st", destination="flash", replace=fill[0])
+        check(d and d[0] == 200 and d[1]["image_id"] == fill[0], "replacing works with the flash nearly full")
+        r = call("PUT", "/api/v1/current", {"image_id": fill[0]})
+        check(r[0] == 200 and r[1]["crc32"] == crc(big2), "replaced image reads back correctly")
+
+    print("delete own images")
+    first = orig_ids[0] if orig_ids else None
+    if first:
+        r = call("PUT", "/api/v1/current", {"image_id": first})
+        check(r[0] == 200 and r[1]["image_id"] == first, "first original image activated")
+    for i in mine:
+        r = call("DELETE", "/api/v1/images/%d" % i)
+        check(r[0] == 200, "image %d deleted" % i)
+    r = call("DELETE", "/api/v1/images/%d" % mine[0])
+    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "deleting again: IMAGE_NOT_FOUND")
+    r = call("PUT", "/api/v1/current", {"image_id": mine[0]})
+    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "activating a deleted image: IMAGE_NOT_FOUND")
+    imgs, stg = library()
+    check([im["id"] for im in imgs] == orig_ids and stg["blocks_used"] == st0["blocks_used"],
+          "end state: the original images, all own blocks free again")
 
     print("\n%s" % ("ALL API TESTS PASSED" if not failures else "%d FAILED" % failures))
     sys.exit(1 if failures else 0)

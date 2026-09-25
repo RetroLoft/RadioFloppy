@@ -5,7 +5,8 @@
  * counts once it has been stable for DEBOUNCE_MS. A press clicks at once;
  * the disk changes when a single button is released. Holding both buttons
  * for CHORD_MS shows the network name and IP address on the OLED and never
- * changes the disk. The disk switch runs in this task, so presses during a
+ * changes the disk; holding them on to SETUP_MS restarts into WiFi setup
+ * mode. In setup mode single presses do nothing and CHORD_MS leaves it. The disk switch runs in this task, so presses during a
  * switch are ignored rather than queued; the floppy interrupts are never
  * involved.
  */
@@ -20,11 +21,15 @@
 #include "buttons.h"
 #include "disk_switch.h"
 #include "oled.h"
+#include "setup_mode.h"
 #include "step_sound.h"
 
 #define POLL_MS         5
 #define DEBOUNCE_MS     30
 #define CHORD_MS        3000    /* both buttons: show network info */
+#define SETUP_MS        10000   /* both buttons: WiFi setup mode */
+
+static void (*setup_exit)(void);    /* set: setup mode */
 
 typedef struct {
     gpio_num_t pin;
@@ -64,7 +69,7 @@ static void do_switch(const button_t *b)
         if (d.source == DISK_SRC_PSRAM) {
             printf("Button %s: disk 0 (PSRAM) \"%s\"\n", b->name, d.name);
         } else {
-            printf("Button %s: slot %d \"%s\"\n", b->name, d.slot + 1, d.name);
+            printf("Button %s: image %u \"%s\"\n", b->name, d.image_id, d.name);
         }
     } else {
         printf("Button %s: not changed - %s (%s)\n", b->name, e.msg, e.code);
@@ -75,6 +80,8 @@ static void buttons_task(void *arg)
 {
     bool both_seen = false;         /* both were down in this press session */
     bool chord_done = false;
+    bool setup_done = false;
+    bool armed = !setup_exit;       /* setup mode: wait for a release first */
     TickType_t both_since = 0;
 
     resync();
@@ -105,26 +112,38 @@ static void buttons_task(void *arg)
             if (!both_seen) {
                 both_seen = true;
                 both_since = now;
-            } else if (!chord_done && now - both_since >= pdMS_TO_TICKS(CHORD_MS)) {
+            } else if (!chord_done && armed && now - both_since >= pdMS_TO_TICKS(CHORD_MS)) {
                 chord_done = true;
-                printf("Buttons: both held %d s - showing network info\n", CHORD_MS / 1000);
-                oled_show_network();
+                if (setup_exit) {
+                    setup_exit();
+                } else {
+                    printf("Buttons: both held %d s - showing network info\n", CHORD_MS / 1000);
+                    oled_show_network();
+                }
+            } else if (!setup_done && !setup_exit &&
+                       now - both_since >= pdMS_TO_TICKS(SETUP_MS)) {
+                setup_done = true;
+                printf("Buttons: both held %d s - WiFi setup mode\n", SETUP_MS / 1000);
+                oled_show_message("WiFi setup mode", "Restarting...");
+                vTaskDelay(pdMS_TO_TICKS(1500));
+                setup_mode_restart(SETUP_BUTTONS);
             }
         }
 
-        if (released && !both_seen) {
+        if (released && !both_seen && !setup_exit) {
             do_switch(released);            /* short press of one button */
             resync();                       /* presses during the switch are dropped */
         }
         if (!down0 && !down1) {
             both_seen = false;              /* session over */
             chord_done = false;
+            armed = true;
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
     }
 }
 
-void buttons_start(void)
+static void buttons_config(void)
 {
     const gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << PIN_BTN_PREV) | (1ULL << PIN_BTN_NEXT),
@@ -134,7 +153,20 @@ void buttons_start(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&cfg));
+}
+
+void buttons_start(void)
+{
+    buttons_config();
     xTaskCreatePinnedToCore(buttons_task, "buttons", 4096, NULL, 3, NULL, 1);
     printf("Buttons: LEFT (GPIO%d) = previous disk, RIGHT (GPIO%d) = next disk, "
-           "both %d s = network info\n", PIN_BTN_NEXT, PIN_BTN_PREV, CHORD_MS / 1000);
+           "both %d s = network info, both %d s = WiFi setup\n", PIN_BTN_NEXT, PIN_BTN_PREV,
+           CHORD_MS / 1000, SETUP_MS / 1000);
+}
+
+void buttons_start_setup(void (*on_exit)(void))
+{
+    setup_exit = on_exit;
+    buttons_config();
+    xTaskCreatePinnedToCore(buttons_task, "buttons", 4096, NULL, 3, NULL, 1);
 }

@@ -8,8 +8,9 @@
  * selected (drive_swap_media). The flux stream reads the tracks through
  * disk_track_raw() and never waits for any of this.
  *
- * At start-up the image named DISK_BOOT_IMAGE (else the first valid slot)
- * is loaded from the external flash; with none, the drive has no disk.
+ * At start-up the image named DISK_BOOT_IMAGE (else the first valid image
+ * in sequence order) is loaded from the external flash image library; with
+ * none, the drive has no disk.
  */
 #pragma once
 
@@ -20,14 +21,6 @@
 #include "mfm_track.h"
 
 #define DISK_BOOT_IMAGE             "Crystal Castles"
-
-/*
- * DISK_MIGRATE_LEGACY 1: on a blank slot store, take over legacy v1 images
- * that already sit at a slot start (catalog write only, no image bytes are
- * moved or erased). Needed before the API may write to the slots, because
- * slot 1 still holds the legacy Crystal Castles bytes.
- */
-#define DISK_MIGRATE_LEGACY         1
 
 /*
  * DISK_BACKGROUND_VERIFY 1: after every disk change, decode the new tracks
@@ -43,15 +36,15 @@
 
 typedef enum {
     DISK_SRC_NONE,          /* no disk inserted */
-    DISK_SRC_FLASH,         /* from an external flash slot */
+    DISK_SRC_FLASH,         /* from the image library (external flash) */
     DISK_SRC_PSRAM,         /* temporary upload, lost at reset */
 } disk_source_t;
 
 typedef struct {
     disk_source_t source;
-    int slot;               /* 0..19 for DISK_SRC_FLASH, else -1 */
-    bool slot_changed;      /* the slot was overwritten/deleted since */
-    char name[53];          /* title, up to 52 characters (SLOT_TITLE_SIZE) */
+    uint16_t image_id;      /* library image for DISK_SRC_FLASH, else 0 */
+    bool image_changed;     /* that image was replaced/deleted since */
+    char name[53];          /* title, up to 52 characters (IMG_TITLE_SIZE) */
     uint32_t size;
     uint32_t crc32;
     int cylinders;          /* geometry of the image */
@@ -71,7 +64,7 @@ static inline const uint8_t *disk_track_raw(int cyl, int head)
     return disk_tracks + (size_t)(cyl * DISK_MAX_HEADS + head) * MFM_MAX_BYTES;
 }
 
-/* External flash, slot store, buffers and the start-up image. */
+/* External flash, image library, buffers and the start-up image. */
 esp_err_t disk_image_init(void);
 
 /* Copy of the current disk info. */
@@ -97,5 +90,5 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms);
 /* Called (task context) after every change of the active disk. */
 void disk_set_change_callback(void (*cb)(void));
 
-/* A flash slot was overwritten or deleted: flag the current disk if it came from there. */
-void disk_note_slot_changed(int slot);
+/* A library image was replaced or deleted: flag the current disk if it came from there. */
+void disk_note_image_changed(uint16_t image_id);

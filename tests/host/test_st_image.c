@@ -46,9 +46,19 @@ int main(void)
     CHECK(st_check_size(0, &info) == ST_INVALID);
     CHECK(st_check_size(368641, &info) == ST_INVALID);          /* not whole sectors */
     CHECK(st_check_size(ST_MAX_SIZE + 1, &info) == ST_TOO_LARGE);
-    CHECK(st_check_size(839680, &info) == ST_TOO_LARGE);        /* 82/2/10 > 800 KiB */
-    CHECK(st_check_size(901120, &info) == ST_TOO_LARGE);        /* 80/2/11 > 800 KiB */
+    CHECK(st_check_size(839680, &info) == ST_OK && info.cylinders == 82);   /* 82/2/10 */
+    CHECK(st_check_size(901120, &info) == ST_OK && info.sectors == 11);      /* 80/2/11 */
+    CHECK(st_check_size(946176, &info) == ST_OK && info.cylinders == 84 && info.sectors == 11);
+    CHECK(st_check_size(1474560, &info) == ST_UNSUPPORTED);     /* HD 80/2/18 */
+    CHECK(st_check_size(1572864, &info) != ST_OK && st_check_size(1572864, &info) != ST_TOO_LARGE);
+    CHECK(st_check_size(1572865, &info) == ST_TOO_LARGE);
     CHECK(st_check_size(645120, &info) == ST_UNSUPPORTED);      /* 70/2/9 */
+    CHECK(st_check_size(728064, &info) == ST_OK && info.cylinders == 79 && info.heads == 2 &&
+          info.sectors == 9);                                   /* 79/2/9, e.g. Baby Jo */
+    CHECK(st_check_size(404480, &info) == ST_OK && info.cylinders == 79 && info.heads == 1);
+    CHECK(st_check_size(808960, &info) == ST_OK && info.cylinders == 79 && info.sectors == 10);
+    CHECK(st_check_size(718848, &info) == ST_UNSUPPORTED &&     /* 78/2/9: DD, not 78/1/18 */
+          strstr(info.detail, "78 cyl / 2 sides / 9 sectors") != NULL);
     CHECK(st_check_size(327680, &info) == ST_UNSUPPORTED);      /* 80/1/8 */
     CHECK(st_check_size(512, &info) == ST_INVALID);
     CHECK(st_check_size(7 * 512, &info) == ST_INVALID);
@@ -68,11 +78,15 @@ int main(void)
     put16(img + 11, 512); put16(img + 24, 9); put16(img + 26, 1); put16(img + 19, 720);
     CHECK(st_check_image(img, 368640, &info) == ST_OK && info.bpb_ok);
     put16(img + 26, 2);                       /* BPB says 40 cyl / 2 sides */
-    CHECK(st_check_image(img, 368640, &info) == ST_UNSUPPORTED);
+    CHECK(st_check_image(img, 368640, &info) == ST_OK && !info.bpb_ok && info.heads == 1 &&
+          strstr(info.detail, "played as the file size says") != NULL);
     put16(img + 26, 2); put16(img + 19, 1440);
     CHECK(st_check_image(img, 737280, &info) == ST_OK && info.bpb_ok);
     put16(img + 24, 10); put16(img + 19, 1600);   /* 10 sectors in a 720k-sized file */
-    CHECK(st_check_image(img, 737280, &info) == ST_UNSUPPORTED);
+    CHECK(st_check_image(img, 737280, &info) == ST_OK && !info.bpb_ok && info.sectors == 9);
+    put16(img + 26, 1); put16(img + 19, 820);     /* Road Runner [b]: 82 tracks in the BPB, */
+    CHECK(st_check_image(img, 409600, &info) == ST_OK && info.cylinders == 80 &&  /* 80 dumped */
+          info.sectors == 10 && !info.bpb_ok && strstr(info.detail, "shorter") != NULL);
     put16(img + 24, 9); put16(img + 26, 1); put16(img + 19, 720);   /* 80 of 82 tracks used */
     CHECK(st_check_image(img, 82 * 9 * 512, &info) == ST_OK && info.cylinders == 82 && info.bpb_ok);
 
