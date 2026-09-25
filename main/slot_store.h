@@ -21,7 +21,10 @@
 #include "esp_err.h"
 #include "flash_layout.h"
 
-#define SLOT_NAME_LEN       40
+#define SLOT_NAME_LEN       40      /* name field: 39 characters + NUL */
+#define SLOT_NAME_EXT_LEN   14      /* continuation: 13 characters + NUL */
+#define SLOT_TITLE_MAX      52      /* full title: 39 + 13 characters */
+#define SLOT_TITLE_SIZE     (SLOT_TITLE_MAX + 1)
 
 /* Slot status. 0xFF = erased = never used. */
 #define SLOT_EMPTY          0xff
@@ -37,7 +40,9 @@ typedef struct __attribute__((packed)) {
     uint32_t crc32;             /* CRC-32 (IEEE, as zlib) over size bytes */
     uint8_t format;             /* SLOT_FMT_* */
     uint8_t status;             /* SLOT_* */
-    uint8_t pad[14];            /* 0xFF, reserved */
+    char name_ext[SLOT_NAME_EXT_LEN];   /* title characters 40..52, NUL
+                                           terminated; 0xFF = none (records
+                                           written before titles grew) */
 } slot_record_t;
 
 _Static_assert(sizeof(slot_record_t) == 64, "slot record layout");
@@ -59,13 +64,17 @@ const slot_record_t *slot_store_record(int slot);
 /* true if the slot holds a usable image (VALID and sane size/format). */
 bool slot_store_is_valid(int slot);
 
-/* First VALID slot with this name, or -1. */
+/* Full title of a record (name + continuation). */
+void slot_record_title(const slot_record_t *r, char out[SLOT_TITLE_SIZE]);
+
+/* First VALID slot with this title, or -1. */
 int slot_store_find_name(const char *name);
 
 /* A slot that may receive a new image (empty, deleted or interrupted), or -1. */
 int slot_store_find_free(void);
 
-/* Start writing a new image into a free slot (see header comment). */
+/* Start writing a new image into a free slot (see header comment).
+ * name: title of up to SLOT_TITLE_MAX characters. */
 esp_err_t slot_store_prepare(int slot, const char *name, uint8_t format,
                              uint32_t size, uint32_t crc32);
 

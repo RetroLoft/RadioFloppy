@@ -149,6 +149,18 @@ void drive_arm(drive_status_t *status)
     portEXIT_CRITICAL(&drive_lock);
 }
 
+void drive_peek(drive_status_t *st)
+{
+    *st = (drive_status_t) {
+        .armed = armed,
+        .selected = emulator_is_selected(),
+        .motor = gpio_ll_get_level(&GPIO, PIN_FDD_MOTOR) == 0,
+        .wgate = gpio_ll_get_level(&GPIO, PIN_FDD_WGATE) == 0,
+        .cyl = current_track,
+        .side = gpio_ll_get_level(&GPIO, PIN_FDD_SIDE) ? 0 : 1,
+    };
+}
+
 void drive_refresh(drive_status_t *status)
 {
     portENTER_CRITICAL(&drive_lock);

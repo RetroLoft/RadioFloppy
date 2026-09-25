@@ -228,6 +228,30 @@ static void write_legacy(const char *name, uint32_t start, const uint8_t *d, uin
     memcpy(mock_flash + start, d, size);
 }
 
+static void test_long_titles(void)
+{
+    printf("long titles (name + continuation)\n");
+    mock_flash_reset(0xff);
+    slot_store_open();
+    uint8_t *d = test_image(4096, 3);
+    const char *t52 = "Leisure Suit Larry in the Land of the Lounge Lizards";
+    const char *t39 = "Exactly thirty-nine characters long ok!";
+    char out[SLOT_TITLE_SIZE];
+    CHECK(strlen(t52) == 52 && strlen(t39) == 39);
+    CHECK(upload(0, t52, d, 4096) == ESP_OK);
+    CHECK(upload(1, t39, d, 4096) == ESP_OK);
+    CHECK(upload(2, "Short", d, 4096) == ESP_OK);
+    CHECK(slot_store_open() == SLOT_STORE_VALID);
+    slot_record_title(slot_store_record(0), out); CHECK(strcmp(out, t52) == 0);
+    slot_record_title(slot_store_record(1), out); CHECK(strcmp(out, t39) == 0);
+    slot_record_title(slot_store_record(2), out); CHECK(strcmp(out, "Short") == 0);
+    CHECK(slot_store_find_name(t52) == 0 && slot_store_find_name(t39) == 1);
+    /* Old records: name field only, continuation still 0xFF. */
+    CHECK((uint8_t)slot_store_record(1)->name_ext[0] == 0xff);
+    CHECK((uint8_t)slot_store_record(2)->name_ext[0] == 0xff);
+    free(d);
+}
+
 static void test_legacy_migration(void)
 {
     printf("legacy v1 catalog migration\n");
@@ -267,6 +291,7 @@ int main(void)
     test_upload_and_bounds();
     test_crc_and_interrupt();
     test_ab_fallback();
+    test_long_titles();
     test_legacy_migration();
     printf(failures ? "\n%d CHECK(S) FAILED\n" : "\nALL TESTS PASSED\n", failures);
     return failures != 0;

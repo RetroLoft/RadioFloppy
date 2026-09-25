@@ -159,11 +159,21 @@ static void verify_start(const uint8_t *raw, const disk_info_t *g)
     xTaskCreatePinnedToCore(verify_task, "mfm_verify", 4096, NULL, 1, NULL, 1);
 }
 
+static void (*change_cb)(void);
+
+void disk_set_change_callback(void (*cb)(void))
+{
+    change_cb = cb;
+}
+
 static void set_current(const disk_info_t *info)
 {
     portENTER_CRITICAL(&info_lock);
     current = *info;
     portEXIT_CRITICAL(&info_lock);
+    if (change_cb) {
+        change_cb();
+    }
 }
 
 void disk_get_current(disk_info_t *info)
@@ -198,11 +208,13 @@ static void report_store(slot_store_state_t st)
             if (r->status == SLOT_EMPTY) {
                 continue;
             }
-            printf("  Slot %2d: %-9s %-24.*s %7lu bytes\n", i + 1,
+            char title[SLOT_TITLE_SIZE];
+            slot_record_title(r, title);
+            printf("  Slot %2d: %-9s %-24s %7lu bytes\n", i + 1,
                    r->status == SLOT_VALID ? (slot_store_is_valid(i) ? "valid" : "BAD")
                    : r->status == SLOT_BUILDING ? "building"
                    : r->status == SLOT_DELETED ? "deleted" : "unknown",
-                   SLOT_NAME_LEN, r->name, (unsigned long)r->size);
+                   title, (unsigned long)r->size);
         }
         break;
     }
@@ -299,14 +311,16 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
     const uint8_t *data = NULL;
     if (slot >= 0) {
         const slot_record_t *r = slot_store_record(slot);
-        printf("Selected image: %s\n", r->name);
+        char title[SLOT_TITLE_SIZE];
+        slot_record_title(r, title);
+        printf("Selected image: %s\n", title);
         printf("Source: EXTERNAL SPI FLASH, slot %d (0x%06lx)\n", slot + 1,
                (unsigned long)rf_slot_start(slot));
         err = read_image(rf_slot_start(slot), r->size, r->crc32, &data);
         if (err == ESP_OK) {
             *info = (disk_info_t) { .source = DISK_SRC_FLASH, .slot = slot,
                                     .size = r->size, .crc32 = r->crc32 };
-            memcpy(info->name, r->name, sizeof(info->name) - 1);
+            memcpy(info->name, title, sizeof(info->name));
         }
     } else if (legacy_catalog_open()) {
         err = ESP_ERR_NOT_FOUND;

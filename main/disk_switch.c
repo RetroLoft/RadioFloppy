@@ -67,7 +67,7 @@ static esp_err_t slot_locked(int slot, switch_error_t *e)
     const slot_record_t *r = slot_store_record(slot);
     disk_info_t info = { .source = DISK_SRC_FLASH, .slot = slot,
                          .size = r->size, .crc32 = r->crc32 };
-    memcpy(info.name, r->name, sizeof(info.name));
+    slot_record_title(r, info.name);
 
     uint8_t *raw = heap_caps_malloc(r->size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!raw) {

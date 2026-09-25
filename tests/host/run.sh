@@ -8,7 +8,9 @@ gcc $CFLAGS -o test_slot_store test_slot_store.c mock_ext_flash.c \
     ../../main/slot_store.c ../../main/legacy_catalog.c
 gcc $CFLAGS -o test_st_image test_st_image.c ../../main/st_image.c
 gcc $CFLAGS -o test_mfm test_mfm.c ../../main/mfm_track.c
+gcc $CFLAGS -o test_title test_title.c ../../main/disk_title.c ../../main/oled_gfx.c
 
 echo "== slot store =="; ./test_slot_store
 echo "== .ST validation =="; ./test_st_image
 echo "== MFM tracks and flux timing =="; ./test_mfm
+echo "== titles and OLED wrap =="; ./test_title

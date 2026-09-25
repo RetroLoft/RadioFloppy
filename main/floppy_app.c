@@ -30,6 +30,7 @@
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "flux_stream.h"
+#include "oled.h"
 #include "status_led.h"
 #include "step_sound.h"
 #include "tests.h"
@@ -317,6 +318,9 @@ void floppy_emu_run(void)
     printf("RMT ready (%d MHz, RDATA pulse %d.%d us, stream running, outputs gated).\n",
            FLUX_RESOLUTION_HZ / 1000000, FLUX_PULSE_TICKS / 10, FLUX_PULSE_TICKS % 10);
     status_led_init();              /* indication only: failure is not fatal */
+    if (oled_init()) {              /* optional display: absence is not fatal */
+        oled_start_disk_title();    /* title of the active disk, kept up to date */
+    }
 
     if (!verify_outputs_released()) {
         printf("Output check failed - emulator stays disabled.\n");

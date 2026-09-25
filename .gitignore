@@ -22,3 +22,4 @@ tests/host/test_st_image
 # Python
 __pycache__/
 tests/host/test_mfm
+tests/host/test_title

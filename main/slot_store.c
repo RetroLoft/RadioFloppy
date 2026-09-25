@@ -131,11 +131,45 @@ bool slot_store_is_valid(int slot)
            r->format == SLOT_FMT_ST && memchr(r->name, 0, SLOT_NAME_LEN) != NULL;
 }
 
+void slot_record_title(const slot_record_t *r, char out[SLOT_TITLE_SIZE])
+{
+    size_t n = strnlen(r->name, SLOT_NAME_LEN - 1);
+
+    memcpy(out, r->name, n);
+    /* The continuation only counts after a full name field. */
+    if (n == SLOT_NAME_LEN - 1 && (uint8_t)r->name_ext[0] != 0xff) {
+        size_t e = strnlen(r->name_ext, SLOT_NAME_EXT_LEN - 1);
+        memcpy(out + n, r->name_ext, e);
+        n += e;
+    }
+    out[n] = 0;
+}
+
+/* Store a title of up to SLOT_TITLE_MAX characters in name + name_ext. */
+static void set_title(slot_record_t *r, const char *title)
+{
+    size_t len = strnlen(title, SLOT_TITLE_MAX);
+    size_t n = len < SLOT_NAME_LEN - 1 ? len : SLOT_NAME_LEN - 1;
+
+    memset(r->name, 0, sizeof(r->name));
+    memcpy(r->name, title, n);
+    memset(r->name_ext, 0xff, sizeof(r->name_ext));
+    if (len > n) {
+        memset(r->name_ext, 0, sizeof(r->name_ext));
+        memcpy(r->name_ext, title + n, len - n);
+    }
+}
+
 int slot_store_find_name(const char *name)
 {
+    char title[SLOT_TITLE_SIZE];
+
     for (int i = 0; i < RF_SLOT_COUNT; i++) {
-        if (slot_store_is_valid(i) && strncmp(cat.slot[i].name, name, SLOT_NAME_LEN) == 0) {
-            return i;
+        if (slot_store_is_valid(i)) {
+            slot_record_title(&cat.slot[i], title);
+            if (strcmp(title, name) == 0) {
+                return i;
+            }
         }
     }
     return -1;
@@ -232,8 +266,7 @@ esp_err_t slot_store_prepare(int slot, const char *name, uint8_t format,
 
     slot_record_t *r = &c->slot[slot];
     memset(r, 0xff, sizeof(*r));
-    memset(r->name, 0, sizeof(r->name));
-    strncpy(r->name, name, SLOT_NAME_LEN - 1);
+    set_title(r, name);
     r->size = size;
     r->crc32 = crc32;
     r->format = format;
@@ -387,9 +420,11 @@ esp_err_t slot_store_migrate_legacy(int *migrated)
             continue;
         }
         slot_record_t *r = &c->slot[slot];
+        char title[SLOT_TITLE_SIZE];
         memset(r, 0xff, sizeof(*r));
-        memset(r->name, 0, sizeof(r->name));
-        memcpy(r->name, l->name, SLOT_NAME_LEN - 1);
+        memcpy(title, l->name, SLOT_NAME_LEN - 1);
+        title[SLOT_NAME_LEN - 1] = 0;
+        set_title(r, title);
         r->size = l->size;
         r->crc32 = l->crc32;
         r->format = SLOT_FMT_ST;

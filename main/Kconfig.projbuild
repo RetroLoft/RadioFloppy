@@ -12,8 +12,8 @@ menu "RadioFloppy"
         default ""
 
     config RADIOFLOPPY_HOSTNAME
-        string "Hostname"
-        default "radiofloppy"
+        string "Hostname (network name)"
+        default "RadioFloppy"
 
     config RADIOFLOPPY_API_TOKEN
         string "Optional API token for upload / delete / activate"

@@ -29,6 +29,7 @@
 #include "api.h"
 #include "disk_image.h"
 #include "disk_switch.h"
+#include "disk_title.h"
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "ext_flash.h"
@@ -56,7 +57,7 @@ static const char *const state_names[] = {
 typedef struct {
     uint32_t id;
     upload_state_t state;
-    char name[SLOT_NAME_LEN];
+    char name[DISK_TITLE_SIZE];
     uint32_t size;
     bool to_flash;
     int slot;               /* requested slot 0..19, -1 = first free */
@@ -214,34 +215,6 @@ static int parse_slot(const char *s)
     char *end;
     long n = strtol(s, &end, 10);
     return (end != s && *end == 0 && n >= 1 && n <= RF_SLOT_COUNT) ? (int)n - 1 : -1;
-}
-
-/* Display name from a client file name: base name, no extension, printable. */
-static void name_from_filename(const char *fn, char out[SLOT_NAME_LEN])
-{
-    const char *base = fn;
-    for (const char *p = fn; *p; p++) {
-        if (*p == '/' || *p == '\\') {
-            base = p + 1;
-        }
-    }
-    size_t len = strlen(base);
-    const char *dot = strrchr(base, '.');
-    if (dot && dot != base) {
-        len = dot - base;
-    }
-    size_t o = 0;
-    for (size_t i = 0; i < len && o < SLOT_NAME_LEN - 1; i++) {
-        char c = base[i];
-        out[o++] = (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') ? c : '_';
-    }
-    while (o && out[o - 1] == ' ') {
-        o--;
-    }
-    out[o] = 0;
-    if (o == 0) {
-        strcpy(out, "Untitled");
-    }
 }
 
 static void fail_upload(const char *code, const char *fmt, ...)
@@ -530,8 +503,10 @@ static esp_err_t get_slots(httpd_req_t *req)
         cJSON_AddStringToObject(s, "status", status == SLOT_VALID && !slot_store_is_valid(i)
                                              ? "invalid" : slot_status_name(status));
         if (status == SLOT_VALID) {
+            char title[SLOT_TITLE_SIZE];
+            slot_record_title(r, title);
             hex32(crc, r->crc32);
-            cJSON_AddStringToObject(s, "name", r->name);
+            cJSON_AddStringToObject(s, "name", title);
             cJSON_AddNumberToObject(s, "size", r->size);
             cJSON_AddStringToObject(s, "crc32", crc);
             cJSON_AddStringToObject(s, "format", "st");
@@ -717,7 +692,7 @@ static esp_err_t post_upload(httpd_req_t *req)
     memset(&up, 0, sizeof(up));
     up.id = next_upload_id++;
     up.state = UP_READY;
-    name_from_filename(jfn->valuestring, up.name);
+    disk_title_from_filename(jfn->valuestring, up.name);
     up.size = size;
     up.to_flash = to_flash;
     up.slot = slot;

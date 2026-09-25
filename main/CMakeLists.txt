@@ -14,13 +14,16 @@ idf_component_register(SRCS "main.c"
                             "status_led.c"
                             "led_test.c"
                             "st_image.c"
+                            "disk_title.c"
                             "wifi_net.c"
                             "api.c"
                             "disk_switch.c"
                             "buttons.c"
+                            "oled.c"
+                            "oled_gfx.c"
                        INCLUDE_DIRS "."
                        EMBED_TXTFILES "../web/index.html"
-                       PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_driver_spi esp_rom
+                       PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_driver_spi esp_driver_i2c esp_rom
                                      esp_timer esp_psram heap spi_flash
-                                     esp_wifi esp_netif esp_event nvs_flash esp_http_server json)
+                                     esp_wifi esp_netif esp_event nvs_flash esp_http_server json esp_app_format)
 

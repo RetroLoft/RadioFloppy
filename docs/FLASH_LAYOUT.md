@@ -65,12 +65,15 @@ Slot record:
 
 | Offset | Type     | Field  | Meaning                                              |
 | ------ | -------- | ------ | ---------------------------------------------------- |
-| 0      | char[40] | name   | NUL terminated                                       |
+| 0      | char[40] | name   | title, first 40 characters; NUL terminated if shorter |
 | 40     | u32      | size   | real image length in bytes                           |
 | 44     | u32      | crc32  | CRC-32 (IEEE, as zlib `crc32()`) over `size` bytes   |
 | 48     | u8       | format | 1 = `.ST`                                            |
 | 49     | u8       | status | `0xFF` empty, 1 valid, 2 building, 3 deleted         |
-| 50     | 14       | pad    | `0xFF`, reserved                                     |
+| 50     | char[14] | name_ext | title continuation (characters 41-52), NUL terminated; `0xFF` = none (older records) |
+
+Titles are at most 52 characters. A record written before `name_ext` existed has `0xFF` there
+and reads as its 40-character `name`.
 
 The start address is not stored: it follows from the slot number.
 
