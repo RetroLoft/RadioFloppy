@@ -8,8 +8,9 @@
  * selected (drive_swap_media). The flux stream reads the tracks through
  * disk_track_raw() and never waits for any of this.
  *
- * At start-up the image named DISK_BOOT_IMAGE (else the first valid image
- * in sequence order) is loaded from the external flash image library; with
+ * At start-up the image that was active at power-off (settings), else the
+ * one named DISK_BOOT_IMAGE, else the first valid image in sequence order
+ * is loaded from the external flash image library; with
  * none, the drive has no disk.
  */
 #pragma once

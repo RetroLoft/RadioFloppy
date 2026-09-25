@@ -30,6 +30,8 @@ typedef struct {
     char wifi_pass[SETTINGS_PASS_MAX + 1];
     uint8_t wifi_security;      /* wifi_security_t */
     uint8_t drive_select;       /* 0 = DS0 (drive A:), 1 = DS1 (drive B:) */
+    uint8_t buzzer;             /* 1 = step and button clicks on (default) */
+    uint16_t last_image_id;     /* library image active at power-off, 0 = none */
 } settings_t;
 
 /* Read the settings (initialises the external flash if needed). */
@@ -40,8 +42,13 @@ bool settings_stored(void);
 
 void settings_get(settings_t *out);
 
-/* Validate and store; the new values are returned by settings_get() at once. */
+/* Validate and store; the new values are returned by settings_get() at once.
+ * Any task (serialised internally). */
 esp_err_t settings_save(const settings_t *s);
+
+/* Store the last active library image, only if it differs from the stored
+ * one (no flash write otherwise). */
+esp_err_t settings_set_last_image(uint16_t image_id);
 
 /* RFC 1123 label: 1..32 letters, digits and '-', not starting/ending with '-'. */
 bool settings_hostname_valid(const char *h);

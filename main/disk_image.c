@@ -22,6 +22,7 @@
 #include "st_image.h"
 #include "ext_flash.h"
 #include "image_store.h"
+#include "settings.h"
 
 uint8_t *volatile disk_tracks;
 volatile uint32_t disk_track_cells = MFM_TRACK_CELLS;
@@ -245,7 +246,8 @@ static void report_store(store_state_t st)
     }
 }
 
-/* Find the start-up image: by name, else the first valid image in sequence order. */
+/* Start-up image: the one active at power-off, else by name, else the first
+ * valid image in sequence order. */
 static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
 {
     esp_err_t err = ext_flash_init();
@@ -256,7 +258,18 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
     store_state_t st = image_store_open(ext_flash_size());
     report_store(st);
 
-    uint16_t id = image_store_find_name(DISK_BOOT_IMAGE);
+    settings_t cfg;
+    image_record_t last;
+    settings_get(&cfg);
+    uint16_t id = 0;
+    if (cfg.last_image_id && image_store_get(cfg.last_image_id, &last) &&
+        image_store_is_valid(&last)) {
+        id = cfg.last_image_id;
+        printf("Last disk: image %u (active at power-off)\n", id);
+    }
+    if (!id) {
+        id = image_store_find_name(DISK_BOOT_IMAGE);
+    }
     if (!id) {
         image_record_t *list = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*list),
                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

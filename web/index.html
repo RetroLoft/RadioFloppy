@@ -202,15 +202,22 @@
   <section aria-labelledby="h-drive">
     <h2 id="h-drive">Floppy drive</h2>
     <form id="driveform" class="current" autocomplete="off">
-      <label class="opt"><input type="radio" name="ds" value="DS1">
-        <span><strong>Drive B:</strong> (DS1) <span class="muted small">— external second drive, next to the
-        internal drive A:. Usual choice.</span></span></label>
       <label class="opt"><input type="radio" name="ds" value="DS0">
         <span><strong>Drive A:</strong> (DS0) <span class="muted small">— only when the Atari has no working
         internal drive A: (disconnected), or RadioFloppy replaces it.</span></span></label>
+      <label class="opt"><input type="radio" name="ds" value="DS1">
+        <span><strong>Drive B:</strong> (DS1) <span class="muted small">— external second drive, next to the
+        internal drive A:. Usual choice.</span></span></label>
       <div class="row"><button id="drivesave" type="submit">Save</button>
         <span id="driveinfo" class="small muted"></span></div>
     </form>
+  </section>
+
+  <section aria-labelledby="h-sound">
+    <h2 id="h-sound">Sound</h2>
+    <label class="opt"><input type="checkbox" id="buzzer">
+      <span><strong>Buzzer</strong> <span class="muted small">— a click for every head step and button press,
+      like a real drive. Takes effect at once.</span></span></label>
   </section>
 
   <section aria-labelledby="h-wifi">
@@ -795,9 +802,11 @@ function renderSettings(d) {
   $("driveinfo").textContent = d.drive_select !== d.drive_select_active
     ? "Now answering as " + (d.drive_select_active === "DS0" ? "A:" : "B:") + " until the restart."
     : "";
+  $("buzzer").checked = !!d.buzzer;
   const locked = S.authRequired && !S.token;
   $("hostsave").disabled = locked;
   $("drivesave").disabled = locked;
+  $("buzzer").disabled = locked;
   $("restart").disabled = locked;
 }
 
@@ -850,6 +859,24 @@ $("driveform").addEventListener("submit", async (ev) => {
     showSetMsg("err", "RadioFloppy cannot be reached.");
   }
   $("drivesave").disabled = false;
+});
+
+$("buzzer").addEventListener("change", async () => {
+  const on = $("buzzer").checked;
+  showSetMsg("", "");
+  try {
+    const r = await api("PUT", "/api/v1/settings", { buzzer: on }, 12000, true);
+    if (r.status === 200) {
+      renderSettings(r.data);
+      showSetMsg("ok", "Buzzer " + (on ? "on." : "off."));
+    } else {
+      $("buzzer").checked = !on;
+      showSetMsg("err", errorText(r.data, r.status).text);
+    }
+  } catch (e) {
+    $("buzzer").checked = !on;
+    showSetMsg("err", "RadioFloppy cannot be reached.");
+  }
 });
 
 $("restart").addEventListener("click", async () => {

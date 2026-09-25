@@ -5,6 +5,11 @@
  * track buffer (disk_prepare) -> swapped in while our drive is not selected
  * (disk_activate_prepared) -> tracks verified again in the background.
  * Runs in task context on core 1.
+ *
+ * The active library image is remembered in the settings (restored at the
+ * next start-up), but only REMEMBER_MS after the last change and only if
+ * it differs from the stored one: stepping through disks with the buttons
+ * writes the flash once, not for every press.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,13 +22,46 @@
 
 #include "disk_switch.h"
 #include "image_store.h"
+#include "settings.h"
 #include "st_image.h"
 
 #define ACTIVATE_TIMEOUT_MS 3000    /* wait for our drive to be deselected */
+#define REMEMBER_MS         5000    /* quiet time before the last image is stored */
 
 static SemaphoreHandle_t lock;
 static uint8_t *psram_raw;          /* the kept PSRAM image */
 static disk_info_t psram_info;
+
+static TaskHandle_t remember_task;
+
+/* Waits for a change, then until REMEMBER_MS passed without another one. */
+static void remember_task_fn(void *arg)
+{
+    uint32_t id, newer;
+
+    while (true) {
+        xTaskNotifyWait(0, UINT32_MAX, &id, portMAX_DELAY);
+        /* A time-out also writes the (cleared) value: keep it apart. */
+        while (xTaskNotifyWait(0, UINT32_MAX, &newer, pdMS_TO_TICKS(REMEMBER_MS)) == pdTRUE) {
+            id = newer;
+        }
+        settings_t s;
+        settings_get(&s);
+        if (s.last_image_id != id) {
+            esp_err_t err = settings_set_last_image((uint16_t)id);
+            printf("Last disk: image %lu remembered%s\n", (unsigned long)id,
+                   err == ESP_OK ? "" : " - FAILED");
+        }
+    }
+}
+
+/* A library image became active: remember it (later, see REMEMBER_MS). */
+static void remember(const disk_info_t *info)
+{
+    if (remember_task && info->source == DISK_SRC_FLASH && info->image_id) {
+        xTaskNotify(remember_task, info->image_id, eSetValueWithOverwrite);
+    }
+}
 
 static esp_err_t fail(switch_error_t *e, const char *code, const char *fmt, const char *arg)
 {
@@ -53,6 +91,7 @@ static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, sw
            load_us / 1000, (t1 - t0) / 1000, (t2 - t1) / 1000);
     load_us = 0;
     disk_verify_active(raw, info);      /* background, log only */
+    remember(info);
     return ESP_OK;
 }
 
@@ -104,6 +143,7 @@ static esp_err_t psram_locked(switch_error_t *e)
 void disk_switch_init(void)
 {
     lock = xSemaphoreCreateMutex();
+    xTaskCreatePinnedToCore(remember_task_fn, "remember", 3072, NULL, 1, &remember_task, 1);
 }
 
 esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e)

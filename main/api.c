@@ -37,6 +37,7 @@
 #include "drive_emu.h"
 #include "ext_flash.h"
 #include "settings.h"
+#include "step_sound.h"
 #include "image_store.h"
 #include "st_image.h"
 #include "wifi_net.h"
@@ -968,6 +969,8 @@ static cJSON *settings_json(void)
     cJSON_AddStringToObject(root, "hostname", s.hostname);
     cJSON_AddStringToObject(root, "drive_select", s.drive_select == 0 ? "DS0" : "DS1");
     cJSON_AddStringToObject(root, "drive_select_active", running_ds == 0 ? "DS0" : "DS1");
+    cJSON_AddBoolToObject(root, "buzzer", s.buzzer);
+    cJSON_AddNumberToObject(root, "last_image_id", s.last_image_id);
     cJSON_AddBoolToObject(root, "restart_required", strcmp(s.hostname, w.hostname) != 0 ||
                                                    s.drive_select != running_ds ||
                                                    restart_pending);
@@ -1021,6 +1024,14 @@ static esp_err_t put_settings(httpd_req_t *req)
         }
         s.drive_select = ds->valuestring[2] == '0' ? 0 : 1;
     }
+    const cJSON *bz = cJSON_GetObjectItem(body, "buzzer");
+    if (bz) {
+        if (!cJSON_IsBool(bz)) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_400, "INVALID_REQUEST", "\"buzzer\" must be true or false");
+        }
+        s.buzzer = cJSON_IsTrue(bz);
+    }
     cJSON_Delete(body);
 
     settings_t old;
@@ -1031,9 +1042,10 @@ static esp_err_t put_settings(httpd_req_t *req)
             return send_error(req, HTTP_500, "FLASH_ERROR", "settings could not be saved (%s)",
                               esp_err_to_name(err));
         }
-        printf("API: settings saved (host name %s, drive %s)\n", s.hostname,
-               s.drive_select == 0 ? "A: / DS0" : "B: / DS1");
+        printf("API: settings saved (host name %s, drive %s, buzzer %s)\n", s.hostname,
+               s.drive_select == 0 ? "A: / DS0" : "B: / DS1", s.buzzer ? "on" : "off");
     }
+    step_sound_set_enabled(s.buzzer);   /* takes effect at once */
     return send_json(req, "200 OK", settings_json());
 }
 

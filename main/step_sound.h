@@ -10,6 +10,9 @@
 #define STEP_SOUND_PULSE_MS     3   /* buzzer on per STEP (try 2, 3 or 5) */
 #define STEP_SOUND_MIN_OFF_MS   1   /* forced silence between two clicks */
 
+/* Setting "buzzer": false silences step and button clicks (any time). */
+void step_sound_set_enabled(bool on);
+
 /* Buzzer output LOW, timer created. Call before the drive interrupts. */
 void step_sound_init(void);
 

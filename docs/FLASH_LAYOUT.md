@@ -165,7 +165,7 @@ wins. Until anything is saved, the firmware uses its menuconfig defaults.
 | Offset | Type     | Field          | Meaning                                         |
 | ------ | -------- | -------------- | ----------------------------------------------- |
 | 0      | u32      | magic          | `0x54534652` ("RFST")                           |
-| 4      | u16      | version        | 2 (version 1 = 148 bytes without drive_select, still read as DS1) |
+| 4      | u16      | version        | 3 (2: without buzzer_off/last_image_id, those bytes 0; 1: 148 bytes, read as DS1) |
 | 6      | u16      | size           | record size in bytes (152)                      |
 | 8      | u32      | generation     | +1 on every save                                |
 | 12     | u32      | crc32          | CRC-32 over the record with this field = 0      |
@@ -174,7 +174,8 @@ wins. Until anything is saved, the firmware uses its menuconfig defaults.
 | 82     | char[65] | wifi_pass      | NUL terminated (plain text)                     |
 | 147    | u8       | wifi_security  | 0 WPA2/WPA3, 1 WPA3 only, 2 WPA/WPA2, 3 open    |
 | 148    | u8       | drive_select   | 0 = DS0 (drive A:), 1 = DS1 (drive B:)          |
-| 149    | 3        | padding        | 0                                               |
+| 149    | u8       | buzzer_off     | 0 = buzzer on (default), 1 = off                |
+| 150    | u16      | last_image_id  | Image active at power-off (0 = none); written 5 s after the last disk change, only when it differs |
 | 4092   | u32      | commit         | `0x21544D43` ("CMT!"), written last             |
 
 The WiFi password is stored in plain text: anyone with the board in hand can

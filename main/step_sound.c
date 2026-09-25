@@ -32,6 +32,15 @@ static portMUX_TYPE sound_lock = portMUX_INITIALIZER_UNLOCKED;
 static esp_timer_handle_t sound_timer;
 static sound_state_t state = SOUND_IDLE;
 static bool pending;
+static volatile bool enabled = true;    /* setting "buzzer" */
+
+void step_sound_set_enabled(bool on)
+{
+    enabled = on;
+    if (!on) {
+        step_sound_stop_isr();          /* also safe in task context */
+    }
+}
 
 /* Call with sound_lock held. */
 static void IRAM_ATTR start_click_locked(void)
@@ -87,6 +96,9 @@ void step_sound_init(void)
 void IRAM_ATTR step_sound_step_isr(void)
 {
 #if STEP_SOUND_ENABLED
+    if (!enabled) {
+        return;
+    }
     portENTER_CRITICAL_ISR(&sound_lock);
     if (state == SOUND_IDLE) {
         start_click_locked();
@@ -99,6 +111,9 @@ void IRAM_ATTR step_sound_step_isr(void)
 
 void step_sound_click(void)
 {
+    if (!enabled) {
+        return;
+    }
     portENTER_CRITICAL(&sound_lock);
     if (state == SOUND_IDLE) {
         start_click_locked();

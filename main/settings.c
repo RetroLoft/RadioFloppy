@@ -16,6 +16,17 @@
 #include "flash_layout.h"
 #include "settings.h"
 
+#ifdef SETTINGS_NO_LOCK                 /* host tests: single threaded */
+#define settings_lock()
+#define settings_unlock()
+#else
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+static SemaphoreHandle_t mutex;
+#define settings_lock()     xSemaphoreTake(mutex, portMAX_DELAY)
+#define settings_unlock()   xSemaphoreGive(mutex)
+#endif
+
 #ifndef SETTINGS_DEFAULT_HOSTNAME       /* host tests define their own */
 #include "sdkconfig.h"
 #define SETTINGS_DEFAULT_HOSTNAME   CONFIG_RADIOFLOPPY_HOSTNAME
@@ -24,7 +35,7 @@
 #endif
 
 #define SET_MAGIC       0x54534652  /* "RFST" little endian */
-#define SET_VERSION     2           /* 2: + drive_select */
+#define SET_VERSION     3           /* 2: + drive_select, 3: + buzzer_off, last_image_id */
 #define SET_V1_SIZE     148         /* version 1 records are still read */
 #define SET_COMMIT      0x21544d43  /* "CMT!", last word of the sector */
 #define COMMIT_OFFSET   (RF_SECTOR_SIZE - 4)
@@ -40,7 +51,11 @@ typedef struct {
     char wifi_pass[SETTINGS_PASS_MAX + 1];
     uint8_t wifi_security;
     uint8_t drive_select;       /* since version 2 */
+    uint8_t buzzer_off;         /* since version 3 (was 0 padding in 2): 0 = on */
+    uint16_t last_image_id;     /* since version 3 (was 0 padding in 2): 0 = none */
 } record_t;
+
+_Static_assert(sizeof(record_t) == 152, "settings record layout");
 
 static settings_t current;
 static uint32_t generation;
@@ -72,15 +87,17 @@ static bool read_copy(int copy, record_t *r)
     bool v1 = r->version == 1 && r->size == SET_V1_SIZE;
     if (v1) {
         r->drive_select = 1;            /* before version 2 always DS1 (B:) */
+        r->buzzer_off = 0;
+        r->last_image_id = 0;
     }
     bool layout = v1 ? r->crc32 == record_crc(r, SET_V1_SIZE)
-                     : r->version == SET_VERSION && r->size == sizeof(*r) &&
+                     : (r->version == 2 || r->version == SET_VERSION) && r->size == sizeof(*r) &&
                        r->crc32 == record_crc(r, sizeof(*r)) && r->drive_select <= 1;
     return r->magic == SET_MAGIC && commit == SET_COMMIT && layout &&
            terminated(r->hostname, sizeof(r->hostname)) &&
            terminated(r->wifi_ssid, sizeof(r->wifi_ssid)) &&
            terminated(r->wifi_pass, sizeof(r->wifi_pass)) &&
-           r->wifi_security < WIFI_SEC_COUNT;
+           r->wifi_security < WIFI_SEC_COUNT && r->buzzer_off <= 1;
 }
 
 static void defaults(settings_t *s)
@@ -93,6 +110,8 @@ static void defaults(settings_t *s)
     snprintf(s->wifi_pass, sizeof(s->wifi_pass), "%s", SETTINGS_DEFAULT_PASS);
     s->wifi_security = s->wifi_pass[0] ? WIFI_SEC_WPA2 : WIFI_SEC_OPEN;
     s->drive_select = 1;                /* DS1: drive B: */
+    s->buzzer = 1;
+    s->last_image_id = 0;
 }
 
 esp_err_t settings_init(void)
@@ -100,6 +119,11 @@ esp_err_t settings_init(void)
     record_t r[2];
     bool ok[2];
 
+#ifndef SETTINGS_NO_LOCK
+    if (!mutex) {
+        mutex = xSemaphoreCreateMutex();
+    }
+#endif
     defaults(&current);
     current_copy = -1;
     generation = 0;
@@ -118,6 +142,8 @@ esp_err_t settings_init(void)
     memcpy(current.wifi_pass, r[best].wifi_pass, sizeof(current.wifi_pass));
     current.wifi_security = r[best].wifi_security;
     current.drive_select = r[best].drive_select;
+    current.buzzer = !r[best].buzzer_off;
+    current.last_image_id = r[best].last_image_id;
     generation = r[best].generation;
     current_copy = best;
     return ESP_OK;
@@ -130,10 +156,36 @@ bool settings_stored(void)
 
 void settings_get(settings_t *out)
 {
+    settings_lock();
     *out = current;
+    settings_unlock();
 }
 
+static esp_err_t save_locked(const settings_t *s);
+
 esp_err_t settings_save(const settings_t *s)
+{
+    settings_lock();
+    esp_err_t err = save_locked(s);
+    settings_unlock();
+    return err;
+}
+
+esp_err_t settings_set_last_image(uint16_t image_id)
+{
+    esp_err_t err = ESP_OK;
+
+    settings_lock();
+    if (current.last_image_id != image_id) {
+        settings_t s = current;
+        s.last_image_id = image_id;
+        err = save_locked(&s);
+    }
+    settings_unlock();
+    return err;
+}
+
+static esp_err_t save_locked(const settings_t *s)
 {
     if (!ext_flash_ready()) {
         return ESP_ERR_INVALID_STATE;
@@ -142,7 +194,7 @@ esp_err_t settings_save(const settings_t *s)
         !terminated(s->wifi_ssid, sizeof(s->wifi_ssid)) ||
         !terminated(s->wifi_pass, sizeof(s->wifi_pass)) ||
         !settings_hostname_valid(s->hostname) || s->wifi_security >= WIFI_SEC_COUNT ||
-        s->drive_select > 1 ||
+        s->drive_select > 1 || s->buzzer > 1 ||
         (s->wifi_ssid[0] && !settings_password_valid(s->wifi_pass, s->wifi_security))) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -158,6 +210,8 @@ esp_err_t settings_save(const settings_t *s)
     memcpy(r.wifi_pass, s->wifi_pass, sizeof(r.wifi_pass));
     r.wifi_security = s->wifi_security;
     r.drive_select = s->drive_select;
+    r.buzzer_off = !s->buzzer;
+    r.last_image_id = s->last_image_id;
     r.crc32 = record_crc(&r, sizeof(r));
 
     /* Never touch the copy in use. */

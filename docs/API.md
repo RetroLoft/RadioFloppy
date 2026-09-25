@@ -32,7 +32,7 @@ the device itself, uses only this API and needs no internet access:
   the old image is lost) and **Delete**; above the list the storage use,
   e.g. *Storage: 61% used*.
 - **Admin access** — only shown when the device has a token; it is kept only in the open page.
-- **Settings** (gear icon, top right, `/#settings`) — host name, floppy drive (A:/B:), WiFi status,
+- **Settings** (gear icon, top right, `/#settings`) — host name, floppy drive (A:/B:), buzzer on/off, WiFi status,
   firmware version and a *Check for updates* button (not functional yet).
 
 The page polls `GET /current` every 3 s and `GET /images` every 15 s (and
@@ -94,8 +94,9 @@ what the Atari reads from drive B:. It can come from
 - **PSRAM** — one temporary image that is lost when the device restarts.
 
 `GET /api/v1/current` tells you which one it is. After a restart the device
-inserts the stored image named *Crystal Castles* (or else the first valid
-image in `sequence` order); a PSRAM image is gone. A stored image is always
+inserts the library image that was active last (else the one named
+*Crystal Castles*, else the first valid image in `sequence` order); a PSRAM
+image is gone. A stored image is always
 read completely into PSRAM and prepared before the Atari sees it.
 
 ### My floppy images
@@ -491,6 +492,8 @@ State of an upload. Only the most recent upload is kept; older ids give
   "hostname": "RadioFloppy",
   "drive_select": "DS1",
   "drive_select_active": "DS1",
+  "buzzer": true,
+  "last_image_id": 6,
   "restart_required": false,
   "wifi": { "ssid": "MyNetwork", "security": "wpa2", "connected": true,
             "ip": "192.168.178.62", "rssi": -38 },
@@ -506,7 +509,7 @@ saved setting only takes effect after a restart (e.g. a new host name).
 Body (`Content-Type: application/json`), every field optional:
 
 ```json
-{ "hostname": "Atari-B", "drive_select": "DS1" }
+{ "hostname": "Atari-B", "drive_select": "DS1", "buzzer": false }
 ```
 
 - `hostname`: 1–32 letters, digits or `-`, not starting or ending with `-`
@@ -517,6 +520,14 @@ Body (`Content-Type: application/json`), every field optional:
   else `422 INVALID_DRIVE_SELECT`. Like the drive-select jumper of a real
   drive. Takes effect after a restart; `drive_select_active` in the answer
   is the line in use until then.
+- `buzzer`: `true`/`false` — clicks for head steps and button presses.
+  Takes effect at once.
+
+`last_image_id` (read only) is the library image that is loaded at the next
+start-up. It is stored 5 s after the last disk change (so stepping through
+disks with the buttons writes the flash once) and only when it changed; a
+temporary PSRAM image is not remembered. If that image no longer exists,
+the start-up falls back to *Crystal Castles*, else the first image.
 
 Answer: the settings as with `GET`. The WiFi network is changed in
 [WiFi setup mode](#wifi-setup-mode), not here.
@@ -714,8 +725,9 @@ A complete test suite that exercises every endpoint and error is in
   requests until it is done.
 - The emulated drive keeps working while the API is used. Uploading or
   deleting never disturbs the disk the Atari is reading.
-- Restarting the device removes the PSRAM image and inserts the stored
-  image named *Crystal Castles*, else the first valid image in `sequence` order.
+- Restarting the device removes the PSRAM image and inserts the library
+  image that was active last (see `last_image_id`), else the image named
+  *Crystal Castles*, else the first valid image in `sequence` order.
 
 ## Device configuration
 

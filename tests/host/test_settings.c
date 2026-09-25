@@ -150,6 +150,39 @@ static void test_drive_select(void)
     settings_init();
     settings_get(&r);
     CHECK(settings_stored() && strcmp(r.hostname, "OldOne") == 0 && r.drive_select == 1);
+    CHECK(r.buzzer == 1 && r.last_image_id == 0);   /* v1 bytes 148.. were 0xFF */
+}
+
+static void test_buzzer_and_last_image(void)
+{
+    settings_t s, r;
+
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    CHECK(s.buzzer == 1 && s.last_image_id == 0);
+    s.buzzer = 0;
+    CHECK(settings_save(&s) == ESP_OK);
+    int erases = mock_erase_count;
+    CHECK(settings_set_last_image(7) == ESP_OK);
+    CHECK(mock_erase_count == erases + 1);          /* one write */
+    CHECK(settings_set_last_image(7) == ESP_OK);
+    CHECK(mock_erase_count == erases + 1);          /* same id: no write */
+    settings_init();
+    settings_get(&r);
+    CHECK(r.buzzer == 0 && r.last_image_id == 7);
+
+    /* A version 2 record (same size, the new fields were 0 padding). */
+    uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
+                                 ? RF_SETTINGS_A : RF_SETTINGS_B);
+    rec[4] = 2; rec[5] = 0;
+    memset(rec + 149, 0, 3);
+    memset(rec + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, rec, 152);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && r.buzzer == 1 && r.last_image_id == 0);
 }
 
 int main(void)
@@ -159,6 +192,7 @@ int main(void)
     test_corrupt_copy();
     test_validation();
     test_drive_select();
+    test_buzzer_and_last_image();
     printf(failures ? "FAILED (%d)\n" : "settings OK\n", failures);
     return failures != 0;
 }

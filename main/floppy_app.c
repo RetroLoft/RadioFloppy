@@ -295,6 +295,7 @@ void floppy_emu_run(void)
     settings_t cfg;
     settings_get(&cfg);
     drive_set_select_line(cfg.drive_select);    /* before any drive interrupt */
+    step_sound_set_enabled(cfg.buzzer);
 
     printf("\n========================================\n");
     printf(" RadioFloppy\n");
