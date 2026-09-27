@@ -14,6 +14,7 @@
 
 #include "ext_flash.h"
 #include "flash_layout.h"
+#include "machine.h"
 #include "settings.h"
 
 #ifdef SETTINGS_NO_LOCK                 /* host tests: single threaded */
@@ -35,7 +36,8 @@ static SemaphoreHandle_t mutex;
 #endif
 
 #define SET_MAGIC       0x54534652  /* "RFST" little endian */
-#define SET_VERSION     3           /* 2: + drive_select, 3: + buzzer_off, last_image_id */
+#define SET_VERSION     4           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
+                                       4: + machine */
 #define SET_V1_SIZE     148         /* version 1 records are still read */
 #define SET_COMMIT      0x21544d43  /* "CMT!", last word of the sector */
 #define COMMIT_OFFSET   (RF_SECTOR_SIZE - 4)
@@ -53,9 +55,11 @@ typedef struct {
     uint8_t drive_select;       /* since version 2 */
     uint8_t buzzer_off;         /* since version 3 (was 0 padding in 2): 0 = on */
     uint16_t last_image_id;     /* since version 3 (was 0 padding in 2): 0 = none */
+    uint8_t machine;            /* since version 4: machine_t */
 } record_t;
 
-_Static_assert(sizeof(record_t) == 152, "settings record layout");
+_Static_assert(sizeof(record_t) == 156, "settings record layout");
+_Static_assert(offsetof(record_t, machine) == 152, "settings record layout");
 
 static settings_t current;
 static uint32_t generation;
@@ -76,6 +80,18 @@ static bool terminated(const char *s, size_t size)
     return memchr(s, 0, size) != NULL;
 }
 
+/* Record size of each version (older versions are still read). */
+static size_t version_size(uint16_t version)
+{
+    switch (version) {
+    case 1:  return SET_V1_SIZE;        /* no drive_select */
+    case 2:                             /* + drive_select (+ 3 bytes 0) */
+    case 3:  return 152;                /* + buzzer_off, last_image_id */
+    case 4:  return sizeof(record_t);   /* + machine */
+    default: return 0;
+    }
+}
+
 static bool read_copy(int copy, record_t *r)
 {
     uint32_t commit = 0;
@@ -84,20 +100,27 @@ static bool read_copy(int copy, record_t *r)
         ext_flash_read(copy_addr[copy] + COMMIT_OFFSET, &commit, sizeof(commit)) != ESP_OK) {
         return false;
     }
-    bool v1 = r->version == 1 && r->size == SET_V1_SIZE;
-    if (v1) {
+    size_t len = version_size(r->version);
+    if (!len || r->size != len || r->crc32 != record_crc(r, len)) {
+        return false;
+    }
+    /* Fields newer than the record: their defaults (outside the CRC). */
+    if (r->version < 2) {
         r->drive_select = 1;            /* before version 2 always DS1 (B:) */
+    }
+    if (r->version < 3) {
         r->buzzer_off = 0;
         r->last_image_id = 0;
     }
-    bool layout = v1 ? r->crc32 == record_crc(r, SET_V1_SIZE)
-                     : (r->version == 2 || r->version == SET_VERSION) && r->size == sizeof(*r) &&
-                       r->crc32 == record_crc(r, sizeof(*r)) && r->drive_select <= 1;
-    return r->magic == SET_MAGIC && commit == SET_COMMIT && layout &&
+    if (r->version < 4) {
+        r->machine = MACHINE_ATARI;
+    }
+    return r->magic == SET_MAGIC && commit == SET_COMMIT &&
            terminated(r->hostname, sizeof(r->hostname)) &&
            terminated(r->wifi_ssid, sizeof(r->wifi_ssid)) &&
            terminated(r->wifi_pass, sizeof(r->wifi_pass)) &&
-           r->wifi_security < WIFI_SEC_COUNT && r->buzzer_off <= 1;
+           r->wifi_security < WIFI_SEC_COUNT && r->drive_select <= 1 && r->buzzer_off <= 1 &&
+           r->machine < MACHINE_COUNT;
 }
 
 static void defaults(settings_t *s)
@@ -112,6 +135,7 @@ static void defaults(settings_t *s)
     s->drive_select = 1;                /* DS1: drive B: */
     s->buzzer = 1;
     s->last_image_id = 0;
+    s->machine = MACHINE_ATARI;
 }
 
 esp_err_t settings_init(void)
@@ -144,6 +168,7 @@ esp_err_t settings_init(void)
     current.drive_select = r[best].drive_select;
     current.buzzer = !r[best].buzzer_off;
     current.last_image_id = r[best].last_image_id;
+    current.machine = r[best].machine;
     generation = r[best].generation;
     current_copy = best;
     return ESP_OK;
@@ -194,7 +219,7 @@ static esp_err_t save_locked(const settings_t *s)
         !terminated(s->wifi_ssid, sizeof(s->wifi_ssid)) ||
         !terminated(s->wifi_pass, sizeof(s->wifi_pass)) ||
         !settings_hostname_valid(s->hostname) || s->wifi_security >= WIFI_SEC_COUNT ||
-        s->drive_select > 1 || s->buzzer > 1 ||
+        s->drive_select > 1 || s->buzzer > 1 || s->machine >= MACHINE_COUNT ||
         (s->wifi_ssid[0] && !settings_password_valid(s->wifi_pass, s->wifi_security))) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -212,6 +237,7 @@ static esp_err_t save_locked(const settings_t *s)
     r.drive_select = s->drive_select;
     r.buzzer_off = !s->buzzer;
     r.last_image_id = s->last_image_id;
+    r.machine = s->machine;
     r.crc32 = record_crc(&r, sizeof(r));
 
     /* Never touch the copy in use. */

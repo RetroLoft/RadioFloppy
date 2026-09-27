@@ -33,6 +33,7 @@ static uint8_t *psram_raw;          /* the kept PSRAM image */
 static disk_info_t psram_info;
 
 static TaskHandle_t remember_task;
+static bool enabled = true;         /* false: unsupported machine profile */
 
 /* Waits for a change, then until REMEMBER_MS passed without another one. */
 static void remember_task_fn(void *arg)
@@ -74,6 +75,10 @@ static int64_t load_us;            /* time spent reading the image, for the log 
 
 static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, switch_error_t *e)
 {
+    if (!enabled) {
+        return fail(e, "MACHINE_NOT_SUPPORTED", "floppy emulation is off: support for the "
+                    "selected computer is not available yet%s", "");
+    }
     int64_t t0 = esp_timer_get_time();
     esp_err_t err = disk_prepare(raw, info);
     if (err != ESP_OK) {
@@ -140,6 +145,11 @@ static esp_err_t psram_locked(switch_error_t *e)
     return activate_locked(psram_raw, &psram_info, e);
 }
 
+void disk_switch_set_enabled(bool on)
+{
+    enabled = on;
+}
+
 void disk_switch_init(void)
 {
     lock = xSemaphoreCreateMutex();
@@ -193,6 +203,10 @@ esp_err_t disk_switch_step(int dir, switch_error_t *e)
     static uint16_t list[IMG_MAX_RECORDS + 1];
     int n = 0;
 
+    if (!enabled) {
+        return fail(e, "MACHINE_NOT_SUPPORTED", "floppy emulation is off (computer not "
+                    "supported yet)%s", "");
+    }
     if (!recs) {
         recs = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*recs), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!recs) {

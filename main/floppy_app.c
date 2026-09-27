@@ -32,6 +32,7 @@
 #include "flux_stream.h"
 #include "oled.h"
 #include "status_led.h"
+#include "machine.h"
 #include "settings.h"
 #include "setup_mode.h"
 #include "step_sound.h"
@@ -282,6 +283,39 @@ static void handle_event(log_state_t *ls, const drive_event_t *ev)
     }
 }
 
+/*
+ * A machine profile that this firmware cannot emulate yet: no drive
+ * interrupts, no flux stream, never armed, so every Shugart output stays
+ * released (as set in app_main and the bootloader). The image library, WiFi,
+ * the API, the web page and the buttons (WiFi setup) keep working, so the
+ * user can switch back to Atari.
+ */
+static void run_without_emulation(const machine_profile_t *mp)
+{
+    printf("\n========================================\n");
+    printf(" RadioFloppy\n");
+    printf(" Connected computer: %s\n", mp->name);
+    printf(" Support for this computer is not available yet.\n");
+    printf(" Floppy interface OFF - all outputs released.\n");
+    printf("========================================\n\n");
+
+    if (disk_image_init() != ESP_OK) {      /* image library for the API */
+        printf("Disk buffers not available.\n");
+    }
+    bool wifi = wifi_net_start(setup_mode_verify_pending() ? SETUP_VERIFY_MS : 0) == ESP_OK;
+    step_sound_init();                      /* buzzer pin defined, silent */
+    if (oled_init()) {
+        oled_show_message(mp->name, "not supported yet");
+    }
+    disk_switch_init();
+    disk_switch_set_enabled(false);
+    if (wifi) {
+        api_start();
+    }
+    buttons_start();
+    printf("Ready (no floppy emulation). Choose Atari 16-bit under Settings.\n\n");
+}
+
 void floppy_emu_run(void)
 {
     /* Settings first: without a WiFi network (or on request) the setup
@@ -296,6 +330,11 @@ void floppy_emu_run(void)
     settings_get(&cfg);
     drive_set_select_line(cfg.drive_select);    /* before any drive interrupt */
     step_sound_set_enabled(cfg.buzzer);
+    machine_set_active(cfg.machine);
+    if (!machine_profile(cfg.machine)->supported) {
+        run_without_emulation(machine_profile(cfg.machine));
+        return;
+    }
 
     printf("\n========================================\n");
     printf(" RadioFloppy\n");

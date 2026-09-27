@@ -32,7 +32,7 @@ the device itself, uses only this API and needs no internet access:
   the old image is lost) and **Delete**; above the list the storage use,
   e.g. *Storage: 61% used*.
 - **Admin access** — only shown when the device has a token; it is kept only in the open page.
-- **Settings** (gear icon, top right, `/#settings`) — host name, floppy drive (A:/B:), buzzer on/off, WiFi status,
+- **Settings** (gear icon, top right, `/#settings`) — connected computer, host name, floppy drive (A:/B:), buzzer on/off, WiFi status,
   firmware version and a *Check for updates* button (not functional yet).
 
 The page polls `GET /current` every 3 s and `GET /images` every 15 s (and
@@ -214,6 +214,7 @@ Overall state of the device.
   "hostname": "RadioFloppy",
   "wifi": { "connected": true, "ssid": "MyNetwork", "ip": "192.168.178.62", "rssi": -38 },
   "storage": { "state": "valid", "used_percent": 26, "...": "as GET /storage" },
+  "machine": { "id": "ATARI", "name": "Atari 16-bit", "supported": true },
   "drive": { "select_line": "DS1", "armed": true, "selected": false, "motor": false, "cylinder": 0 },
   "current": { "inserted": true, "source": "flash", "image_id": 1, "image_changed_since": false,
                "name": "Crystal Castles", "size": 368640, "crc32": "42ce7eed", "sides": 1 },
@@ -228,6 +229,7 @@ Overall state of the device.
 | --------------------------- | ----------------------------------------------------------------- |
 | `wifi.rssi`                 | Signal strength in dBm                                            |
 | `storage`                   | Same object as [`GET /storage`](#get-apiv1storage)                |
+| `machine`                   | Machine profile in use; `supported: false` = floppy emulation off  |
 | `drive.select_line`         | Which drive-select line the emulator answers to (`DS1` = drive B:) |
 | `drive.armed`               | The emulator has seen the Atari powered on and answers to it      |
 | `drive.selected`            | The Atari is using our drive right now                            |
@@ -494,9 +496,15 @@ State of an upload. Only the most recent upload is kept; older ids give
   "drive_select_active": "DS1",
   "buzzer": true,
   "last_image_id": 6,
+  "machine": "ATARI",
+  "machine_active": "ATARI",
+  "machine_supported": true,
+  "machines": [ { "id": "ATARI", "name": "Atari 16-bit", "supported": true },
+                { "id": "AMIGA", "name": "Commodore Amiga", "supported": false },
+                { "id": "DOS", "name": "IBM PC / DOS", "supported": false } ],
   "restart_required": false,
   "wifi": { "ssid": "MyNetwork", "security": "wpa2", "connected": true,
-            "ip": "192.168.178.62", "rssi": -38 },
+            "ip": "192.168.178.62", "rssi": -38, "mac": "DC:DA:0C:12:34:56" },
   "firmware": { "version": "1.0.0", "idf": "v5.5.5" }
 }
 ```
@@ -509,7 +517,7 @@ saved setting only takes effect after a restart (e.g. a new host name).
 Body (`Content-Type: application/json`), every field optional:
 
 ```json
-{ "hostname": "Atari-B", "drive_select": "DS1", "buzzer": false }
+{ "hostname": "Atari-B", "drive_select": "DS1", "buzzer": false, "machine": "ATARI" }
 ```
 
 - `hostname`: 1–32 letters, digits or `-`, not starting or ending with `-`
@@ -522,6 +530,16 @@ Body (`Content-Type: application/json`), every field optional:
   is the line in use until then.
 - `buzzer`: `true`/`false` — clicks for head steps and button presses.
   Takes effect at once.
+- `machine`: the connected computer, `"ATARI"` (Atari 16-bit, default),
+  `"AMIGA"` (Commodore Amiga) or `"DOS"` (IBM PC / DOS); else
+  `422 INVALID_MACHINE`. Takes effect after a restart; `machine_active` is
+  the profile in use until then. **Only `ATARI` is supported for now.** With
+  another profile RadioFloppy starts without floppy emulation: no drive
+  interrupts, no flux stream, all floppy outputs released; the web page,
+  the API, the image library and WiFi setup keep working, activating a disk
+  gives `409 MACHINE_NOT_SUPPORTED`, and `GET /status` reports
+  `"machine": {"supported": false}`. Choose `ATARI` again and restart to
+  get the drive back.
 
 `last_image_id` (read only) is the library image that is loaded at the next
 start-up. It is stored 5 s after the last disk change (so stepping through
@@ -627,6 +645,8 @@ change. A failed upload carries the same `error` inside its upload object.
 | 422  | `CHECKSUM_MISMATCH`    | The file was damaged in transit — send it again        |
 | 422  | `INVALID_HOSTNAME`     | Use 1–32 letters, digits or `-`                        |
 | 422  | `INVALID_DRIVE_SELECT` | Use `"DS0"` or `"DS1"`                                 |
+| 422  | `INVALID_MACHINE`      | Use `"ATARI"`, `"AMIGA"` or `"DOS"`                    |
+| 409  | `MACHINE_NOT_SUPPORTED` | Floppy emulation is off for this computer — choose `ATARI` and restart |
 | 500  | `FLASH_ERROR`          | Storage problem — retry; check the device log          |
 | 500  | `PREPARE_FAILED`       | Internal problem — check the device log                |
 | 503  | `STORAGE_NOT_READY`    | Storage not usable (see `GET /storage`, maybe initialise it) |

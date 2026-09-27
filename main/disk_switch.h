@@ -21,6 +21,10 @@ typedef struct {
 
 void disk_switch_init(void);
 
+/* Off (unsupported machine profile): every switch fails with
+ * MACHINE_NOT_SUPPORTED and the drive is never touched. */
+void disk_switch_set_enabled(bool on);
+
 /* Make a stored library image the active disk. */
 esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e);
 

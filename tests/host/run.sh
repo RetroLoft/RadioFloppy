@@ -10,7 +10,7 @@ gcc $CFLAGS -o test_st_image test_st_image.c ../../main/st_image.c
 gcc $CFLAGS -o test_mfm test_mfm.c ../../main/mfm_track.c
 gcc $CFLAGS -DSETTINGS_NO_LOCK -DSETTINGS_DEFAULT_HOSTNAME='"RadioFloppy"' -DSETTINGS_DEFAULT_SSID='"DefaultNet"' \
     -DSETTINGS_DEFAULT_PASS='"password1"' -o test_settings test_settings.c mock_ext_flash.c \
-    ../../main/settings.c
+    ../../main/settings.c ../../main/machine.c
 gcc $CFLAGS -o test_title test_title.c ../../main/disk_title.c ../../main/oled_gfx.c
 
 echo "== image store =="; ./test_image_store

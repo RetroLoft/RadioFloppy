@@ -9,6 +9,7 @@
 #include "esp_rom_crc.h"
 #include "flash_layout.h"
 #include "mock_ext_flash.h"
+#include "machine.h"
 #include "settings.h"
 
 static int failures;
@@ -176,13 +177,61 @@ static void test_buzzer_and_last_image(void)
     uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
                                  ? RF_SETTINGS_A : RF_SETTINGS_B);
     rec[4] = 2; rec[5] = 0;
+    rec[6] = 152; rec[7] = 0;                   /* version 2/3 size */
     memset(rec + 149, 0, 3);
+    memset(rec + 152, 0xff, 4);
     memset(rec + 12, 0, 4);
     uint32_t crc = esp_rom_crc32_le(0, rec, 152);
     memcpy(rec + 12, &crc, 4);
     settings_init();
     settings_get(&r);
     CHECK(settings_stored() && r.buzzer == 1 && r.last_image_id == 0);
+}
+
+static void test_machine(void)
+{
+    settings_t s, r;
+
+    CHECK(machine_from_id("ATARI") == MACHINE_ATARI && machine_from_id("AMIGA") == MACHINE_AMIGA &&
+          machine_from_id("DOS") == MACHINE_DOS && machine_from_id("C64") == -1);
+    CHECK(machine_profile(MACHINE_ATARI)->supported && !machine_profile(MACHINE_AMIGA)->supported &&
+          !machine_profile(MACHINE_DOS)->supported);
+    CHECK(strcmp(machine_profile(99)->id, "ATARI") == 0);
+
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    CHECK(s.machine == MACHINE_ATARI);          /* default */
+    s.machine = MACHINE_AMIGA;
+    CHECK(settings_save(&s) == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(r.machine == MACHINE_AMIGA);
+    r.machine = MACHINE_ATARI;                  /* back to Atari */
+    CHECK(settings_save(&r) == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(r.machine == MACHINE_ATARI);
+    r.machine = MACHINE_COUNT;
+    CHECK(settings_save(&r) == ESP_ERR_INVALID_ARG);
+
+    /* A version 3 record (152 bytes, no machine): read as ATARI. */
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    s.machine = MACHINE_DOS;
+    s.last_image_id = 5;
+    CHECK(settings_save(&s) == ESP_OK);         /* copy A */
+    uint8_t *rec = mock_flash + RF_SETTINGS_A;
+    rec[4] = 3; rec[5] = 0;
+    rec[6] = 152; rec[7] = 0;
+    memset(rec + 152, 0xff, 4);
+    memset(rec + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, rec, 152);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && r.machine == MACHINE_ATARI && r.last_image_id == 5);
 }
 
 int main(void)
@@ -193,6 +242,7 @@ int main(void)
     test_validation();
     test_drive_select();
     test_buzzer_and_last_image();
+    test_machine();
     printf(failures ? "FAILED (%d)\n" : "settings OK\n", failures);
     return failures != 0;
 }

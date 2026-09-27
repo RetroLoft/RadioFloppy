@@ -25,6 +25,7 @@
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
+#include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
@@ -36,6 +37,7 @@
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "ext_flash.h"
+#include "machine.h"
 #include "settings.h"
 #include "step_sound.h"
 #include "image_store.h"
@@ -393,6 +395,7 @@ static const char *status_for(const char *code)
         { "UPLOAD_INCOMPLETE", HTTP_400 }, { "INSUFFICIENT_MEMORY", HTTP_507 },
         { "FLASH_ERROR", HTTP_500 },       { "PREPARE_FAILED", HTTP_500 },
         { "IMAGE_NOT_FOUND", HTTP_404 },   { "STORAGE_NOT_READY", HTTP_503 },
+        { "MACHINE_NOT_SUPPORTED", HTTP_409 },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].code, code) == 0) {
@@ -480,7 +483,7 @@ static esp_err_t get_status(httpd_req_t *req)
     wifi_net_status_t w;
     drive_status_t d;
     wifi_net_get_status(&w);
-    drive_refresh(&d);
+    drive_peek(&d);                 /* read only: an API call never writes outputs */
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "device", "RadioFloppy");
@@ -495,6 +498,11 @@ static esp_err_t get_status(httpd_req_t *req)
     cJSON_AddNumberToObject(wifi, "rssi", w.rssi);
 
     cJSON_AddItemToObject(root, "storage", storage_json());
+    const machine_profile_t *mp = machine_profile(machine_active());
+    cJSON *mach = cJSON_AddObjectToObject(root, "machine");
+    cJSON_AddStringToObject(mach, "id", mp->id);
+    cJSON_AddStringToObject(mach, "name", mp->name);
+    cJSON_AddBoolToObject(mach, "supported", mp->supported);
 
     cJSON *drv = cJSON_AddObjectToObject(root, "drive");
     cJSON_AddStringToObject(drv, "select_line", EMU_SELECT_NAME);
@@ -970,9 +978,21 @@ static cJSON *settings_json(void)
     cJSON_AddStringToObject(root, "drive_select", s.drive_select == 0 ? "DS0" : "DS1");
     cJSON_AddStringToObject(root, "drive_select_active", running_ds == 0 ? "DS0" : "DS1");
     cJSON_AddBoolToObject(root, "buzzer", s.buzzer);
+    cJSON_AddStringToObject(root, "machine", machine_profile(s.machine)->id);
+    cJSON_AddStringToObject(root, "machine_active", machine_profile(machine_active())->id);
+    cJSON_AddBoolToObject(root, "machine_supported", machine_profile(s.machine)->supported);
+    cJSON *ms = cJSON_AddArrayToObject(root, "machines");
+    for (int i = 0; i < MACHINE_COUNT; i++) {
+        cJSON *m = cJSON_CreateObject();
+        cJSON_AddStringToObject(m, "id", machine_profile(i)->id);
+        cJSON_AddStringToObject(m, "name", machine_profile(i)->name);
+        cJSON_AddBoolToObject(m, "supported", machine_profile(i)->supported);
+        cJSON_AddItemToArray(ms, m);
+    }
     cJSON_AddNumberToObject(root, "last_image_id", s.last_image_id);
     cJSON_AddBoolToObject(root, "restart_required", strcmp(s.hostname, w.hostname) != 0 ||
                                                    s.drive_select != running_ds ||
+                                                   s.machine != machine_active() ||
                                                    restart_pending);
     cJSON *wifi = cJSON_AddObjectToObject(root, "wifi");
     cJSON_AddStringToObject(wifi, "ssid", s.wifi_ssid);
@@ -980,6 +1000,13 @@ static cJSON *settings_json(void)
     cJSON_AddBoolToObject(wifi, "connected", w.connected);
     cJSON_AddStringToObject(wifi, "ip", w.ip);
     cJSON_AddNumberToObject(wifi, "rssi", w.rssi);
+    uint8_t mac[6];
+    char mac_str[18] = "";
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    cJSON_AddStringToObject(wifi, "mac", mac_str);
     cJSON *fw = cJSON_AddObjectToObject(root, "firmware");
     const esp_app_desc_t *app = esp_app_get_description();
     cJSON_AddStringToObject(fw, "version", app->version);
@@ -1024,6 +1051,16 @@ static esp_err_t put_settings(httpd_req_t *req)
         }
         s.drive_select = ds->valuestring[2] == '0' ? 0 : 1;
     }
+    const cJSON *jm = cJSON_GetObjectItem(body, "machine");
+    if (jm) {
+        int m = cJSON_IsString(jm) ? machine_from_id(jm->valuestring) : -1;
+        if (m < 0) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_422, "INVALID_MACHINE",
+                              "machine: \"ATARI\", \"AMIGA\" or \"DOS\"");
+        }
+        s.machine = (uint8_t)m;
+    }
     const cJSON *bz = cJSON_GetObjectItem(body, "buzzer");
     if (bz) {
         if (!cJSON_IsBool(bz)) {
@@ -1042,8 +1079,9 @@ static esp_err_t put_settings(httpd_req_t *req)
             return send_error(req, HTTP_500, "FLASH_ERROR", "settings could not be saved (%s)",
                               esp_err_to_name(err));
         }
-        printf("API: settings saved (host name %s, drive %s, buzzer %s)\n", s.hostname,
-               s.drive_select == 0 ? "A: / DS0" : "B: / DS1", s.buzzer ? "on" : "off");
+        printf("API: settings saved (host name %s, drive %s, buzzer %s, machine %s)\n",
+               s.hostname, s.drive_select == 0 ? "A: / DS0" : "B: / DS1",
+               s.buzzer ? "on" : "off", machine_profile(s.machine)->id);
     }
     step_sound_set_enabled(s.buzzer);   /* takes effect at once */
     return send_json(req, "200 OK", settings_json());

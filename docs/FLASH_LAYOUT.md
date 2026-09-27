@@ -165,8 +165,8 @@ wins. Until anything is saved, the firmware uses its menuconfig defaults.
 | Offset | Type     | Field          | Meaning                                         |
 | ------ | -------- | -------------- | ----------------------------------------------- |
 | 0      | u32      | magic          | `0x54534652` ("RFST")                           |
-| 4      | u16      | version        | 3 (2: without buzzer_off/last_image_id, those bytes 0; 1: 148 bytes, read as DS1) |
-| 6      | u16      | size           | record size in bytes (152)                      |
+| 4      | u16      | version        | 4 (older versions are still read: 3 = 152 bytes without machine → Atari; 2 = also without buzzer_off/last_image_id, those bytes 0; 1 = 148 bytes, read as DS1) |
+| 6      | u16      | size           | record size in bytes (156)                      |
 | 8      | u32      | generation     | +1 on every save                                |
 | 12     | u32      | crc32          | CRC-32 over the record with this field = 0      |
 | 16     | char[33] | hostname       | NUL terminated                                  |
@@ -176,6 +176,8 @@ wins. Until anything is saved, the firmware uses its menuconfig defaults.
 | 148    | u8       | drive_select   | 0 = DS0 (drive A:), 1 = DS1 (drive B:)          |
 | 149    | u8       | buzzer_off     | 0 = buzzer on (default), 1 = off                |
 | 150    | u16      | last_image_id  | Image active at power-off (0 = none); written 5 s after the last disk change, only when it differs |
+| 152    | u8       | machine        | 0 = Atari 16-bit (default), 1 = Commodore Amiga, 2 = IBM PC / DOS (only 0 supported yet) |
+| 153    | 3        | padding        | 0                                               |
 | 4092   | u32      | commit         | `0x21544D43` ("CMT!"), written last             |
 
 The WiFi password is stored in plain text: anyone with the board in hand can

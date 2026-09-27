@@ -32,6 +32,7 @@ typedef struct {
     uint8_t drive_select;       /* 0 = DS0 (drive A:), 1 = DS1 (drive B:) */
     uint8_t buzzer;             /* 1 = step and button clicks on (default) */
     uint16_t last_image_id;     /* library image active at power-off, 0 = none */
+    uint8_t machine;            /* machine_t: connected computer, default ATARI */
 } settings_t;
 
 /* Read the settings (initialises the external flash if needed). */

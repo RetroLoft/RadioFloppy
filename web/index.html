@@ -103,6 +103,7 @@
 </header>
 
 <div class="wrap">
+  <div id="nomachine" class="banner warn hidden" role="status" style="margin-top:16px"></div>
   <div id="offline" class="banner err hidden" role="alert">
     <strong>Connection lost.</strong> RadioFloppy cannot be reached; the information shown may be
     out of date. Reconnecting automatically…
@@ -137,7 +138,7 @@
         <label class="opt"><input type="radio" name="dest" value="flash">
           <span><strong>Add to my floppy images</strong>
           <span class="muted small">Stored on RadioFloppy; to replace an image, use its Replace button.</span></span></label>
-        <label class="opt" id="actrow"><input type="checkbox" id="activate">
+        <label class="opt" id="actrow"><input type="checkbox" id="activate" checked>
           <span>Also load after uploading</span></label>
       </fieldset>
       <div class="row">
@@ -185,32 +186,17 @@
     </div>
   </div>
 
-  <section aria-labelledby="h-device">
-    <h2 id="h-device">Device</h2>
-    <form id="hostform" class="current" autocomplete="off">
-      <label for="hostname"><strong>Host name</strong></label>
-      <div class="row">
-        <input id="hostname" type="text" class="grow" maxlength="32" spellcheck="false" autocapitalize="off"
-               pattern="[A-Za-z0-9]([A-Za-z0-9\-]{0,30}[A-Za-z0-9])?" required>
-        <button id="hostsave" type="submit">Save</button>
-      </div>
-      <p class="small muted" style="margin:0">The name of RadioFloppy on your network, also used for its
-        WiFi setup network. Letters, digits and ‘-’, up to 32 characters. Takes effect after a restart.</p>
-    </form>
-  </section>
-
-  <section aria-labelledby="h-drive">
-    <h2 id="h-drive">Floppy drive</h2>
-    <form id="driveform" class="current" autocomplete="off">
-      <label class="opt"><input type="radio" name="ds" value="DS0">
-        <span><strong>Drive A:</strong> (DS0) <span class="muted small">— only when the Atari has no working
-        internal drive A: (disconnected), or RadioFloppy replaces it.</span></span></label>
-      <label class="opt"><input type="radio" name="ds" value="DS1">
-        <span><strong>Drive B:</strong> (DS1) <span class="muted small">— external second drive, next to the
-        internal drive A:. Usual choice.</span></span></label>
-      <div class="row"><button id="drivesave" type="submit">Save</button>
-        <span id="driveinfo" class="small muted"></span></div>
-    </form>
+  <section aria-labelledby="h-wifi">
+    <h2 id="h-wifi">WiFi</h2>
+    <dl class="kv">
+      <dt>Network</dt><dd id="w-ssid">–</dd>
+      <dt>Address</dt><dd id="w-ip">–</dd>
+      <dt>Signal</dt><dd id="w-rssi">–</dd>
+      <dt>MAC address</dt><dd id="w-mac" class="code">–</dd>
+    </dl>
+    <p class="small muted" style="margin-bottom:0">To join another network, hold both buttons for
+      <strong>10 seconds</strong>: RadioFloppy restarts in WiFi setup mode (the floppy drive is off
+      meanwhile). The display shows which network to join.</p>
   </section>
 
   <section aria-labelledby="h-sound">
@@ -220,16 +206,17 @@
       like a real drive. Takes effect at once.</span></span></label>
   </section>
 
-  <section aria-labelledby="h-wifi">
-    <h2 id="h-wifi">WiFi</h2>
-    <dl class="kv">
-      <dt>Network</dt><dd id="w-ssid">–</dd>
-      <dt>Address</dt><dd id="w-ip">–</dd>
-      <dt>Signal</dt><dd id="w-rssi">–</dd>
-    </dl>
-    <p class="small muted" style="margin-bottom:0">To join another network, hold both buttons for
-      <strong>10 seconds</strong>: RadioFloppy restarts in WiFi setup mode (the floppy drive is off
-      meanwhile). The display shows which network to join.</p>
+  <section aria-labelledby="h-device">
+    <h2 id="h-device">Host name</h2>
+    <form id="hostform" class="current" autocomplete="off">
+      <div class="row">
+        <input id="hostname" type="text" class="grow" maxlength="32" spellcheck="false" autocapitalize="off"
+               pattern="[A-Za-z0-9]([A-Za-z0-9\-]{0,30}[A-Za-z0-9])?" required>
+        <button id="hostsave" type="submit">Save</button>
+      </div>
+      <p class="small muted" style="margin:0">The name of RadioFloppy on your network, also used for its
+        WiFi setup network. Letters, digits and ‘-’, up to 32 characters. Takes effect after a restart.</p>
+    </form>
   </section>
 
   <section aria-labelledby="h-fw">
@@ -242,6 +229,25 @@
       <button type="button" id="updcheck" class="secondary">Check for updates</button>
       <span id="updresult" class="small muted"></span>
     </div>
+  </section>
+
+  <section aria-labelledby="h-conn">
+    <h2 id="h-conn">Connected computer</h2>
+    <form id="connform" class="current" autocomplete="off">
+      <select id="machine" aria-labelledby="h-conn"></select>
+      <div id="machinenote" class="banner warn small hidden">Support for this computer is not available yet.
+        RadioFloppy keeps its floppy interface switched off until you choose Atari 16-bit again.</div>
+      <strong style="margin-top:8px">Floppy drive</strong>
+      <label class="opt"><input type="radio" name="ds" value="DS0">
+        <span><strong>Drive A:</strong> (DS0) <span class="muted small">— only when the computer has no working
+        internal drive A: (disconnected), or RadioFloppy replaces it.</span></span></label>
+      <label class="opt"><input type="radio" name="ds" value="DS1">
+        <span><strong>Drive B:</strong> (DS1) <span class="muted small">— external second drive, next to the
+        internal drive A:. Usual choice.</span></span></label>
+      <div class="row"><button id="connsave" type="submit">Save</button>
+        <span id="driveinfo" class="small muted"></span></div>
+      <p class="small muted" style="margin:0">Takes effect after a restart.</p>
+    </form>
   </section>
 </main>
 
@@ -260,6 +266,8 @@ const S = {
   online: null,
   drive: "B:",          // drive letter RadioFloppy answers as (from /status)
   driveDirty: false,    // settings: drive choice changed, not saved yet
+  machineDirty: false,  // settings: computer changed, not saved yet
+  machines: null,       // machine profiles from /settings
   failures: 0,
 };
 
@@ -335,6 +343,8 @@ const ERRORS = {
   INSUFFICIENT_MEMORY: "RadioFloppy does not have enough free memory.",
   PREPARE_FAILED: "The floppy could not be prepared.",
   INVALID_DRIVE_SELECT: "Choose drive A: (DS0) or B: (DS1).",
+  INVALID_MACHINE: "Choose one of the listed computers.",
+  MACHINE_NOT_SUPPORTED: "The floppy drive is switched off: support for the selected computer is not available yet. Choose Atari 16-bit under Settings.",
   INVALID_HOSTNAME: "Invalid host name: use letters, digits and ‘-’ (not at the start or end), up to 32 characters.",
 };
 
@@ -530,6 +540,14 @@ async function refreshStatus() {
   if (r.status === 200 && r.data) {
     S.authRequired = !!r.data.auth_required;
     S.drive = r.data.drive && r.data.drive.select_line === "DS0" ? "A:" : "B:";
+    const m = r.data.machine;
+    const off = m && !m.supported;
+    $("nomachine").classList.toggle("hidden", !off);
+    if (off) {
+      $("nomachine").innerHTML = "<strong>RadioFloppy is set to " + esc(m.name) + ".</strong> " +
+        "Support for this computer is not available yet: the floppy drive is switched off. " +
+        'Choose Atari 16-bit under <a href="#settings">Settings</a> and restart.';
+    }
     $("drvname").textContent = S.drive;
     renderAuth();
   }
@@ -789,10 +807,12 @@ function signalText(rssi) {
 }
 
 function renderSettings(d) {
+  S.machines = d.machines;
   if (document.activeElement !== $("hostname")) $("hostname").value = d.hostname;
   $("w-ssid").textContent = d.wifi.ssid || "–";
   $("w-ip").textContent = d.wifi.connected ? d.wifi.ip : "not connected";
   $("w-rssi").textContent = d.wifi.connected ? signalText(d.wifi.rssi) : "–";
+  $("w-mac").textContent = d.wifi.mac || "–";
   $("fw-ver").textContent = d.firmware.version;
   $("fw-idf").textContent = d.firmware.idf;
   $("restartbox").classList.toggle("hidden", !d.restart_required);
@@ -803,9 +823,20 @@ function renderSettings(d) {
     ? "Now answering as " + (d.drive_select_active === "DS0" ? "A:" : "B:") + " until the restart."
     : "";
   $("buzzer").checked = !!d.buzzer;
+  const sel = $("machine");
+  if (!sel.options.length) {
+    for (const m of d.machines) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      o.textContent = m.name + (m.supported ? "" : " (not supported yet)");
+      sel.appendChild(o);
+    }
+  }
+  if (!S.machineDirty) sel.value = d.machine;
+  updateMachineNote();
   const locked = S.authRequired && !S.token;
   $("hostsave").disabled = locked;
-  $("drivesave").disabled = locked;
+  $("connsave").disabled = locked;
   $("buzzer").disabled = locked;
   $("restart").disabled = locked;
 }
@@ -840,25 +871,32 @@ $("hostform").addEventListener("submit", async (ev) => {
 
 document.querySelectorAll("input[name=ds]").forEach((r) =>
   r.addEventListener("change", () => { S.driveDirty = true; }));
-$("driveform").addEventListener("submit", async (ev) => {
+
+function updateMachineNote() {
+  const m = (S.machines || []).find((x) => x.id === $("machine").value);
+  $("machinenote").classList.toggle("hidden", !m || m.supported);
+}
+$("machine").addEventListener("change", () => { S.machineDirty = true; updateMachineNote(); });
+$("connform").addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const sel = document.querySelector("input[name=ds]:checked");
-  if (!sel) return;
+  const ds = document.querySelector("input[name=ds]:checked");
+  const body = { machine: $("machine").value };
+  if (ds) body.drive_select = ds.value;
   showSetMsg("", "");
-  $("drivesave").disabled = true;
+  $("connsave").disabled = true;
   try {
-    const r = await api("PUT", "/api/v1/settings", { drive_select: sel.value }, 12000, true);
+    const r = await api("PUT", "/api/v1/settings", body, 12000, true);
     if (r.status === 200) {
-      S.driveDirty = false;
+      S.machineDirty = S.driveDirty = false;
       renderSettings(r.data);
-      showSetMsg("ok", "Floppy drive saved: " + (sel.value === "DS0" ? "A: (DS0)" : "B: (DS1)") + ".");
+      showSetMsg("ok", "Connected computer saved." + (r.data.restart_required ? " Restart RadioFloppy to apply it." : ""));
     } else {
       showSetMsg("err", errorText(r.data, r.status).text);
     }
   } catch (e) {
     showSetMsg("err", "RadioFloppy cannot be reached.");
   }
-  $("drivesave").disabled = false;
+  $("connsave").disabled = false;
 });
 
 $("buzzer").addEventListener("change", async () => {
