@@ -366,6 +366,8 @@ void floppy_emu_run(void)
 
     step_sound_init();              /* buzzer off before any interrupt */
     drive_init();                   /* inputs + interrupts, not armed */
+    /* The start-up disk decides the flux mode (HFE: native timing). */
+    flux_stream_set_mode(disk_tracks_kind == DISK_TRACKS_HFE ? FLUX_MODE_HFE : FLUX_MODE_ST);
     if (flux_stream_init() != ESP_OK) {
         printf("RMT failed - emulator stays disabled.\n");
         return;

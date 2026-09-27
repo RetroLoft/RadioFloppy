@@ -20,6 +20,9 @@
 
 #include "disk_image.h"
 #include "drive_emu.h"
+#include "flux_stream.h"
+#include "hfe.h"
+#include "img_codec.h"
 #include "st_image.h"
 #include "ext_flash.h"
 #include "image_store.h"
@@ -27,6 +30,7 @@
 
 uint8_t *volatile disk_tracks;
 volatile uint32_t disk_track_cells = MFM_TRACK_CELLS;
+volatile uint8_t disk_tracks_kind = DISK_TRACKS_MFM;
 
 static uint8_t *track_buf[2];       /* A/B track buffers in PSRAM */
 static int active_buf;              /* index of the buffer in use */
@@ -45,6 +49,7 @@ static uint8_t *track_ptr(uint8_t *buf, int cyl, int head)
 }
 
 static uint32_t prepared_cells;     /* track length in the inactive buffer */
+static uint8_t prepared_kind;       /* DISK_TRACKS_* in the inactive buffer */
 
 /*
  * Sector data of the active disk, kept for writing (library images only):
@@ -264,6 +269,80 @@ static void report_store(store_state_t st)
     }
 }
 
+/* ---- HFE: packed tracks, decompressed from the flash as a stream ------------- */
+
+typedef struct {
+    hfe_stream_t stream;
+    uint32_t crc;
+    uint32_t len;
+    uint32_t size;
+} hfe_load_t;
+
+static esp_err_t hfe_load_read(void *ctx, uint32_t off, uint8_t *buf, size_t len)
+{
+    return image_store_read(ctx, off, buf, (uint32_t)len);
+}
+
+static esp_err_t hfe_load_out(void *ctx, const uint8_t *data, size_t len)
+{
+    hfe_load_t *l = ctx;
+    if (len > l->size - l->len) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    l->crc = image_store_crc32(l->crc, data, len);
+    l->len += (uint32_t)len;
+    return hfe_stream_feed(&l->stream, data, (uint32_t)len) == HFE_OK ? ESP_OK : ESP_FAIL;
+}
+
+/* HFE library image info->image_id -> packed tracks in buf. */
+static esp_err_t build_hfe(uint8_t *buf, disk_info_t *info)
+{
+    image_record_t r;
+    if (!image_store_get(info->image_id, &r) || !image_store_is_valid(&r) ||
+        r.storage_format != IMG_STORE_DEFLATE) {
+        return ESP_FAIL;
+    }
+    hfe_load_t *l = heap_caps_malloc(sizeof(*l), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *region = heap_caps_malloc(HFE_REGION_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!l || !region) {
+        free(l);
+        free(region);
+        return ESP_ERR_NO_MEM;
+    }
+    int64_t t0 = esp_timer_get_time();
+    hfe_pack_t pack;
+    hfe_pack_init(&pack, buf, DISK_TRACKS_BYTES);
+    hfe_stream_init(&l->stream, r.original_size, region, &pack);
+    l->crc = 0;
+    l->len = 0;
+    l->size = r.original_size;
+    esp_err_t err = img_inflate_stream(r.stored_size, hfe_load_read, &r, hfe_load_out, l, NULL);
+    hfe_result_t hr = hfe_stream_end(&l->stream);
+    const hfe_info_t *hi = hfe_stream_info(&l->stream);
+    if (err == ESP_OK && (l->len != r.original_size || l->crc != r.crc32)) {
+        err = ESP_ERR_INVALID_CRC;
+    }
+    if (err == ESP_OK && hr != HFE_OK) {
+        err = ESP_FAIL;
+    }
+    if (err == ESP_OK) {
+        info->cylinders = hi->cylinders;
+        info->heads = hi->sides;
+        info->sectors = 0;
+        info->hfe = true;
+        prepared_kind = DISK_TRACKS_HFE;
+        prepared_cells = MFM_TRACK_CELLS;   /* what the ST encoder would read: in bounds */
+        printf("HFE tracks: %s, %lu KiB of track buffer, %lld ms\n", hi->detail,
+               (unsigned long)(hi->bytes_needed / 1024), (esp_timer_get_time() - t0) / 1000);
+    } else {
+        printf("ERROR: HFE image %u: %s (%s)\n", info->image_id, esp_err_to_name(err),
+               hr != HFE_OK ? hi->detail : "data");
+    }
+    free(region);
+    free(l);
+    return err;
+}
+
 /* Start-up image: the one active at power-off, else by name, else the first
  * valid image in sequence order. */
 static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
@@ -309,6 +388,14 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
     printf("Selected image: %s\n", title);
     printf("Source: EXTERNAL SPI FLASH, image id %u, %u block(s)\n", r.id, r.block_count);
 
+    if (image_format(&r) == IMG_FMT_HFE || image_format(&r) == IMG_FMT_HFE3) {
+        /* Tracks straight from the flash (disk_image_init): no raw image. */
+        *info = (disk_info_t) { .source = DISK_SRC_FLASH, .image_id = id,
+                                .size = r.original_size, .crc32 = r.crc32, .hfe = true };
+        memcpy(info->name, title, sizeof(info->name));
+        *raw = NULL;
+        return ESP_OK;
+    }
     uint8_t *buf = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) {
         return ESP_ERR_NO_MEM;
@@ -339,6 +426,7 @@ static void set_active_buffer(void *arg)
     active_buf = *(int *)arg;
     disk_tracks = track_buf[active_buf];
     disk_track_cells = prepared_cells;
+    disk_tracks_kind = prepared_kind;
 }
 
 esp_err_t disk_image_init(void)
@@ -360,11 +448,24 @@ esp_err_t disk_image_init(void)
     uint8_t *raw = NULL;
     disk_info_t info = { .source = DISK_SRC_NONE };
     st_info_t st = { 0 };
-    if (load_boot_image(&raw, &info) == ESP_OK &&
-        st_check_image(raw, info.size, &st) != ST_OK) {
-        printf("ERROR: start-up image not supported: %s\n", st.detail);
-        free(raw);
-        raw = NULL;
+    bool hfe = false;
+    if (load_boot_image(&raw, &info) == ESP_OK) {
+        if (info.hfe) {
+            hfe = build_hfe(track_buf[0], &info) == ESP_OK;
+        } else if (st_check_image(raw, info.size, &st) != ST_OK) {
+            printf("ERROR: start-up image not supported: %s\n", st.detail);
+            free(raw);
+            raw = NULL;
+        }
+    }
+    if (hfe) {
+        int idx = 0;
+        set_active_buffer(&idx);
+        drive_swap_media(set_active_buffer, &idx, true);   /* not armed yet: always done */
+        active_geo = info;
+        disk_media_gen++;
+        set_current(&info);
+        return ESP_OK;                  /* flux mode: see floppy_app (after flux_stream_init) */
     }
     if (!raw) {
         info = (disk_info_t) { .source = DISK_SRC_NONE };
@@ -375,6 +476,7 @@ esp_err_t disk_image_init(void)
     info.heads = raw ? st.heads : 0;
     info.sectors = raw ? st.sectors : 0;
 
+    prepared_kind = DISK_TRACKS_MFM;
     printf("Generating MFM tracks...\n");
     int64_t t0 = esp_timer_get_time();
     esp_err_t err = build_tracks(track_buf[0], raw, &info, &prepared_cells);
@@ -421,12 +523,25 @@ esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info)
     xSemaphoreGive(raw_lock);
     /* The verifier may be reading the buffer that is about to be reused. */
     verify_stop();
+    prepared_kind = DISK_TRACKS_MFM;
     return build_tracks(track_buf[active_buf ^ 1], raw, info, &prepared_cells);
+}
+
+esp_err_t disk_prepare_hfe(disk_info_t *info)
+{
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    free(prepared_raw);                 /* HFE is never written: no sectors kept */
+    prepared_raw = NULL;
+    xSemaphoreGive(raw_lock);
+    verify_stop();
+    return build_hfe(track_buf[active_buf ^ 1], info);
 }
 
 void disk_verify_active(const uint8_t *raw, const disk_info_t *info)
 {
-    verify_start(raw, info);
+    if (raw && !info->hfe) {
+        verify_start(raw, info);        /* MFM tracks only */
+    }
 }
 
 esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
@@ -451,11 +566,13 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
     xSemaphoreGive(raw_lock);
     free(old);
     set_current(info);
+    /* ST <-> HFE: the flux stream follows (restarts in the other mode). */
+    flux_stream_set_mode(info->hfe ? FLUX_MODE_HFE : FLUX_MODE_ST);
     /* Let a flux-encoder refill that started on the old buffer finish
      * before anybody may overwrite that buffer. */
     vTaskDelay(pdMS_TO_TICKS(20));
-    printf("Active disk: %s (%s)\n", info->name,
-           info->source == DISK_SRC_PSRAM ? "PSRAM" : "image library");
+    printf("Active disk: %s (%s%s)\n", info->name,
+           info->source == DISK_SRC_PSRAM ? "PSRAM" : "image library", info->hfe ? ", HFE" : "");
     return ESP_OK;
 }
 

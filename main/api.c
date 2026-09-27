@@ -652,10 +652,11 @@ static esp_err_t receive_hfe(httpd_req_t *req)
                        (unsigned long)up.size, (unsigned long)stored,
                        (unsigned long)(stored * 100ull / up.size), (unsigned long)crc,
                        (t_recv - t0) / 1000, (esp_timer_get_time() - t_recv) / 1000);
-                if (up.activate) {
-                    fail_upload("UNSUPPORTED_FORMAT", "stored as image %u; inserting an HFE "
-                                "image is still in development", id);
+                switch_error_t se;
+                if (up.activate && disk_switch_image(id, &se) != ESP_OK) {
+                    fail_upload(se.code, "%s (the image is stored)", se.msg);
                 } else {
+                    up.activated = up.activate;
                     up.state = UP_DONE;
                     up.touched_us = esp_timer_get_time();
                 }

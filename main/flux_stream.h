@@ -28,3 +28,22 @@ void flux_gate(bool rdata, bool index);
 
 /* Revolutions played since start (virtual index counter). */
 uint32_t flux_revolutions(void);
+
+/*
+ * ST: every track is spread over exactly 200 ms and INDEX is a hardware
+ * loop of 200 ms. HFE (native timing): tracks play at the cell times of
+ * the file (hfe.h packed tracks); a revolution lasts as long as the track
+ * and INDEX is placed on the exact RMT tick where the track wraps.
+ * Changing the mode restarts both channels together (task context; call
+ * right after an ST <-> HFE disk change).
+ */
+typedef enum { FLUX_MODE_ST, FLUX_MODE_HFE } flux_mode_t;
+esp_err_t flux_stream_set_mode(flux_mode_t mode);
+flux_mode_t flux_stream_mode(void);
+
+typedef struct {
+    uint32_t late_pulses;       /* INDEX pulses that came after their boundary */
+    uint32_t late_max_us;
+    uint32_t lost_boundaries;   /* boundary queue overflow (never expected) */
+} flux_hfe_stats_t;
+void flux_hfe_stats(flux_hfe_stats_t *st);

@@ -52,6 +52,7 @@ typedef struct {
     int heads;
     int sectors;            /* per track */
     bool keep_sectors;      /* READ_WRITE .ST image: keep its sectors for writing */
+    bool hfe;               /* HFE image: packed tracks (hfe.h), played in native timing */
 } disk_info_t;
 
 /* Active tracks, [cyl][head][MFM_MAX_BYTES]; read by the flux ISR. */
@@ -59,6 +60,11 @@ extern uint8_t *volatile disk_tracks;
 
 /* Bitcells per track of the active disk (100000, longer for 11 sectors). */
 extern volatile uint32_t disk_track_cells;
+
+/* What the active track buffer holds: MFM tracks of an .ST image
+ * ([cyl][head][MFM_MAX_BYTES]) or packed HFE tracks (hfe.h). */
+typedef enum { DISK_TRACKS_MFM, DISK_TRACKS_HFE } disk_tracks_kind_t;
+extern volatile uint8_t disk_tracks_kind;
 
 /* Raw MFM bitcells of one track of the active disk. ISR safe. */
 static inline const uint8_t *disk_track_raw(int cyl, int head)
@@ -77,6 +83,14 @@ void disk_get_current(disk_info_t *info);
  * inactive track buffer. Not visible to the Atari yet.
  */
 esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info);
+
+/*
+ * The same for an HFE library image (info->image_id): decompressed from the
+ * flash straight into the inactive buffer as packed tracks, never whole in
+ * memory; length and CRC checked. Fills in cylinders and heads.
+ * ESP_ERR_NO_MEM, ESP_ERR_INVALID_CRC or ESP_FAIL (not a usable HFE).
+ */
+esp_err_t disk_prepare_hfe(disk_info_t *info);
 
 /* After a switch: decode the active tracks again in the background and
  * compare with raw (copied; result only in the log). */

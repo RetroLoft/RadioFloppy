@@ -74,7 +74,7 @@ static esp_err_t fail(switch_error_t *e, const char *code, const char *fmt, cons
 
 static int64_t load_us;            /* time spent reading the image, for the log */
 
-static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, switch_error_t *e)
+static esp_err_t activate_locked(const uint8_t *raw, disk_info_t *info, switch_error_t *e)
 {
     if (!enabled) {
         return fail(e, "MACHINE_NOT_SUPPORTED", "floppy emulation is off: support for the "
@@ -87,9 +87,12 @@ static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, sw
                     "saved; the disk was not changed%s", "");
     }
     int64_t t0 = esp_timer_get_time();
-    esp_err_t err = disk_prepare(raw, info);
-    if (err != ESP_OK) {
+    esp_err_t err = info->hfe ? disk_prepare_hfe(info) : disk_prepare(raw, info);
+    if (err == ESP_ERR_NO_MEM) {
         return fail(e, "INSUFFICIENT_MEMORY", "no memory to encode the tracks%s", "");
+    }
+    if (err != ESP_OK) {
+        return fail(e, "FLASH_ERROR", "the image could not be read back correctly%s", "");
     }
     int64_t t1 = esp_timer_get_time();
     if (disk_activate_prepared(info, ACTIVATE_TIMEOUT_MS) == ESP_ERR_TIMEOUT) {
@@ -122,6 +125,11 @@ static esp_err_t image_locked(uint16_t id, switch_error_t *e)
                          .size = r.original_size, .crc32 = r.crc32 };
     image_store_title(&r, info.name);
 
+    if (image_format(&r) == IMG_FMT_HFE || image_format(&r) == IMG_FMT_HFE3) {
+        /* Decoded from the flash straight into the track buffer. */
+        info.hfe = true;
+        return activate_locked(NULL, &info, e);
+    }
     uint8_t *raw = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!raw) {
         return fail(e, "INSUFFICIENT_MEMORY", "no PSRAM to load image %s", name);
@@ -176,16 +184,18 @@ esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e)
 
 esp_err_t disk_switch_raw(const uint8_t *raw, const disk_info_t *info, switch_error_t *e)
 {
+    disk_info_t copy = *info;
     xSemaphoreTake(lock, portMAX_DELAY);
-    esp_err_t err = activate_locked(raw, info, e);
+    esp_err_t err = activate_locked(raw, &copy, e);
     xSemaphoreGive(lock);
     return err;
 }
 
 esp_err_t disk_switch_psram_upload(uint8_t *raw, const disk_info_t *info, switch_error_t *e)
 {
+    disk_info_t copy = *info;
     xSemaphoreTake(lock, portMAX_DELAY);
-    esp_err_t err = activate_locked(raw, info, e);
+    esp_err_t err = activate_locked(raw, &copy, e);
     if (err == ESP_OK) {
         free(psram_raw);            /* the previous PSRAM image */
         psram_raw = raw;
