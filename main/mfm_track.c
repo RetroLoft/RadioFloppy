@@ -3,6 +3,7 @@
  * See mfm_track.h. Reference: FlashFloppy src/image/img.c (mfm_prep_track,
  * mfm_read_track) and src/image/mfm.c.
  */
+#include <stdbool.h>
 #include <string.h>
 
 #include "mfm_track.h"
@@ -290,4 +291,117 @@ int mfm_verify_track(const uint8_t *raw, const mfm_layout_t *l, const uint8_t *s
         window = 0;
     }
     return good;
+}
+
+/* ---- Rotational position -------------------------------------------------- */
+
+uint32_t mfm_id_end_cell(const mfm_layout_t *l, int slot)
+{
+    /* Slot start + sync gap + A1 A1 A1 FE C H R N + CRC. */
+    return (uint32_t)(GAP_4A + slot * (SECTOR_OVERHEAD + l->gap3) + GAP_SYNC + 8 + 2) * 16;
+}
+
+int mfm_sector_at(const mfm_layout_t *l, uint8_t cyl, uint8_t head, uint32_t pos, int *sector)
+{
+    uint8_t order[MFM_MAX_SECTORS];
+
+    sector_order(order, l, cyl, head);
+    for (int i = l->sectors - 1; i >= 0; i--) {
+        uint32_t end = mfm_id_end_cell(l, i);
+        if (pos >= end) {
+            *sector = order[i];
+            return (int)(pos - end);
+        }
+    }
+    return -1;
+}
+
+/* ---- Write decoder --------------------------------------------------------- */
+
+#define WR_MAX_CELLS    16384   /* one WGATE period: a sector is about 9000 */
+
+/*
+ * Intervals -> cells: each interval is a whole number of bitcells (2..4 in
+ * valid MFM); a slow phase correction follows the writer's clock.
+ */
+mfm_wr_result_t mfm_decode_write(const uint16_t *intervals, int n, int tick_ns,
+                                 uint8_t *mark, uint8_t data[MFM_SECTOR_SIZE])
+{
+    static uint8_t cells[WR_MAX_CELLS];
+    int nc = 0;
+    /* Cell period in 1/256 ticks; 2000 ns nominal. */
+    int32_t period = (2000 * 256) / tick_ns;
+
+    for (int i = 0; i < n && nc < WR_MAX_CELLS; i++) {
+        int32_t t = (int32_t)intervals[i] * 256;
+        int k = (t + period / 2) / period;
+        if (k < 1) {
+            continue;                   /* glitch: shorter than half a cell */
+        }
+        if (k > 8) {
+            k = 8;                      /* long gap (should not happen in a write) */
+        }
+        if (k >= 2 && k <= 4) {
+            period += (t / k - period) / 16;    /* follow the writer's clock */
+        }
+        for (int z = 1; z < k && nc < WR_MAX_CELLS; z++) {
+            cells[nc++] = 0;
+        }
+        if (nc < WR_MAX_CELLS) {
+            cells[nc++] = 1;
+        }
+    }
+
+    /* Find three A1 syncs (0x4489) followed by a mark. */
+    uint16_t w = 0;
+    for (int i = 0; i < nc; i++) {
+        w = (w << 1) | cells[i];
+        if (w != SYNC_A1) {
+            continue;
+        }
+        int start = i - 15;
+        bool three = start + 48 <= nc;
+        for (int s = 1; three && s < 3; s++) {
+            uint16_t v = 0;
+            for (int k = 0; k < 16; k++) {
+                v = (v << 1) | cells[start + 16 * s + k];
+            }
+            three = v == SYNC_A1;
+        }
+        if (!three) {
+            continue;
+        }
+        int p = start + 48;
+        uint8_t buf[4 + MFM_SECTOR_SIZE + 2] = { 0xa1, 0xa1, 0xa1 };
+        int need = 1 + MFM_SECTOR_SIZE + 2;
+        int have = (nc - p) / 16;
+        if (have < 1) {
+            return MFM_WR_SHORT;
+        }
+        for (int b = 0; b < need && b < have; b++) {
+            uint8_t v = 0;
+            for (int k = 0; k < 8; k++) {
+                v = (v << 1) | cells[p + 16 * b + 2 * k + 1];
+            }
+            buf[3 + b] = v;
+        }
+        if (buf[3] == 0xfe) {
+            return MFM_WR_ID_FIELD;
+        }
+        if (buf[3] != 0xfb && buf[3] != 0xf8) {
+            i = p;                      /* not a data mark: keep looking */
+            w = 0;
+            continue;
+        }
+        if (have < need) {
+            return MFM_WR_SHORT;
+        }
+        if (mfm_crc16(buf, sizeof(buf), 0xffff) != 0) {
+            return MFM_WR_BAD_CRC;
+        }
+        *mark = buf[3];
+        memcpy(data, buf + 4, MFM_SECTOR_SIZE);
+        return MFM_WR_OK;
+    }
+    return MFM_WR_NO_SYNC;
 }

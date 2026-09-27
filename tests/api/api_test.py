@@ -226,6 +226,13 @@ def main():
           "new image at the end of the order")
     check(stg["blocks_used"] == st0["blocks_used"] + blocks(len(cc)), "uses %d blocks" % blocks(len(cc)))
     check(current()["source"] == "psram", "active disk still the PSRAM image")
+    im = call("GET", "/api/v1/images/%d" % a)[1]
+    check(im["access"] == "READ_ONLY" and im["write_supported"], "new upload: READ_ONLY, ST may be written")
+    r = call("PUT", "/api/v1/images/%d" % a, {"access": "READ_WRITE"})
+    check(r[0] == 200 and r[1]["access"] == "READ_WRITE", "set to READ_WRITE")
+    check(call("GET", "/api/v1/images/%d" % a)[1]["access"] == "READ_WRITE", "READ_WRITE stored")
+    r = call("PUT", "/api/v1/images/%d" % a, {"access": "WRITE"})
+    check(r[0] == 400, "unknown access value refused")
     c, d = upload(big, "Big 880K.st", destination="flash", activate=True)
     check(d and d[0] == 200 and d[1]["active"], "901 120-byte image (80/2/11) stored and activated")
     b = d[1]["image_id"]

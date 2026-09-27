@@ -1,5 +1,5 @@
 /*
- * Virtual read-only Shugart drive: selection, head position and outputs.
+ * Virtual Shugart drive: selection, head position and outputs.
  *
  * All output decisions are made here, in ISR context, from the live input
  * levels, so they never wait for logging or a background task:
@@ -7,14 +7,15 @@
  *   active  = armed && selected (EMU_SELECT_LINE LOW)
  *   disk    = a disk is inserted and no disk change is being signalled
  *   TRACK0  = active && cylinder == 0
- *   WPROT   = active && !changing           (read-only disk)
+ *   WPROT   = active && !writable           (read-only disk, see drive_set_writable)
  *   INDEX   = active && disk && MOTOR on
  *   RDATA   = active && disk && MOTOR on && WGATE inactive
  *   READY, DSKCHG: never driven
  *
- * Disk change: for DRIVE_MEDIA_CHANGE_MS after a swap WPROT is released
- * and INDEX/RDATA stay off, as with an open drive door. TOS notices a
- * disk change through that write-protect transition.
+ * Disk change: for DRIVE_MEDIA_CHANGE_MS after a swap WPROT is inverted
+ * (released for a read-only disk, asserted for a writable one) and
+ * INDEX/RDATA stay off, as with an open drive door. TOS notices a disk
+ * change through that write-protect transition.
  */
 #pragma once
 
@@ -54,8 +55,26 @@ typedef struct {
     uint8_t type;
 } drive_event_t;
 
+/* Start of a write (WGATE asserted while selected), taken in the ISR. */
+typedef struct {
+    int64_t time_us;        /* WGATE asserted */
+    int64_t index_us;       /* start of the INDEX pulse before it */
+    int8_t cyl;
+    int8_t side;
+    bool writable;          /* WPROT was released: the write is allowed */
+    uint32_t gen;           /* disk_media_gen at that moment */
+    uint32_t seq;           /* +1 per write */
+} drive_write_start_t;
+
 /* Configure the inputs and install the interrupts (drive not armed). */
 void drive_init(void);
+
+/* Release (true) or assert (false) write protection for the inserted disk.
+ * Only disk_write.c decides this; default: protected. */
+void drive_set_writable(bool on);
+bool drive_writable(void);
+
+void drive_get_write_start(drive_write_start_t *ws);
 
 /* Arm the drive (once, after the start-up guard) and apply the outputs. */
 void drive_arm(drive_status_t *status);

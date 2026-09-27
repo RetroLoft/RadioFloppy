@@ -398,6 +398,121 @@ static void test_validation(void)
     CHECK(mock_flash[0x100] == 0x42);
 }
 
+static void test_write_setting(void)
+{
+    image_record_t r;
+
+    fresh(16 * MIB);
+    uint16_t a = save_new(70000, 70, "Game");
+    CHECK(image_store_get(a, &r) && !image_read_write(&r) && image_format(&r) == IMG_FMT_ST);
+
+    /* READ_WRITE for an ST image; stored in the catalog, kept after a restart. */
+    uint32_t gen = image_store_generation();
+    CHECK(image_store_set_read_write(a, true) == ESP_OK);
+    CHECK(image_store_generation() == gen + 1);
+    CHECK(image_store_set_read_write(a, true) == ESP_OK);
+    CHECK(image_store_generation() == gen + 1);             /* unchanged: no write */
+    CHECK(image_store_open(16 * MIB) == STORE_VALID);
+    CHECK(image_store_get(a, &r) && image_read_write(&r) && image_format(&r) == IMG_FMT_ST);
+    CHECK(image_matches(a, 70000, 70));                      /* data untouched */
+    CHECK(image_store_set_read_write(a, false) == ESP_OK);
+    CHECK(image_store_get(a, &r) && !image_read_write(&r));
+
+    /* A format that cannot be written: refused, stays READ_ONLY. */
+    uint8_t *d = test_image(1000, 71);
+    uint16_t b = 0;
+    CHECK(image_store_save(0, "MSA", IMG_FMT_MSA | IMG_FLAG_READ_WRITE, d, 1000, &b) == ESP_OK);
+    CHECK(image_store_get(b, &r) && !image_read_write(&r) && image_format(&r) == IMG_FMT_MSA);
+    CHECK(image_store_set_read_write(b, true) == ESP_ERR_NOT_SUPPORTED);
+    CHECK(image_store_set_read_write(b, false) == ESP_OK);
+    CHECK(image_format_writable(IMG_FMT_ST) && !image_format_writable(IMG_FMT_STX) &&
+          !image_format_writable(IMG_FMT_ADF) && !image_format_writable(0x3f));
+
+    /* A disk created on the device may start READ_WRITE (later: blank disks). */
+    uint16_t c = 0;
+    CHECK(image_store_save(0, "New disk", IMG_FMT_ST | IMG_FLAG_READ_WRITE, d, 1000, &c) == ESP_OK);
+    CHECK(image_store_get(c, &r) && image_read_write(&r));
+    /* Replacing (an upload) makes it READ_ONLY again. */
+    CHECK(image_store_save(c, "Uploaded", IMG_FMT_ST, d, 1000, NULL) == ESP_OK);
+    CHECK(image_store_get(c, &r) && !image_read_write(&r));
+    free(d);
+
+    CHECK(image_store_set_read_write(12345, true) == ESP_ERR_NOT_FOUND);
+    CHECK(strcmp(image_format_name(IMG_FMT_ST), "st") == 0 &&
+          strcmp(image_format_name(0x30), "unknown") == 0);
+}
+
+static void test_commit_blocks(void)
+{
+    fresh(16 * MIB);
+    const rf_geometry_t *g = image_store_geometry();
+    uint32_t size = 737280;                         /* 720 KiB: 12 blocks */
+    uint16_t id = save_new(size, 80, "Writable");
+    image_record_t before, r;
+    CHECK(image_store_get(id, &before));
+
+    /* Sectors written in blocks 0 and 5. */
+    uint8_t *img = test_image(size, 80);
+    memset(img + 1024, 0x11, 512);                  /* FAT */
+    memset(img + 5 * g->block_size + 100, 0x22, 512);
+    uint32_t crc = esp_rom_crc32_le(0, img, size);
+    uint32_t gen = image_store_generation();
+    CHECK(image_store_commit_blocks(id, (1u << 0) | (1u << 5), img, size, crc) == ESP_OK);
+    CHECK(image_store_generation() == gen + 1);     /* one catalog update */
+    CHECK(image_store_get(id, &r) && r.crc32 == crc);
+    CHECK(r.blocks[0] != before.blocks[0] && r.blocks[5] != before.blocks[5]);  /* copy-on-write */
+    CHECK(r.blocks[1] == before.blocks[1]);         /* unchanged blocks stay */
+    uint8_t *got = malloc(size);
+    CHECK(image_store_load(id, got) == ESP_OK && memcmp(got, img, size) == 0);
+    store_usage_t u;
+    image_store_usage(&u);
+    CHECK(u.blocks_used == 12);                     /* old blocks free again */
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_load(id, got) == ESP_OK &&
+          memcmp(got, img, size) == 0);             /* after a restart */
+
+    /* A flash write fails half way: nothing changes, the old version loads. */
+    uint8_t *img2 = malloc(size);
+    memcpy(img2, img, size);
+    memset(img2 + 3 * g->block_size, 0x33, 512);
+    memset(img2 + 7 * g->block_size, 0x44, 512);
+    uint32_t crc2 = esp_rom_crc32_le(0, img2, size);
+    gen = image_store_generation();
+    mock_fail_writes_after = 1;                     /* 2nd block program fails */
+    CHECK(image_store_commit_blocks(id, (1u << 3) | (1u << 7), img2, size, crc2) != ESP_OK);
+    mock_fail_writes_after = -1;
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_generation() == gen);
+    CHECK(image_store_load(id, got) == ESP_OK && memcmp(got, img, size) == 0);
+
+    /* Power cut during the catalog update (commit word not written). */
+    mock_fail_writes_after = 3;                     /* 2 blocks + catalog body */
+    CHECK(image_store_commit_blocks(id, (1u << 3) | (1u << 7), img2, size, crc2) != ESP_OK);
+    mock_fail_writes_after = -1;
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_generation() == gen);
+    CHECK(image_store_load(id, got) == ESP_OK && memcmp(got, img, size) == 0);
+
+    /* Wrong CRC for the snapshot: refused before the catalog changes. */
+    CHECK(image_store_commit_blocks(id, 1u << 3, img2, size, crc2 ^ 1) == ESP_ERR_INVALID_CRC);
+    CHECK(image_store_load(id, got) == ESP_OK && memcmp(got, img, size) == 0);
+
+    /* And it works again. */
+    CHECK(image_store_commit_blocks(id, (1u << 3) | (1u << 7), img2, size, crc2) == ESP_OK);
+    CHECK(image_store_load(id, got) == ESP_OK && memcmp(got, img2, size) == 0);
+
+    /* Not enough free blocks: nothing changes. */
+    fill_until_free(1);
+    memset(img2 + 9 * g->block_size, 0x55, 512);
+    uint32_t crc3 = esp_rom_crc32_le(0, img2, size);
+    CHECK(image_store_commit_blocks(id, (1u << 8) | (1u << 9), img2, size, crc3) == ESP_ERR_NO_MEM);
+    CHECK(image_store_commit_blocks(id, 1u << 9, img2, size, crc3) == ESP_OK);   /* 1 free: fits */
+    CHECK(image_store_load(id, got) == ESP_OK && memcmp(got, img2, size) == 0);
+    CHECK(image_store_commit_blocks(12345, 1, img2, size, crc3) == ESP_ERR_NOT_FOUND);
+    CHECK(image_store_commit_blocks(id, 1u << 12, img2, size, crc3) == ESP_ERR_INVALID_ARG);
+    CHECK(mock_program_violations == 0 && mock_out_of_range == 0);
+    free(img);
+    free(img2);
+    free(got);
+}
+
 static void test_capacity(uint32_t capacity)
 {
     fresh(capacity);
@@ -437,6 +552,8 @@ int main(void)
     printf("sequence\n");               test_sequence();
     printf("size limits\n");            test_limits();
     printf("catalog validation, old format\n");       test_validation();
+    printf("write setting\n");        test_write_setting();
+    printf("copy-on-write of written blocks\n");  test_commit_blocks();
     printf("32 MiB\n");                 test_capacity(32 * MIB);
     printf("64 MiB\n");                 test_capacity(64 * MIB);
     printf(failures ? "FAILED (%d)\n" : "image store OK\n", failures);

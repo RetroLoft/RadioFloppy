@@ -93,3 +93,36 @@ void disk_set_change_callback(void (*cb)(void));
 
 /* A library image was replaced or deleted: flag the current disk if it came from there. */
 void disk_note_image_changed(uint16_t image_id);
+
+/* ---- Writing (see disk_write.h) ---------------------------------------------- */
+
+/* +1 for every disk change; a write belongs to the disk of its generation. */
+extern volatile uint32_t disk_media_gen;
+
+/* The active disk is a library image whose sectors are kept (can be written). */
+bool disk_writable_data(void);
+
+/*
+ * A sector written by the computer: patch the kept sectors, encode the
+ * track again into the active track buffer and mark the storage block as
+ * changed. ESP_ERR_INVALID_STATE: the disk changed since generation gen.
+ */
+esp_err_t disk_write_sector(uint32_t gen, int cyl, int head, int sector, const uint8_t *data);
+
+/* Unsaved written sectors? */
+bool disk_dirty(void);
+
+typedef struct {
+    uint8_t *data;          /* copy of the whole image (heap, caller frees) */
+    uint32_t size;
+    uint32_t mask;          /* changed storage blocks */
+    uint16_t image_id;
+    uint32_t gen;
+} disk_snapshot_t;
+
+/* Copy of the image with its changed blocks; the changes count as saved
+ * from here on (ESP_ERR_NOT_FOUND: nothing to save). */
+esp_err_t disk_snapshot(disk_snapshot_t *snap);
+
+/* Saving the snapshot failed: its blocks are unsaved again. */
+void disk_snapshot_failed(const disk_snapshot_t *snap);

@@ -26,6 +26,7 @@
 #include "board_pins.h"
 #include "buttons.h"
 #include "disk_switch.h"
+#include "disk_write.h"
 #include "disk_image.h"
 #include "drive_config.h"
 #include "drive_emu.h"
@@ -263,7 +264,7 @@ static void handle_event(log_state_t *ls, const drive_event_t *ev)
         if (ev->st.wgate && !ls->wgate_seen) {
             flush_steps(ls);
             print_ts(ev->time_us);
-            printf("WGATE active - ignored (read-only)\n");
+            printf("WGATE active\n");
         }
         ls->wgate_seen |= ev->st.wgate;
         break;
@@ -381,6 +382,7 @@ void floppy_emu_run(void)
         return;
     }
     disk_switch_init();
+    disk_write_init();              /* WDATA receiver; disks start write-protected */
     if (wifi) {
         api_start();
     }

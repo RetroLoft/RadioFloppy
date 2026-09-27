@@ -6,9 +6,10 @@
  * its commit word. The valid copy with the highest generation wins, so a
  * power cut during an update leaves the previous catalog in place.
  *
- * Writers (save, delete, set_position, format) must be serialised by the
- * caller (the HTTP API holds its lock). Readers may run in other tasks:
- * they take the short store lock and get copies of records.
+ * Writers (save, delete, set_position, set_read_write, commit_blocks,
+ * format) are serialised by the writer lock: the HTTP API and the flush of
+ * written sectors may call them from different tasks. Readers take the
+ * short store lock and get copies of records.
  */
 #include <stddef.h>
 #include <stdio.h>
@@ -24,12 +25,17 @@
 #ifdef IMAGE_STORE_NO_LOCK              /* host tests: single threaded */
 #define store_lock()
 #define store_unlock()
+#define writer_lock()
+#define writer_unlock()
 #else
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-static SemaphoreHandle_t mutex;
+static SemaphoreHandle_t mutex;         /* short: readers vs. the catalog swap */
+static SemaphoreHandle_t writer;        /* long: one catalog/flash writer at a time */
 #define store_lock()    xSemaphoreTake(mutex, portMAX_DELAY)
 #define store_unlock()  xSemaphoreGive(mutex)
+#define writer_lock()   xSemaphoreTake(writer, portMAX_DELAY)
+#define writer_unlock() xSemaphoreGive(writer)
 #endif
 
 #define CAT_MAGIC       0x4c494652  /* "RFIL" little endian */
@@ -223,7 +229,7 @@ static void empty_catalog(catalog_t *c, uint32_t generation)
     c->hdr.next_id = 1;
 }
 
-esp_err_t image_store_format(void)
+static esp_err_t format_unlocked(void)
 {
     if (!cat || state == STORE_NO_FLASH) {
         return ESP_ERR_INVALID_STATE;
@@ -251,6 +257,7 @@ store_state_t image_store_open(uint32_t capacity)
 #ifndef IMAGE_STORE_NO_LOCK
     if (!mutex) {
         mutex = xSemaphoreCreateMutex();
+        writer = xSemaphoreCreateMutex();
     }
 #endif
     state = STORE_NO_FLASH;
@@ -601,7 +608,7 @@ static esp_err_t readback_crc(const image_record_t *r, uint32_t *crc_out)
 
 /* ---- Writing ------------------------------------------------------------------ */
 
-esp_err_t image_store_save(uint16_t replace_id, const char *name, uint8_t format,
+static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t format,
                            const uint8_t *data, uint32_t size, uint16_t *id_out)
 {
     image_record_t rec;
@@ -707,7 +714,11 @@ esp_err_t image_store_save(uint16_t replace_id, const char *name, uint8_t format
         rec.sequence = seq + 1;
     }
     rec.status = IMG_VALID;
-    rec.format = format;
+    /* New uploads and replacements are READ_ONLY; READ_WRITE only when the
+     * caller asks for it (later: a new blank disk) and the format allows it. */
+    rec.format = (format & IMG_FMT_MASK) |
+                 ((format & IMG_FLAG_READ_WRITE) && image_format_writable(format & IMG_FMT_MASK)
+                  ? IMG_FLAG_READ_WRITE : 0);
     rec.storage_format = IMG_STORE_RAW;
     rec.crc32 = crc;
     memset(rec.name, 0, sizeof(rec.name));
@@ -722,7 +733,7 @@ esp_err_t image_store_save(uint16_t replace_id, const char *name, uint8_t format
     return ESP_OK;
 }
 
-esp_err_t image_store_delete(uint16_t id)
+static esp_err_t delete_unlocked(uint16_t id)
 {
     if (state != STORE_VALID) {
         return ESP_ERR_INVALID_STATE;
@@ -736,7 +747,7 @@ esp_err_t image_store_delete(uint16_t id)
     return commit_work();
 }
 
-esp_err_t image_store_set_position(uint16_t id, int position)
+static esp_err_t set_position_unlocked(uint16_t id, int position)
 {
     static int idx[IMG_MAX_RECORDS];
 
@@ -767,4 +778,196 @@ esp_err_t image_store_set_position(uint16_t id, int position)
         work->rec[idx[i]].sequence = (uint16_t)(i + 1);
     }
     return changed ? commit_work() : ESP_OK;
+}
+
+/* ---- Format and write setting ---------------------------------------------- */
+
+static const struct {
+    uint8_t format;
+    const char *name;
+    bool writable;              /* may be set to READ_WRITE */
+} formats[] = {
+    { IMG_FMT_ST,  "st",  true },
+    { IMG_FMT_MSA, "msa", false },
+    { IMG_FMT_STX, "stx", false },
+    { IMG_FMT_IPF, "ipf", false },
+    { IMG_FMT_HFE, "hfe", false },
+    { IMG_FMT_ADF, "adf", false },  /* later: standard AmigaDOS disks */
+    { IMG_FMT_IMG, "img", false },  /* later: raw DOS sector images */
+};
+
+bool image_format_writable(uint8_t format)
+{
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+        if (formats[i].format == format) {
+            return formats[i].writable;
+        }
+    }
+    return false;
+}
+
+const char *image_format_name(uint8_t format)
+{
+    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+        if (formats[i].format == format) {
+            return formats[i].name;
+        }
+    }
+    return "unknown";
+}
+
+static esp_err_t set_read_write_unlocked(uint16_t id, bool read_write)
+{
+    if (state != STORE_VALID) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int idx = find_index(id);
+    if (idx < 0 || cat->rec[idx].status != IMG_VALID) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    const image_record_t *r = &cat->rec[idx];
+    if (read_write && !image_format_writable(image_format(r))) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (image_read_write(r) == read_write) {
+        return ESP_OK;                  /* unchanged: no flash write */
+    }
+    begin_update();
+    work->rec[idx].format = image_format(r) | (read_write ? IMG_FLAG_READ_WRITE : 0);
+    return commit_work();
+}
+
+/* ---- Written sectors: copy-on-write of changed blocks ------------------------ */
+
+static esp_err_t commit_blocks_unlocked(uint16_t id, uint32_t mask, const uint8_t *image,
+                                        uint32_t size, uint32_t crc)
+{
+    static uint8_t check[1024];
+    uint8_t used[256];
+    uint8_t fresh[RF_MAX_BLOCKS_PER_IMAGE];
+    esp_err_t err;
+
+    if (state != STORE_VALID) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int idx = find_index(id);
+    if (idx < 0 || cat->rec[idx].status != IMG_VALID || cat->rec[idx].original_size != size) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    image_record_t rec = cat->rec[idx];
+    if (mask == 0) {
+        return ESP_OK;
+    }
+    if (mask >> rec.block_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* New blocks: free ones only; the old blocks stay valid until the commit. */
+    used_map(cat, -1, used);
+    int b = 1;
+    for (int i = 0; i < rec.block_count; i++) {
+        if (!(mask & (1u << i))) {
+            continue;
+        }
+        while (b <= geo.data_blocks && used[b]) {
+            b++;
+        }
+        if (b > geo.data_blocks) {
+            return ESP_ERR_NO_MEM;
+        }
+        fresh[i] = (uint8_t)b;
+        used[b] = 1;
+    }
+
+    /* Program and compare every new block. */
+    for (int i = 0; i < rec.block_count; i++) {
+        if (!(mask & (1u << i))) {
+            continue;
+        }
+        uint32_t off = i * geo.block_size;
+        uint32_t n = size - off < geo.block_size ? size - off : geo.block_size;
+        uint32_t addr = rf_block_addr(&geo, fresh[i]);
+        uint32_t erase = (n + RF_SECTOR_SIZE - 1) / RF_SECTOR_SIZE * RF_SECTOR_SIZE;
+        if ((err = ext_flash_erase(addr, erase)) != ESP_OK ||
+            (err = ext_flash_write(addr, image + off, n)) != ESP_OK) {
+            return err;
+        }
+        for (uint32_t o = 0; o < n; o += sizeof(check)) {
+            uint32_t k = n - o < sizeof(check) ? n - o : sizeof(check);
+            if ((err = ext_flash_read(addr + o, check, k)) != ESP_OK) {
+                return err;
+            }
+            if (memcmp(check, image + off + o, k) != 0) {
+                return ESP_ERR_INVALID_CRC;
+            }
+        }
+        rec.blocks[i] = fresh[i];
+    }
+
+    /* The whole image as it will be stored must have the new CRC. */
+    uint32_t back = 0;
+    if ((err = readback_crc(&rec, &back)) != ESP_OK) {
+        return err;
+    }
+    if (back != crc) {
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    /* One catalog update switches all changed blocks at once. */
+    begin_update();
+    work->rec[idx].crc32 = crc;
+    memcpy(work->rec[idx].blocks, rec.blocks, sizeof(rec.blocks));
+    return commit_work();
+}
+
+/* ---- Public writers: one at a time -------------------------------------------- */
+
+esp_err_t image_store_format(void)
+{
+    writer_lock();
+    esp_err_t err = format_unlocked();
+    writer_unlock();
+    return err;
+}
+
+esp_err_t image_store_save(uint16_t replace_id, const char *name, uint8_t format,
+                           const uint8_t *data, uint32_t size, uint16_t *id_out)
+{
+    writer_lock();
+    esp_err_t err = save_unlocked(replace_id, name, format, data, size, id_out);
+    writer_unlock();
+    return err;
+}
+
+esp_err_t image_store_delete(uint16_t id)
+{
+    writer_lock();
+    esp_err_t err = delete_unlocked(id);
+    writer_unlock();
+    return err;
+}
+
+esp_err_t image_store_set_position(uint16_t id, int position)
+{
+    writer_lock();
+    esp_err_t err = set_position_unlocked(id, position);
+    writer_unlock();
+    return err;
+}
+
+esp_err_t image_store_set_read_write(uint16_t id, bool read_write)
+{
+    writer_lock();
+    esp_err_t err = set_read_write_unlocked(id, read_write);
+    writer_unlock();
+    return err;
+}
+
+esp_err_t image_store_commit_blocks(uint16_t id, uint32_t mask, const uint8_t *image,
+                                    uint32_t size, uint32_t crc)
+{
+    writer_lock();
+    esp_err_t err = commit_blocks_unlocked(id, mask, image, size, crc);
+    writer_unlock();
+    return err;
 }

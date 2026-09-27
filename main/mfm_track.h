@@ -68,3 +68,34 @@ int mfm_verify_track(const uint8_t *raw, const mfm_layout_t *layout, const uint8
                      uint8_t cyl, uint8_t head);
 
 uint16_t mfm_crc16(const uint8_t *buf, int len, uint16_t crc);
+
+/*
+ * Rotational position -> sector. For cell position pos on a track built by
+ * mfm_build_track, the sector whose ID field ended last before pos: its
+ * number in *sector (1-based), the return value the cells since the end of
+ * that ID field; -1 before the first ID field.
+ */
+int mfm_sector_at(const mfm_layout_t *layout, uint8_t cyl, uint8_t head, uint32_t pos,
+                  int *sector);
+
+/* Cells from the start of the track to the end of the ID field of slot i. */
+uint32_t mfm_id_end_cell(const mfm_layout_t *layout, int slot);
+
+/* ---- Write decoder -------------------------------------------------------- */
+
+typedef enum {
+    MFM_WR_OK,              /* one data field, CRC correct */
+    MFM_WR_NO_SYNC,         /* no A1 A1 A1 + mark found */
+    MFM_WR_ID_FIELD,        /* an ID field was written: track format, not supported */
+    MFM_WR_SHORT,           /* data field incomplete */
+    MFM_WR_BAD_CRC,
+} mfm_wr_result_t;
+
+/*
+ * Decode what the computer wrote during one WGATE period. intervals: the
+ * times between successive flux transitions (write pulses) in ticks of
+ * tick_ns; nominal bitcell 2 us. On MFM_WR_OK *mark is 0xFB (data) or
+ * 0xF8 (deleted data) and data[512] holds the sector.
+ */
+mfm_wr_result_t mfm_decode_write(const uint16_t *intervals, int n, int tick_ns,
+                                 uint8_t *mark, uint8_t data[MFM_SECTOR_SIZE]);

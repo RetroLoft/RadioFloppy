@@ -21,6 +21,7 @@
 #include "esp_timer.h"
 
 #include "disk_switch.h"
+#include "disk_write.h"
 #include "image_store.h"
 #include "settings.h"
 #include "st_image.h"
@@ -79,6 +80,12 @@ static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, sw
         return fail(e, "MACHINE_NOT_SUPPORTED", "floppy emulation is off: support for the "
                     "selected computer is not available yet%s", "");
     }
+    /* Written sectors of the current disk are saved before it goes. */
+    if (disk_write_flush() != ESP_OK) {
+        disk_write_refresh();
+        return fail(e, "UNSAVED_CHANGES", "changes written to the current disk could not be "
+                    "saved; the disk was not changed%s", "");
+    }
     int64_t t0 = esp_timer_get_time();
     esp_err_t err = disk_prepare(raw, info);
     if (err != ESP_OK) {
@@ -86,6 +93,7 @@ static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, sw
     }
     int64_t t1 = esp_timer_get_time();
     if (disk_activate_prepared(info, ACTIVATE_TIMEOUT_MS) == ESP_ERR_TIMEOUT) {
+        disk_write_refresh();           /* the old disk stays: writable again if it was */
         e->code = "DRIVE_BUSY";
         snprintf(e->msg, sizeof(e->msg), "drive stayed selected for %d ms; disk not changed",
                  ACTIVATE_TIMEOUT_MS);
@@ -96,6 +104,7 @@ static esp_err_t activate_locked(const uint8_t *raw, const disk_info_t *info, sw
            load_us / 1000, (t1 - t0) / 1000, (t2 - t1) / 1000);
     load_us = 0;
     disk_verify_active(raw, info);      /* background, log only */
+    disk_write_refresh();               /* write protection for the new disk */
     remember(info);
     return ESP_OK;
 }

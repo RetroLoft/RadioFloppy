@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -44,6 +45,18 @@ static uint8_t *track_ptr(uint8_t *buf, int cyl, int head)
 }
 
 static uint32_t prepared_cells;     /* track length in the inactive buffer */
+
+/*
+ * Sector data of the active disk, kept for writing (library images only):
+ * written sectors are patched here, their track is encoded again, and the
+ * changed storage blocks are marked in dirty_mask until they are saved.
+ */
+static SemaphoreHandle_t raw_lock;
+static uint8_t *active_raw;         /* NULL: disk not writable */
+static uint8_t *prepared_raw;       /* copy taken by disk_prepare() */
+static disk_info_t active_geo;      /* geometry and id belonging to active_raw */
+static uint32_t dirty_mask;         /* bit i: storage block i changed */
+volatile uint32_t disk_media_gen;   /* +1 per disk change */
 
 /*
  * Encode all tracks of raw into buf. Side 1 of a single-sided image and the
@@ -323,6 +336,7 @@ static void set_active_buffer(void *arg)
 
 esp_err_t disk_image_init(void)
 {
+    raw_lock = xSemaphoreCreateMutex();
     printf("PSRAM free: %u KiB before the track buffers\n",
            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     for (int i = 0; i < 2; i++) {
@@ -367,17 +381,33 @@ esp_err_t disk_image_init(void)
     int idx = 0;
     set_active_buffer(&idx);
     drive_swap_media(set_active_buffer, &idx, raw != NULL);   /* not armed yet: always done */
+    active_geo = info;
+    disk_media_gen++;
     set_current(&info);
 
     if (raw) {
         verify_start(raw, &info);
-        free(raw);
+        active_raw = raw;               /* kept: the start-up disk may be written */
     }
     return ESP_OK;
 }
 
 esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info)
 {
+    /* Library images: keep a copy of the sectors, so the disk can be
+     * written. Not needed (and not affordable) for the PSRAM image. */
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    free(prepared_raw);
+    prepared_raw = NULL;
+    if (raw && info->source == DISK_SRC_FLASH) {
+        prepared_raw = heap_caps_malloc(info->size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (prepared_raw) {
+            memcpy(prepared_raw, raw, info->size);
+        } else {
+            printf("Disk: no PSRAM to keep the sectors - this disk cannot be written\n");
+        }
+    }
+    xSemaphoreGive(raw_lock);
     /* The verifier may be reading the buffer that is about to be reused. */
     verify_stop();
     return build_tracks(track_buf[active_buf ^ 1], raw, info, &prepared_cells);
@@ -399,6 +429,16 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
+    /* The kept sectors follow the tracks (the caller saved any changes). */
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    uint8_t *old = active_raw;
+    active_raw = prepared_raw;
+    prepared_raw = NULL;
+    active_geo = *info;
+    dirty_mask = 0;
+    disk_media_gen++;
+    xSemaphoreGive(raw_lock);
+    free(old);
     set_current(info);
     /* Let a flux-encoder refill that started on the old buffer finish
      * before anybody may overwrite that buffer. */
@@ -406,4 +446,85 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
     printf("Active disk: %s (%s)\n", info->name,
            info->source == DISK_SRC_PSRAM ? "PSRAM" : "image library");
     return ESP_OK;
+}
+
+/* ---- Writing ---------------------------------------------------------------- */
+
+bool disk_writable_data(void)
+{
+    return active_raw != NULL && active_geo.source == DISK_SRC_FLASH;
+}
+
+esp_err_t disk_write_sector(uint32_t gen, int cyl, int head, int sector, const uint8_t *data)
+{
+    static uint8_t *work;
+    esp_err_t err = ESP_OK;
+
+    if (!work) {
+        work = heap_caps_malloc(MFM_MAX_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!work) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    verify_stop();                      /* it compares against the old sectors */
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    const disk_info_t *g = &active_geo;
+    if (gen != disk_media_gen || !active_raw) {
+        err = ESP_ERR_INVALID_STATE;    /* the disk changed meanwhile */
+    } else if (cyl < 0 || cyl >= g->cylinders || head < 0 || head >= g->heads ||
+               sector < 1 || sector > g->sectors) {
+        err = ESP_ERR_INVALID_ARG;
+    } else {
+        size_t off = ((size_t)(cyl * g->heads + head) * g->sectors + (sector - 1)) * MFM_SECTOR_SIZE;
+        memcpy(active_raw + off, data, MFM_SECTOR_SIZE);
+        uint32_t bs = image_store_geometry()->block_size;
+        dirty_mask |= 1u << (off / bs);
+        if ((off + MFM_SECTOR_SIZE - 1) / bs != off / bs) {
+            dirty_mask |= 1u << ((off + MFM_SECTOR_SIZE - 1) / bs);
+        }
+        /* The same encoder as for reading: the track now carries the new
+         * sector. Only that sector's bytes differ from what is playing. */
+        mfm_layout_t layout = mfm_layout(g->sectors);
+        mfm_build_track(work, &layout, sector_data(active_raw, g, cyl, head), cyl, head);
+        memcpy(track_ptr(track_buf[active_buf], cyl, head), work, layout.cells / 8);
+    }
+    xSemaphoreGive(raw_lock);
+    return err;
+}
+
+bool disk_dirty(void)
+{
+    return dirty_mask != 0;
+}
+
+esp_err_t disk_snapshot(disk_snapshot_t *snap)
+{
+    memset(snap, 0, sizeof(*snap));
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    if (!dirty_mask || !active_raw) {
+        xSemaphoreGive(raw_lock);
+        return ESP_ERR_NOT_FOUND;
+    }
+    snap->data = heap_caps_malloc(active_geo.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!snap->data) {
+        xSemaphoreGive(raw_lock);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(snap->data, active_raw, active_geo.size);
+    snap->size = active_geo.size;
+    snap->mask = dirty_mask;
+    snap->image_id = active_geo.image_id;
+    snap->gen = disk_media_gen;
+    dirty_mask = 0;
+    xSemaphoreGive(raw_lock);
+    return ESP_OK;
+}
+
+void disk_snapshot_failed(const disk_snapshot_t *snap)
+{
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    if (snap->gen == disk_media_gen) {
+        dirty_mask |= snap->mask;       /* still to be saved */
+    }
+    xSemaphoreGive(raw_lock);
 }

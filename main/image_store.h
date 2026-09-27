@@ -35,14 +35,32 @@
 #define IMG_VALID           0x01
 #define IMG_INCOMPLETE      0x02    /* replacing failed/interrupted: no data */
 
-#define IMG_FMT_ST          0x01    /* image format */
+/*
+ * Format byte of a record: bits 0-5 the image format (as recognised from
+ * the contents at upload, never from the file name), bit 7 the write
+ * setting, bit 6 reserved (0). Records written before the write setting
+ * existed have bit 7 clear: READ_ONLY.
+ */
+#define IMG_FMT_MASK        0x3f
+#define IMG_FLAG_READ_WRITE 0x80    /* write protection off (metadata only for now) */
+
+/* Image formats. Only ST is supported by this firmware; the other ids are
+ * reserved so the catalog never has to change for them. */
+#define IMG_FMT_ST          0x01    /* Atari: raw sector dump */
+#define IMG_FMT_MSA         0x02    /* Atari: Magic Shadow Archiver (reserved) */
+#define IMG_FMT_STX         0x03    /* Atari: Pasti (reserved) */
+#define IMG_FMT_IPF         0x04    /* Atari/Amiga: SPS IPF (reserved) */
+#define IMG_FMT_HFE         0x05    /* HxC flux (reserved) */
+#define IMG_FMT_ADF         0x06    /* Amiga: AmigaDOS disk (reserved) */
+#define IMG_FMT_IMG         0x07    /* DOS: raw sector image .img/.ima (reserved) */
+
 #define IMG_STORE_RAW       0x00    /* storage format; compression later */
 
 typedef struct __attribute__((packed)) {
     uint16_t id;                /* 1..65535, never reused while stored */
     uint16_t sequence;          /* display order, 1..n */
     uint8_t status;             /* IMG_* */
-    uint8_t format;             /* IMG_FMT_* */
+    uint8_t format;             /* IMG_FMT_* | IMG_FLAG_READ_WRITE */
     uint8_t storage_format;     /* IMG_STORE_* */
     uint8_t block_count;        /* blocks in use (0 when INCOMPLETE) */
     uint32_t original_size;     /* image bytes */
@@ -111,7 +129,9 @@ bool image_store_fits(uint32_t size, uint16_t replace_id);
 /*
  * Store an image (see the header comment). replace_id 0 = new image at the
  * end of the order; otherwise that image is replaced and keeps its id and
- * sequence. *id_out: the image id. Errors: ESP_ERR_INVALID_SIZE (0 bytes
+ * sequence. format: IMG_FMT_*, plus IMG_FLAG_READ_WRITE only for a disk
+ * created on the device (uploads and replacements are READ_ONLY).
+ * *id_out: the image id. Errors: ESP_ERR_INVALID_SIZE (0 bytes
  * or > RF_MAX_IMAGE_SIZE), ESP_ERR_NO_MEM (not enough free blocks or
  * records), ESP_ERR_NOT_FOUND (replace_id unknown), ESP_ERR_INVALID_CRC
  * (read-back mismatch), flash errors.
@@ -125,6 +145,45 @@ esp_err_t image_store_delete(uint16_t id);
 /* Move an image to position 1..n in the order (sequence numbers are
  * renumbered 1..n); no image data is touched. */
 esp_err_t image_store_set_position(uint16_t id, int position);
+
+/*
+ * Store changed blocks of a valid image (sectors written by the computer).
+ * mask: bit i = block i of the image changed; image: the complete image
+ * (size bytes, as the record says); crc: its CRC-32. Every changed block
+ * goes to a free block and is read back; then the whole image is checked
+ * against crc and ONE catalog update switches all blocks and the CRC. Until
+ * that update the old image stays valid, so a power cut leaves either the
+ * old or the new version, never a mix. ESP_ERR_NO_MEM: not enough free
+ * blocks (nothing changed).
+ */
+esp_err_t image_store_commit_blocks(uint16_t id, uint32_t mask, const uint8_t *image,
+                                    uint32_t size, uint32_t crc);
+
+/* Image format and write setting of a record. */
+static inline uint8_t image_format(const image_record_t *r)
+{
+    return r->format & IMG_FMT_MASK;
+}
+
+static inline bool image_read_write(const image_record_t *r)
+{
+    return (r->format & IMG_FLAG_READ_WRITE) != 0;
+}
+
+/* May images of this format be set to READ_WRITE? (ST only, for now;
+ * ADF and IMG later, MSA/STX/IPF/HFE never.) */
+bool image_format_writable(uint8_t format);
+
+/* "st", "msa", ... ("unknown" otherwise). */
+const char *image_format_name(uint8_t format);
+
+/*
+ * Set the write setting of a valid image (catalog update only, none when
+ * unchanged). ESP_ERR_NOT_SUPPORTED: READ_WRITE for a format that cannot be
+ * written; ESP_ERR_NOT_FOUND: no valid image with this id. Only metadata:
+ * the drive stays write-protected for the computer.
+ */
+esp_err_t image_store_set_read_write(uint16_t id, bool read_write);
 
 /*
  * The image reader: bytes [offset, offset+len) of a valid image, across

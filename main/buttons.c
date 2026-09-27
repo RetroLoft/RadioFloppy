@@ -20,6 +20,7 @@
 #include "board_pins.h"
 #include "buttons.h"
 #include "disk_switch.h"
+#include "disk_write.h"
 #include "oled.h"
 #include "setup_mode.h"
 #include "step_sound.h"
@@ -125,8 +126,13 @@ static void buttons_task(void *arg)
                 setup_done = true;
                 printf("Buttons: both held %d s - WiFi setup mode\n", SETUP_MS / 1000);
                 oled_show_message("WiFi setup mode", "Restarting...");
-                vTaskDelay(pdMS_TO_TICKS(1500));
-                setup_mode_restart(SETUP_BUTTONS);
+                if (disk_write_flush() != ESP_OK) {
+                    printf("Buttons: written sectors could not be saved - not restarting\n");
+                    oled_show_message("Saving failed", "Not restarting");
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(1500));
+                    setup_mode_restart(SETUP_BUTTONS);
+                }
             }
         }
 

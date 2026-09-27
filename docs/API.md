@@ -26,7 +26,10 @@ the device itself, uses only this API and needs no internet access:
   images or temporary PSRAM image) and a warning when that image was
   replaced or deleted since.
 - **Add a floppy** — upload a `.ST` file: temporarily (PSRAM), or add it to
-  my floppy images (optionally loading it at once).
+  my floppy images (loaded at once unless unticked).
+- **New disk** — a name and *Create*: an empty, formatted 720 KiB Atari
+  disk in my floppy images, read-write (only when the computer is set to
+  Atari 16-bit).
 - **My floppy images** — all stored images in their order (`sequence`),
   each with **↑ ↓** (change the order), **Load**, **Replace…** (asks before
   the old image is lost) and **Delete**; above the list the storage use,
@@ -185,6 +188,7 @@ web page asks for the token.
 | ------------------------------- | ----- | ------------------------------------------- |
 | `GET /api/v1/status`            |       | Device, WiFi, storage and drive status      |
 | `GET /api/v1/images`            |       | All images in `sequence` order + storage use |
+| `POST /api/v1/images`           | (yes) | Create a new, empty, formatted disk         |
 | `GET /api/v1/images/{id}`       |       | One image                                   |
 | `PUT /api/v1/images/{id}`       | (yes) | Change the position (`sequence`)            |
 | `DELETE /api/v1/images/{id}`    | (yes) | Delete an image                             |
@@ -252,7 +256,7 @@ All images in `sequence` order, and the storage use.
   "images": [
     { "id": 6, "sequence": 1, "status": "valid", "name": "Weird Dreams", "format": "st",
       "size": 839680, "stored_size": 839680, "storage_format": "raw", "crc32": "342b844d",
-      "blocks_used": 13, "active": true },
+      "blocks_used": 13, "access": "READ_ONLY", "write_supported": true, "active": true },
     { "id": 3, "sequence": 2, "status": "incomplete", "name": "Leisure Suit Larry", "active": false }
   ],
   "storage": { "state": "valid", "used_percent": 26, "...": "as GET /storage" }
@@ -267,6 +271,8 @@ All images in `sequence` order, and the storage use.
 | `stored_size`, `storage_format` | Bytes as stored and how: always `raw` (= `size`) for now; compression may follow |
 | `crc32`          | CRC-32 of the image as 8 hex digits (same as `zlib.crc32`, `crc32` command) |
 | `blocks_used`    | Number of storage blocks it occupies                                |
+| `access`         | `READ_ONLY` (default for every upload) or `READ_WRITE` — see below  |
+| `write_supported` | The image format may be set to `READ_WRITE` (only ST for now)      |
 | `active`         | This image is the active disk (and has not been replaced since it was activated) |
 
 `GET /api/v1/images/{id}` returns one such object (`404 IMAGE_NOT_FOUND`
@@ -274,18 +280,61 @@ if there is none).
 
 ---
 
-### `PUT /api/v1/images/{id}`
+### `POST /api/v1/images`
 
-Change the order. Token required. The image is moved to position
-`sequence` (1 = first; larger than the number of images = last) and all
-images are renumbered 1…n. No image data is read or written.
+Create a new, empty, formatted disk in my floppy images. Token required.
 
 ```json
-{ "sequence": 1 }
+{ "name": "Save games" }
 ```
 
-Response `200`: the image object. Errors: `400 INVALID_REQUEST` (`sequence`
-missing or < 1), `404 IMAGE_NOT_FOUND`, `503 STORAGE_NOT_READY`.
+- `name`: 1–52 printable ASCII characters (spaces around it are removed),
+  else `400 INVALID_NAME`. Becomes the title of the image.
+- The disk follows the **configured** computer (`machine` in the
+  settings). **Atari 16-bit** (the only one for now): always `.ST`,
+  720 KiB = 737 280 bytes, 80 tracks × 2 sides × 9 sectors × 512 bytes,
+  formatted as TOS does it (boot sector with BPB, not executable, random
+  serial number; two empty FATs; empty root directory for 112 entries;
+  711 free clusters of 1 KiB). Other computers: `409 MACHINE_NOT_SUPPORTED`,
+  nothing is created.
+- A new disk is **`READ_WRITE`** (uploads are `READ_ONLY`); writing itself
+  is not supported yet, see `PUT /images/{id}`.
+- It is stored like an upload (12 blocks of 64 KiB, verified) and appears
+  at the end of the list.
+
+Response `201`: the image object. Other errors: `409 UPLOAD_BUSY`,
+`503 STORAGE_NOT_READY`, `507 NO_SPACE`, `507 INSUFFICIENT_MEMORY`.
+
+### `PUT /api/v1/images/{id}`
+
+Change the order and/or the write setting. Token required. No image data
+is read or written.
+
+```json
+{ "sequence": 1, "access": "READ_WRITE" }
+```
+
+- `sequence`: move the image to this position (1 = first; larger than the
+  number of images = last); all images are renumbered 1…n.
+- `access`: `"READ_ONLY"` or `"READ_WRITE"`. Stored in the catalog, kept
+  after a restart. Only formats that can be written (ST for now; checked
+  on the recognised format, not the file name) accept `READ_WRITE`, else
+  `422 FORMAT_NOT_WRITABLE`. Uploads — also replacements — are always
+  `READ_ONLY`; disks created on the device (planned) will start as
+  `READ_WRITE`.
+
+**Writing:** a `READ_WRITE` .ST image is presented writable (WPROT
+released) when all of this holds: the computer is set to Atari 16-bit,
+the image comes from the library (not a temporary PSRAM image), its
+sectors could be kept in memory, the storage is usable, at least as many
+blocks are free as the image has (so every save fits), and no save failed.
+Otherwise the disk stays write-protected; `GET /current` → `write.reason`
+says why. See [Writing](#writing).
+
+Response `200`: the image object. Errors: `400 INVALID_REQUEST` (neither
+field, `sequence` < 1, or another `access` value), `404 IMAGE_NOT_FOUND`
+(also for an incomplete image), `422 FORMAT_NOT_WRITABLE`,
+`503 STORAGE_NOT_READY`.
 
 ---
 
@@ -361,6 +410,7 @@ The active disk.
 | `image_changed_since` | Only for `flash`: that image was replaced or deleted since; the drive still plays the disk as it was when activated |
 | `name`, `size`, `crc32` | The disk image                                                 |
 | `sides`, `cylinders`, `sectors` | Geometry: 1 or 2 sides, 79–84 cylinders, 9–11 sectors per track |
+| `write`               | Write state of the inserted disk, see [Writing](#writing)        |
 
 ---
 
@@ -564,6 +614,61 @@ Placeholder for online updates; always answers:
   "message": "Online update checks are not available yet." }
 ```
 
+## Writing
+
+The Atari can write to a library `.ST` image set to `READ_WRITE` (for
+example a disk made with *New disk*). What happens:
+
+1. **Receive** — WDATA is sampled by an RMT receive channel with DMA
+   (0.1 µs); a write ends when WDATA stays quiet for 16 µs.
+2. **Decode** — MFM: three A1 syncs, data mark, 512 bytes, CRC. Only a
+   complete sector with a correct CRC is used; anything else is ignored
+   and counted in `writes_rejected` (the image is not touched). Formatting
+   a track from the Atari is not supported.
+3. **Which sector** — the WD1772 writes only the data field. RadioFloppy
+   takes the rotation position when WGATE is asserted (time since the
+   INDEX pulse) and the cylinder and side of that moment: the sector whose
+   ID field just passed.
+4. **Apply** — the sector is patched into the image kept in PSRAM and its
+   track is encoded again, so the next read returns the new data.
+5. **Save** — 2 s after the last write the changed 64 KiB blocks are
+   written **copy-on-write** to free blocks, read back, the whole image is
+   checked against its new CRC, and **one** catalog update switches all of
+   them. After a power cut the image on the flash is the previously saved
+   or the newly saved version, never a mix of both.
+
+`GET /api/v1/current` → `write`:
+
+```json
+{ "state": "pending", "writable": true, "reason": "", "unsaved": true,
+  "sectors_written": 14, "writes_rejected": 0, "saves": 3 }
+```
+
+| `state`     | Meaning                                                                    |
+| ----------- | -------------------------------------------------------------------------- |
+| `read_only` | Write-protected; `reason` says why (read-only image, not enough free storage, …) |
+| `writable`  | Writes accepted, everything saved                                          |
+| `pending`   | Written sectors not saved yet (saved about 2 s after the last write)       |
+| `saving`    | Being saved                                                                |
+| `error`     | Saving failed (`error`): the disk is write-protected, the changes stay in memory and are retried every 30 s (e.g. after storage was freed) |
+
+Guarantees and limits:
+
+- Changes are **not** lost by activating another disk, a restart through
+  the API or the buttons (WiFi setup): those save first; if saving fails,
+  they are refused with `409 UNSAVED_CHANGES`. Deleting, replacing or
+  formatting while the disk has unsaved changes is refused the same way.
+- A **power cut** loses the changes not saved yet: those of the last
+  2 seconds plus the time the save takes (about 0.5–2 s). What was saved
+  before stays intact. Wait until the page shows *Writable — all changes
+  saved* before switching off. Keeping the last seconds safe as well would
+  need a hold-up supply (a capacitor that keeps RadioFloppy running for
+  a few seconds) and power-fail detection — not on this hardware.
+- If a file operation is interrupted by a power cut, the disk is left as a
+  real floppy would be after a cut in the middle of writing: the saved
+  version is consistent at block level, but the file system may lack the
+  last sectors TOS wrote.
+
 ## Uploading images
 
 An upload always takes two requests:
@@ -645,7 +750,10 @@ change. A failed upload carries the same `error` inside its upload object.
 | 422  | `CHECKSUM_MISMATCH`    | The file was damaged in transit — send it again        |
 | 422  | `INVALID_HOSTNAME`     | Use 1–32 letters, digits or `-`                        |
 | 422  | `INVALID_DRIVE_SELECT` | Use `"DS0"` or `"DS1"`                                 |
+| 400  | `INVALID_NAME`         | Use 1–52 printable characters                          |
+| 422  | `FORMAT_NOT_WRITABLE`  | Only ST images can be set to `READ_WRITE`              |
 | 422  | `INVALID_MACHINE`      | Use `"ATARI"`, `"AMIGA"` or `"DOS"`                    |
+| 409  | `UNSAVED_CHANGES`      | The Atari wrote to the disk and it is not saved yet — wait and retry |
 | 409  | `MACHINE_NOT_SUPPORTED` | Floppy emulation is off for this computer — choose `ATARI` and restart |
 | 500  | `FLASH_ERROR`          | Storage problem — retry; check the device log          |
 | 500  | `PREPARE_FAILED`       | Internal problem — check the device log                |

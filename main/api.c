@@ -26,6 +26,7 @@
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
@@ -34,6 +35,7 @@
 #include "disk_image.h"
 #include "disk_switch.h"
 #include "disk_title.h"
+#include "disk_write.h"
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "ext_flash.h"
@@ -41,6 +43,7 @@
 #include "settings.h"
 #include "step_sound.h"
 #include "image_store.h"
+#include "st_format.h"
 #include "st_image.h"
 #include "wifi_net.h"
 
@@ -293,12 +296,14 @@ static cJSON *image_json(const image_record_t *r, const disk_info_t *cur)
     cJSON_AddStringToObject(o, "name", title);
     if (r->status == IMG_VALID) {
         hex32(crc, r->crc32);
-        cJSON_AddStringToObject(o, "format", "st");
+        cJSON_AddStringToObject(o, "format", image_format_name(image_format(r)));
         cJSON_AddNumberToObject(o, "size", r->original_size);
         cJSON_AddNumberToObject(o, "stored_size", r->stored_size);
         cJSON_AddStringToObject(o, "storage_format", "raw");
         cJSON_AddStringToObject(o, "crc32", crc);
         cJSON_AddNumberToObject(o, "blocks_used", r->block_count);
+        cJSON_AddStringToObject(o, "access", image_read_write(r) ? "READ_WRITE" : "READ_ONLY");
+        cJSON_AddBoolToObject(o, "write_supported", image_format_writable(image_format(r)));
     }
     cJSON_AddBoolToObject(o, "active", cur->source == DISK_SRC_FLASH && cur->image_id == r->id &&
                                        !cur->image_changed);
@@ -316,6 +321,33 @@ static bool storage_ready(httpd_req_t *req)
                image_store_state() == STORE_OLD_FORMAT ? " - initialise it with "
                "POST /api/v1/storage/format" : "");
     return false;
+}
+
+/* The inserted disk is image id and has written sectors not saved yet. */
+static bool active_unsaved(uint16_t id)
+{
+    disk_info_t d;
+    disk_get_current(&d);
+    return disk_write_unsaved() && d.source == DISK_SRC_FLASH && d.image_id == id;
+}
+
+static cJSON *write_json(void)
+{
+    write_status_t w;
+    disk_write_status(&w);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "state", disk_write_state_name(w.state));
+    cJSON_AddBoolToObject(o, "writable", w.writable);
+    cJSON_AddStringToObject(o, "reason", w.reason);
+    cJSON_AddBoolToObject(o, "unsaved", w.state == WRITE_PENDING || w.state == WRITE_SAVING ||
+                                        w.state == WRITE_ERROR);
+    if (w.error[0]) {
+        cJSON_AddStringToObject(o, "error", w.error);
+    }
+    cJSON_AddNumberToObject(o, "sectors_written", w.sectors_written);
+    cJSON_AddNumberToObject(o, "writes_rejected", w.writes_rejected);
+    cJSON_AddNumberToObject(o, "saves", w.saves);
+    return o;
 }
 
 static cJSON *current_json(void)
@@ -341,6 +373,7 @@ static cJSON *current_json(void)
         cJSON_AddNumberToObject(c, "cylinders", d.cylinders);
         cJSON_AddNumberToObject(c, "sectors", d.sectors);
     }
+    cJSON_AddItemToObject(c, "write", write_json());
     return c;
 }
 
@@ -395,7 +428,7 @@ static const char *status_for(const char *code)
         { "UPLOAD_INCOMPLETE", HTTP_400 }, { "INSUFFICIENT_MEMORY", HTTP_507 },
         { "FLASH_ERROR", HTTP_500 },       { "PREPARE_FAILED", HTTP_500 },
         { "IMAGE_NOT_FOUND", HTTP_404 },   { "STORAGE_NOT_READY", HTTP_503 },
-        { "MACHINE_NOT_SUPPORTED", HTTP_409 },
+        { "MACHINE_NOT_SUPPORTED", HTTP_409 },   { "UNSAVED_CHANGES", HTTP_409 },   { "INVALID_NAME", HTTP_400 },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].code, code) == 0) {
@@ -503,6 +536,9 @@ static esp_err_t get_status(httpd_req_t *req)
     cJSON_AddStringToObject(mach, "id", mp->id);
     cJSON_AddStringToObject(mach, "name", mp->name);
     cJSON_AddBoolToObject(mach, "supported", mp->supported);
+    settings_t cfg;
+    settings_get(&cfg);
+    cJSON_AddStringToObject(mach, "configured", machine_profile(cfg.machine)->id);
 
     cJSON *drv = cJSON_AddObjectToObject(root, "drive");
     cJSON_AddStringToObject(drv, "select_line", EMU_SELECT_NAME);
@@ -583,7 +619,11 @@ static esp_err_t get_image(httpd_req_t *req)
     return send_json(req, "200 OK", image_json(&r, &d));
 }
 
-/* PUT /api/v1/images/{id} {"sequence": n}: move to position n (1 = first). */
+/*
+ * PUT /api/v1/images/{id}: change {"sequence": n} (move to position n,
+ * 1 = first) and/or {"access": "READ_ONLY" | "READ_WRITE"} (metadata only:
+ * the drive stays write-protected for the computer).
+ */
 static esp_err_t put_image(httpd_req_t *req)
 {
     if (!authorized(req) || !storage_ready(req)) {
@@ -595,25 +635,126 @@ static esp_err_t put_image(httpd_req_t *req)
         return ESP_OK;
     }
     const cJSON *js = cJSON_GetObjectItem(body, "sequence");
+    const cJSON *ja = cJSON_GetObjectItem(body, "access");
     int pos = cJSON_IsNumber(js) && js->valuedouble == (int)js->valuedouble ? js->valueint : 0;
+    int rw = !cJSON_IsString(ja) ? -1 : strcmp(ja->valuestring, "READ_WRITE") == 0 ? 1
+             : strcmp(ja->valuestring, "READ_ONLY") == 0 ? 0 : -2;
     cJSON_Delete(body);
-    if (pos < 1) {
-        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"sequence\" must be a number >= 1");
+    if ((!js && !ja) || (js && pos < 1) || (ja && rw < 0)) {
+        return send_error(req, HTTP_400, "INVALID_REQUEST",
+                          "send \"sequence\" (a number >= 1) and/or \"access\" "
+                          "(\"READ_ONLY\" or \"READ_WRITE\")");
     }
 
     xSemaphoreTake(api_lock, portMAX_DELAY);
     esp_err_t ret;
     image_record_t r;
-    esp_err_t err = id ? image_store_set_position(id, pos) : ESP_ERR_NOT_FOUND;
+    esp_err_t err = id && image_store_get(id, &r) ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (err == ESP_OK && ja) {
+        err = image_store_set_read_write(id, rw == 1);
+        disk_write_refresh();           /* write protection of the inserted disk */
+    }
+    if (err == ESP_OK && js) {
+        err = image_store_set_position(id, pos);
+    }
     if (err == ESP_ERR_NOT_FOUND) {
-        ret = send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no image with this id");
+        ret = send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no valid image with this id");
+    } else if (err == ESP_ERR_NOT_SUPPORTED) {
+        ret = send_error(req, HTTP_422, "FORMAT_NOT_WRITABLE",
+                         "this image format does not support writing");
     } else if (err != ESP_OK || !image_store_get(id, &r)) {
         ret = send_error(req, HTTP_500, "FLASH_ERROR", "catalog update failed");
     } else {
+        if (ja) {
+            printf("API: image %u set to %s\n", id, rw ? "READ_WRITE" : "READ_ONLY");
+        }
         disk_info_t d;
         disk_get_current(&d);
         ret = send_json(req, "200 OK", image_json(&r, &d));
     }
+    xSemaphoreGive(api_lock);
+    return ret;
+}
+
+/*
+ * POST /api/v1/images {"name": "..."}: create a new, empty, formatted disk
+ * in the library for the configured computer (READ_WRITE). Atari: .ST,
+ * 720 KiB (80 x 2 x 9). Other computers: not supported yet.
+ */
+static esp_err_t post_image(httpd_req_t *req)
+{
+    if (!authorized(req) || !storage_ready(req)) {
+        return ESP_OK;
+    }
+    cJSON *body = read_json(req);
+    if (!body) {
+        return ESP_OK;
+    }
+    const cJSON *jn = cJSON_GetObjectItem(body, "name");
+    char name[IMG_TITLE_SIZE] = "";
+    bool name_ok = cJSON_IsString(jn);
+    if (name_ok) {
+        const char *s = jn->valuestring, *e;
+        while (*s == ' ') {
+            s++;
+        }
+        e = s + strlen(s);
+        while (e > s && e[-1] == ' ') {
+            e--;
+        }
+        name_ok = e > s && e - s <= IMG_NAME_LEN;
+        for (const char *p = s; name_ok && p < e; p++) {
+            name_ok = *p >= 0x20 && *p <= 0x7e;
+        }
+        if (name_ok) {
+            memcpy(name, s, e - s);
+            name[e - s] = 0;
+        }
+    }
+    cJSON_Delete(body);
+    if (!name_ok) {
+        return send_error(req, HTTP_400, "INVALID_NAME",
+                          "\"name\": 1 to %d printable characters", IMG_NAME_LEN);
+    }
+
+    settings_t cfg;
+    settings_get(&cfg);
+    const machine_profile_t *mp = machine_profile(cfg.machine);
+    if (cfg.machine != MACHINE_ATARI) {
+        return send_error(req, HTTP_409, "MACHINE_NOT_SUPPORTED",
+                          "creating a new disk is not supported yet for %s", mp->name);
+    }
+
+    xSemaphoreTake(api_lock, portMAX_DELAY);
+    esp_err_t ret;
+    uint8_t *raw = NULL;
+    if (upload_in_progress()) {
+        ret = send_error(req, HTTP_409, "UPLOAD_BUSY", "an upload is in progress");
+    } else if (!image_store_fits(ST_BLANK_SIZE, 0)) {
+        ret = send_error(req, HTTP_507, "NO_SPACE", "not enough free storage: %lu blocks needed",
+                         (unsigned long)image_store_blocks_needed(ST_BLANK_SIZE));
+    } else if (!(raw = heap_caps_malloc(ST_BLANK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))) {
+        ret = send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no PSRAM for the new disk");
+    } else {
+        st_format_blank(raw, esp_random() & 0xffffff);
+        uint16_t id = 0;
+        esp_err_t err = image_store_save(0, name, IMG_FMT_ST | IMG_FLAG_READ_WRITE, raw,
+                                         ST_BLANK_SIZE, &id);
+        image_record_t r;
+        if (err == ESP_ERR_NO_MEM) {
+            ret = send_error(req, HTTP_507, "NO_SPACE", "not enough free storage");
+        } else if (err != ESP_OK || !image_store_get(id, &r)) {
+            ret = send_error(req, HTTP_500, "FLASH_ERROR", "storing the new disk failed (%s)",
+                             esp_err_to_name(err));
+        } else {
+            printf("API: new disk \"%s\" created as image %u (720 KiB .ST, read-write)\n",
+                   name, id);
+            disk_info_t d;
+            disk_get_current(&d);
+            ret = send_json(req, "201 Created", image_json(&r, &d));
+        }
+    }
+    free(raw);
     xSemaphoreGive(api_lock);
     return ret;
 }
@@ -634,10 +775,14 @@ static esp_err_t delete_image(httpd_req_t *req)
                          id);
     } else if (!id || !image_store_get(id, &r)) {
         ret = send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no image with this id");
+    } else if (active_unsaved(id)) {
+        ret = send_error(req, HTTP_409, "UNSAVED_CHANGES",
+                         "the computer wrote to this disk and the changes are not saved yet");
     } else if (image_store_delete(id) != ESP_OK) {
         ret = send_error(req, HTTP_500, "FLASH_ERROR", "catalog update failed");
     } else {
         disk_note_image_changed(id);
+        disk_write_refresh();
         printf("API: image %u deleted (%u block(s) free again)\n", id, r.block_count);
         cJSON *root = cJSON_CreateObject();
         cJSON_AddNumberToObject(root, "id", id);
@@ -671,6 +816,8 @@ static esp_err_t post_format(httpd_req_t *req)
     esp_err_t ret;
     if (upload_in_progress()) {
         ret = send_error(req, HTTP_409, "UPLOAD_BUSY", "an upload is in progress");
+    } else if (disk_write_unsaved()) {
+        ret = send_error(req, HTTP_409, "UNSAVED_CHANGES", "written sectors are not saved yet");
     } else if (!ext_flash_ready() || image_store_state() == STORE_NO_FLASH) {
         ret = send_error(req, HTTP_503, "STORAGE_NOT_READY", "no external flash");
     } else if (image_store_format() != ESP_OK) {
@@ -811,6 +958,11 @@ static esp_err_t post_upload(httpd_req_t *req)
         if (replace_id && !image_store_get(replace_id, &old)) {
             ret = send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "image %u does not exist",
                              replace_id);
+            goto out;
+        }
+        if (replace_id && active_unsaved(replace_id)) {
+            ret = send_error(req, HTTP_409, "UNSAVED_CHANGES",
+                             "the computer wrote to this disk and the changes are not saved yet");
             goto out;
         }
         if (!image_store_fits(size, replace_id)) {
@@ -1098,6 +1250,11 @@ static esp_err_t post_restart(httpd_req_t *req)
     }
     cJSON_Delete(body);
 
+    /* Sectors written by the computer are saved before the restart. */
+    if (disk_write_flush() != ESP_OK) {
+        return send_error(req, HTTP_409, "UNSAVED_CHANGES", "written sectors could not be saved; "
+                          "not restarting (see the disk status)");
+    }
     static esp_timer_handle_t timer;
     const esp_timer_create_args_t t = { .callback = restart_cb, .name = "restart" };
     if (!timer && esp_timer_create(&t, &timer) != ESP_OK) {
@@ -1182,6 +1339,7 @@ esp_err_t api_start(void)
     static const httpd_uri_t uris[] = {
         { .uri = "/api/v1/status",    .method = HTTP_GET,    .handler = get_status },
         { .uri = "/api/v1/images",    .method = HTTP_GET,    .handler = get_images },
+        { .uri = "/api/v1/images",    .method = HTTP_POST,   .handler = post_image },
         { .uri = "/api/v1/images/*",  .method = HTTP_GET,    .handler = get_image },
         { .uri = "/api/v1/images/*",  .method = HTTP_PUT,    .handler = put_image },
         { .uri = "/api/v1/images/*",  .method = HTTP_DELETE, .handler = delete_image },

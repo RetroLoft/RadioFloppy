@@ -83,7 +83,7 @@ Image record (96 bytes):
 | 0      | u16       | id             | Image id 1–65535, fixed for the life of the image           |
 | 2      | u16       | sequence       | Display order; changing it never moves data                 |
 | 4      | u8        | status         | `0xFF` unused record, `0x01` valid, `0x02` incomplete       |
-| 5      | u8        | format         | `0x01` = `.ST`                                              |
+| 5      | u8        | format         | bits 0–5: image format as recognised from the contents: `0x01` ST (the only one supported); reserved `0x02` MSA, `0x03` STX, `0x04` IPF, `0x05` HFE, `0x06` ADF, `0x07` IMG. Bit 7: write setting, 1 = READ_WRITE, 0 = READ_ONLY (default; records from before this setting read as READ_ONLY). Bit 6: reserved, 0 |
 | 6      | u8        | storage_format | `0x00` = RAW (the only one for now; reserved for compression) |
 | 7      | u8        | block_count    | Blocks used (0 when incomplete)                             |
 | 8      | u32       | original_size  | Image size in bytes                                         |
@@ -141,6 +141,15 @@ as a disk.
 
 **Order:** the image moves to a position and all sequences are renumbered
 1…n (catalog update only).
+
+**Sectors written by the computer** (`image_store_commit_blocks`): every
+changed block of the image is written to a *free* block and read back;
+then the whole image (unchanged blocks from the flash plus the new ones)
+is checked against the new CRC-32, and one catalog update puts the new
+block numbers and the CRC in the record. The old blocks become free. A
+power cut before that update leaves the previous version intact. This is
+why an image is only offered writable while at least as many blocks are
+free as it has.
 
 ### States
 

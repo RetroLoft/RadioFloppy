@@ -58,6 +58,7 @@
   ul.slots li.active { border: 2px solid var(--active); background: var(--active-bg); }
   .slotno { font-weight: 700; text-align: right; color: var(--muted); }
   .slotname { font-weight: 600; word-break: break-word; }
+  label.wp { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
   .actions button { padding: 5px 10px; }
   button.icon { padding: 5px 8px; min-width: 32px; }
@@ -149,10 +150,26 @@
     </form>
   </section>
 
+  <section aria-labelledby="h-new">
+    <h2 id="h-new">New disk</h2>
+    <form id="newform" class="current" autocomplete="off">
+      <div class="row">
+        <input id="newname" type="text" class="grow" maxlength="52" placeholder="Name, e.g. Save games"
+               aria-label="Name of the new disk" required>
+        <button id="newbtn" type="submit">Create</button>
+      </div>
+      <p id="newinfo" class="small muted" style="margin:0">An empty, formatted Atari disk: .ST, 720 KiB
+        (80 tracks, 2 sides, 9 sectors). It is added to my floppy images, read-write.</p>
+    </form>
+  </section>
+
   <section aria-labelledby="h-images">
     <h2 id="h-images">My floppy images <span id="imgcount" class="muted small"></span></h2>
     <div id="storage" class="small" style="margin-bottom:12px"></div>
     <div id="storefix" class="banner err hidden" style="margin-bottom:12px"></div>
+    <p class="small muted" style="margin:0 0 12px">An image with <em>Write protection</em> off can be
+      written by the Atari (.ST only; new). Written sectors are saved about 2 seconds after the last
+      write; wait for “Saved” before switching the power off.</p>
     <ul id="images" class="slots"><li class="free">Loading…</li></ul>
     <input type="file" id="replacefile" accept=".st,.ST" class="hidden" aria-hidden="true" tabindex="-1">
   </section>
@@ -194,6 +211,16 @@
       <dt>Signal</dt><dd id="w-rssi">–</dd>
       <dt>MAC address</dt><dd id="w-mac" class="code">–</dd>
     </dl>
+    <form id="hostform" class="current" autocomplete="off" style="margin-top:12px">
+      <label for="hostname"><strong>Host name</strong></label>
+      <div class="row">
+        <input id="hostname" type="text" class="grow" maxlength="32" spellcheck="false" autocapitalize="off"
+               pattern="[A-Za-z0-9]([A-Za-z0-9\-]{0,30}[A-Za-z0-9])?" required>
+        <button id="hostsave" type="submit">Save</button>
+      </div>
+      <p class="small muted" style="margin:0">The name of RadioFloppy on your network, also used for its
+        WiFi setup network. Letters, digits and ‘-’, up to 32 characters. Takes effect after a restart.</p>
+    </form>
     <p class="small muted" style="margin-bottom:0">To join another network, hold both buttons for
       <strong>10 seconds</strong>: RadioFloppy restarts in WiFi setup mode (the floppy drive is off
       meanwhile). The display shows which network to join.</p>
@@ -204,31 +231,6 @@
     <label class="opt"><input type="checkbox" id="buzzer">
       <span><strong>Buzzer</strong> <span class="muted small">— a click for every head step and button press,
       like a real drive. Takes effect at once.</span></span></label>
-  </section>
-
-  <section aria-labelledby="h-device">
-    <h2 id="h-device">Host name</h2>
-    <form id="hostform" class="current" autocomplete="off">
-      <div class="row">
-        <input id="hostname" type="text" class="grow" maxlength="32" spellcheck="false" autocapitalize="off"
-               pattern="[A-Za-z0-9]([A-Za-z0-9\-]{0,30}[A-Za-z0-9])?" required>
-        <button id="hostsave" type="submit">Save</button>
-      </div>
-      <p class="small muted" style="margin:0">The name of RadioFloppy on your network, also used for its
-        WiFi setup network. Letters, digits and ‘-’, up to 32 characters. Takes effect after a restart.</p>
-    </form>
-  </section>
-
-  <section aria-labelledby="h-fw">
-    <h2 id="h-fw">Firmware</h2>
-    <dl class="kv">
-      <dt>Version</dt><dd id="fw-ver">–</dd>
-      <dt>ESP-IDF</dt><dd id="fw-idf">–</dd>
-    </dl>
-    <div class="row" style="margin-top:12px">
-      <button type="button" id="updcheck" class="secondary">Check for updates</button>
-      <span id="updresult" class="small muted"></span>
-    </div>
   </section>
 
   <section aria-labelledby="h-conn">
@@ -249,6 +251,18 @@
       <p class="small muted" style="margin:0">Takes effect after a restart.</p>
     </form>
   </section>
+
+  <section aria-labelledby="h-fw">
+    <h2 id="h-fw">Firmware</h2>
+    <dl class="kv">
+      <dt>Version</dt><dd id="fw-ver">–</dd>
+      <dt>ESP-IDF</dt><dd id="fw-idf">–</dd>
+    </dl>
+    <div class="row" style="margin-top:12px">
+      <button type="button" id="updcheck" class="secondary">Check for updates</button>
+      <span id="updresult" class="small muted"></span>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -268,6 +282,8 @@ const S = {
   driveDirty: false,    // settings: drive choice changed, not saved yet
   machineDirty: false,  // settings: computer changed, not saved yet
   machines: null,       // machine profiles from /settings
+  machineConfigured: "ATARI",   // computer set in the settings (from /status)
+  machineName: "",
   failures: 0,
 };
 
@@ -338,6 +354,9 @@ const ERRORS = {
   IMAGE_NOT_FOUND: "This image does not exist (any more).",
   STORAGE_NOT_READY: "The image storage is not ready. See the message under My floppy images.",
   CONFIRMATION_REQUIRED: "Confirmation missing.",
+  FORMAT_NOT_WRITABLE: "This image format does not support writing.",
+  UNSAVED_CHANGES: "The Atari wrote to the current disk and those changes are not saved yet. Wait a moment and try again.",
+  INVALID_NAME: "Enter a name of 1 to 52 characters (letters, digits, spaces and punctuation).",
   INVALID_REQUEST: "The request was not accepted.",
   FLASH_ERROR: "Error reading or writing the flash memory.",
   INSUFFICIENT_MEMORY: "RadioFloppy does not have enough free memory.",
@@ -413,6 +432,16 @@ function renderCurrent() {
   } else {
     origin = "From the flash memory.";
   }
+  const w = c.write || {};
+  const WS = {
+    read_only: '<span class="badge">Write-protected</span>' + (w.reason ? ' <span class="small muted">(' + esc(w.reason) + ")</span>" : ""),
+    writable: '<span class="badge active">Writable</span> <span class="small muted">— all changes saved</span>',
+    pending: '<span class="badge temp">Unsaved changes</span> <span class="small muted">— saving shortly…</span>',
+    saving: '<span class="badge temp">Saving changes…</span>',
+    error: '<span class="badge" style="color:var(--err)">Saving failed</span> <span class="small" style="color:var(--err)">' +
+           esc(w.error || "") + " — the changes are kept in memory; the disk is write-protected. Free some storage; RadioFloppy retries.</span>",
+  };
+  origin += '<div style="margin-top:6px">' + (WS[w.state] || "") + "</div>";
   el.innerHTML = '<div class="name">' + esc(c.name) + ' <span class="badge active">Active</span></div>' +
     '<div class="muted">' + kib(c.size) + (c.sides ? " · " + geometryText({ cylinders: c.cylinders, sectors: c.sectors, sides: c.sides }) : "") +
     ' · CRC32 <span class="code">' + esc(c.crc32 || "") + "</span></div><div>" + origin + "</div>";
@@ -467,13 +496,33 @@ function renderImages() {
   S.images.forEach((im, i) => {
     const li = document.createElement("li");
     const valid = im.status === "valid";
+    const busyDisk = im.active && S.current && S.current.write && S.current.write.unsaved;
     li.className = im.active ? "active" : "";
     li.innerHTML = '<span class="slotno">' + (i + 1) + '</span>' +
       '<span><span class="slotname">' + esc(im.name) + '</span>' +
       (im.active ? ' <span class="badge active">Active</span>' : "") +
+      (valid && im.access === "READ_WRITE" ? ' <span class="badge temp">Read-write</span>' : "") +
       '<br><span class="small muted">' +
       (valid ? kib(im.size) : '<span style="color:var(--err)">incomplete — replacing failed; replace or delete it</span>') +
       "</span></span>";
+    if (valid) {
+      // Write protection switch: on = READ_ONLY, off = READ_WRITE (metadata only for now).
+      const wp = document.createElement("label");
+      wp.className = "wp small";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = im.access !== "READ_WRITE";
+      cb.disabled = !canChange || !im.write_supported;
+      cb.addEventListener("change", () => setAccess(im, cb.checked ? "READ_ONLY" : "READ_WRITE", cb));
+      wp.append(cb, " Write protection");
+      if (!im.write_supported) {
+        const n = document.createElement("span");
+        n.className = "muted";
+        n.textContent = " — this image format does not support writing.";
+        wp.append(n);
+      }
+      li.children[1].appendChild(wp);
+    }
     const a = document.createElement("div");
     a.className = "actions";
     a.append(
@@ -481,8 +530,10 @@ function renderImages() {
       button("↓", "secondary icon", "Move down", !canChange || i === S.images.length - 1, () => moveImage(im, i + 2)),
       button("Load", "", im.active ? "This image is already active" : lock, !canChange || !valid || im.active,
              () => loadImage(im.id, im.name)),
-      button("Replace…", "secondary", lock, !canChange, () => chooseReplacement(im)),
-      button("Delete", "danger", lock, !canChange, () => deleteImage(im)));
+      button("Replace…", "secondary", busyDisk ? "Changes written by the Atari are not saved yet" : lock,
+             !canChange || busyDisk, () => chooseReplacement(im)),
+      button("Delete", "danger", busyDisk ? "Changes written by the Atari are not saved yet" : lock,
+             !canChange || busyDisk, () => deleteImage(im)));
     li.appendChild(a);
     list.appendChild(li);
   });
@@ -499,6 +550,12 @@ function renderAuth() {
     st.innerHTML = '<span class="muted">No token entered — view only. Loading and uploading are disabled.</span>';
   }
   $("upbtn").disabled = (S.authRequired && !S.token) || S.busy;
+  const atari = S.machineConfigured === "ATARI";
+  $("newbtn").disabled = (S.authRequired && !S.token) || S.busy || !atari;
+  $("newname").disabled = !atari;
+  $("newinfo").innerHTML = atari
+    ? "An empty, formatted Atari disk: .ST, 720 KiB (80 tracks, 2 sides, 9 sectors). It is added to my floppy images, read-write."
+    : '<span style="color:var(--warn)">Creating a new disk is not available yet for ' + esc(S.machineName || "this computer") + ".</span>";
   renderImages();
 }
 
@@ -541,6 +598,11 @@ async function refreshStatus() {
     S.authRequired = !!r.data.auth_required;
     S.drive = r.data.drive && r.data.drive.select_line === "DS0" ? "A:" : "B:";
     const m = r.data.machine;
+    if (m) {
+      S.machineConfigured = m.configured;
+      S.machineName = ((S.machines || []).find((x) => x.id === m.configured) || {}).name ||
+        (m.configured === "AMIGA" ? "Commodore Amiga" : m.configured === "DOS" ? "IBM PC / DOS" : m.name);
+    }
     const off = m && !m.supported;
     $("nomachine").classList.toggle("hidden", !off);
     if (off) {
@@ -616,6 +678,49 @@ async function moveImage(im, position) {
   }
   setBusy(false);
 }
+
+// Only the stored setting changes; the drive stays write-protected for now.
+async function setAccess(im, access, cb) {
+  if (S.busy) return;
+  setBusy(true);
+  try {
+    const r = await api("PUT", "/api/v1/images/" + im.id, { access }, 12000, true);
+    if (r.status === 200) {
+      showMsg("ok", "“" + esc(im.name) + "” is set to " +
+        (access === "READ_WRITE" ? "read-write" : "read-only (write-protected)") + ".");
+    } else {
+      cb.checked = access !== "READ_ONLY";
+      showError(r.data, r.status, "Changing the write protection failed.");
+    }
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);
+}
+
+$("newform").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  if (S.busy) return;
+  const name = $("newname").value.trim();
+  if (!name) { showMsg("err", esc(ERRORS.INVALID_NAME)); return; }
+  setBusy(true);
+  showMsg("warn", "Creating “" + esc(name) + "”…");
+  try {
+    const r = await api("POST", "/api/v1/images", { name }, 30000, true);
+    if (r.status === 201) {
+      showMsg("ok", "“" + esc(r.data.name) + "” is created: an empty 720 KiB disk in my floppy images (read-write).");
+      $("newname").value = "";
+    } else if (r.data && r.data.error && r.data.error.code === "MACHINE_NOT_SUPPORTED") {
+      showMsg("err", "Creating a new disk is not available yet for this computer. " + esc(r.data.error.message) + ".");
+    } else {
+      showError(r.data, r.status, "Creating the disk failed.");
+    }
+  } catch (e) {
+    setOnline(false);
+    showMsg("err", "No connection to RadioFloppy; check My floppy images afterwards.");
+  }
+  setBusy(false);
+});
 
 async function deleteImage(im) {
   if (S.busy) return;

@@ -1,5 +1,5 @@
 /*
- * Virtual read-only Shugart drive. See drive_emu.h.
+ * Virtual Shugart drive. See drive_emu.h.
  *
  * Every interrupt recomputes all outputs from the live select level under
  * a spinlock. Whichever of a STEP, MOTOR, WGATE and deselect interrupt runs
@@ -13,7 +13,10 @@
 #include "esp_attr.h"
 #include "esp_timer.h"
 
+#include "soc/io_mux_reg.h"
+
 #include "board_pins.h"
+#include "disk_image.h"
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "flux_stream.h"
@@ -30,6 +33,9 @@ gpio_num_t emu_select_line = EMU_DS1;
 static volatile uint32_t ignored_steps;
 static bool disk_present;
 static int64_t media_change_until_us;
+static volatile bool writable;          /* WPROT released: see drive_set_writable() */
+static volatile int64_t last_index_us;  /* start of the last INDEX pulse */
+static drive_write_start_t write_start; /* last WGATE assertion */
 
 int IRAM_ATTR drive_cylinder(void)
 {
@@ -48,7 +54,10 @@ static void IRAM_ATTR update_outputs_locked(drive_status_t *st)
     st->motor = gpio_ll_get_level(&GPIO, PIN_FDD_MOTOR) == 0;
     st->wgate = gpio_ll_get_level(&GPIO, PIN_FDD_WGATE) == 0;
     st->track0 = active && current_track == 0;
-    st->wprot = active && !changing;
+    /* Write protect: asserted for a read-only disk; released for a disk
+     * that may be written. During a disk change the opposite, so TOS always
+     * sees the transition it uses to notice the change. */
+    st->wprot = active && (changing ? writable : !writable);
     st->index = active && disk && st->motor;
     st->rdata = active && disk && st->motor && !st->wgate;
     st->cyl = current_track;
@@ -88,6 +97,18 @@ static void IRAM_ATTR drive_isr(void *arg)
         }
     }
     update_outputs_locked(&ev.st);
+    if (ev.type == DRV_EV_WGATE && ev.st.wgate && armed && ev.st.selected) {
+        /* A write starts: where on which track, and was it allowed. */
+        write_start = (drive_write_start_t) {
+            .time_us = esp_timer_get_time(),
+            .index_us = last_index_us,
+            .cyl = current_track,
+            .side = ev.st.side,
+            .writable = writable && !ev.st.wprot,
+            .gen = disk_media_gen,
+            .seq = write_start.seq + 1,
+        };
+    }
     portEXIT_CRITICAL_ISR(&drive_lock);
 
     if (ev.type == DRV_EV_SELECT) {
@@ -103,6 +124,12 @@ static void IRAM_ATTR drive_isr(void *arg)
     if (woken) {
         portYIELD_FROM_ISR();
     }
+}
+
+/* Our own INDEX output (read back from the pad): the rotation reference. */
+static void IRAM_ATTR index_isr(void *arg)
+{
+    last_index_us = esp_timer_get_time();
 }
 
 void drive_init(void)
@@ -140,6 +167,12 @@ void drive_init(void)
         ESP_ERROR_CHECK(gpio_isr_handler_add(irqs[i].pin, drive_isr,
                                              (void *)(uintptr_t)irqs[i].type));
     }
+
+    /* INDEX is an output (RMT, GPIO HIGH = pulse); its pad is read back
+     * so the rising edge marks the start of every revolution. */
+    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PIN_FDD_INDEX]);
+    ESP_ERROR_CHECK(gpio_set_intr_type(PIN_FDD_INDEX, GPIO_INTR_POSEDGE));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_FDD_INDEX, index_isr, NULL));
 }
 
 void drive_arm(drive_status_t *status)
@@ -194,6 +227,28 @@ bool drive_swap_media(void (*swap)(void *), void *arg, bool present)
     }
     portEXIT_CRITICAL(&drive_lock);
     return done;
+}
+
+void drive_set_writable(bool on)
+{
+    drive_status_t st;
+
+    portENTER_CRITICAL(&drive_lock);
+    writable = on;
+    update_outputs_locked(&st);
+    portEXIT_CRITICAL(&drive_lock);
+}
+
+bool drive_writable(void)
+{
+    return writable;
+}
+
+void drive_get_write_start(drive_write_start_t *ws)
+{
+    portENTER_CRITICAL(&drive_lock);
+    *ws = write_start;
+    portEXIT_CRITICAL(&drive_lock);
 }
 
 bool drive_is_armed(void)
