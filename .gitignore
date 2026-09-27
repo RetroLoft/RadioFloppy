@@ -26,3 +26,4 @@ tests/host/test_title
 tests/host/test_settings
 tests/host/test_st_format
 tests/host/test_mfm_write
+tests/host/test_hfe

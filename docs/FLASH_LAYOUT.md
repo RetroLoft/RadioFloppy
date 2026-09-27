@@ -61,7 +61,7 @@ Header:
 | Offset | Type | Field                | Value                                         |
 | ------ | ---- | -------------------- | --------------------------------------------- |
 | 0      | u32  | magic                | `0x4C494652` ("RFIL")                         |
-| 4      | u16  | version              | 2 (1 was the 20-slot catalog "RFSL")          |
+| 4      | u16  | version              | 3 (2 is still read and written as 3 at the next update; 1 was the 20-slot catalog "RFSL") |
 | 6      | u16  | header_size          | 64                                            |
 | 8      | u32  | generation           | +1 on every catalog write; highest valid wins |
 | 12     | u32  | crc32                | CRC-32 over header + records, this field = 0  |
@@ -72,7 +72,7 @@ Header:
 | 28     | u16  | record_count         | 255                                           |
 | 30     | u8   | max_blocks_per_image | 24                                            |
 | 31     | u8   | reserved             | 0                                             |
-| 32     | u32  | max_image_size       | 1 572 864 (1.5 MiB)                           |
+| 32     | u32  | max_image_size       | 1 572 864 (1.5 MiB): the most one image occupies in the blocks |
 | 36     | u16  | next_id              | Id for the next new image                     |
 | 38     | 26   | reserved             | 0                                             |
 
@@ -83,11 +83,11 @@ Image record (96 bytes):
 | 0      | u16       | id             | Image id 1–65535, fixed for the life of the image           |
 | 2      | u16       | sequence       | Display order; changing it never moves data                 |
 | 4      | u8        | status         | `0xFF` unused record, `0x01` valid, `0x02` incomplete       |
-| 5      | u8        | format         | bits 0–5: image format as recognised from the contents: `0x01` ST (the only one supported); reserved `0x02` MSA, `0x03` STX, `0x04` IPF, `0x05` HFE, `0x06` ADF, `0x07` IMG. Bit 7: write setting, 1 = READ_WRITE, 0 = READ_ONLY (default; records from before this setting read as READ_ONLY). Bit 6: reserved, 0 |
-| 6      | u8        | storage_format | `0x00` RAW (the image itself), `0x01` DEFLATE (raw deflate, RFC 1951; read-only images only) |
+| 5      | u8        | format         | bits 0–5: image format as recognised from the contents: `0x01` ST (the only one supported); `0x05` HFE (HFEv1) and `0x08` HFEv3, both always READ_ONLY (HFE playback is in development); reserved `0x02` MSA, `0x03` STX, `0x04` IPF, `0x06` ADF, `0x07` IMG. Bit 7: write setting, 1 = READ_WRITE, 0 = READ_ONLY (default; records from before this setting read as READ_ONLY). Bit 6: reserved, 0 |
+| 6      | u8        | storage_format | `0x00` RAW (the image itself), `0x01` DEFLATE (raw deflate, RFC 1951; also for writable disks, which are then saved as a whole) |
 | 7      | u8        | block_count    | Blocks used (0 when incomplete)                             |
-| 8      | u32       | original_size  | Image size in bytes                                         |
-| 12     | u32       | stored_size    | Bytes in the blocks (RAW: = original_size; DEFLATE: compressed size, ≤ original_size) |
+| 8      | u32       | original_size  | Image size in bytes (the logical size: for DEFLATE up to 3 MiB, see below) |
+| 12     | u32       | stored_size    | Bytes in the blocks (RAW: = original_size; DEFLATE: compressed size, ≤ `original_size + original_size/64 + 1024`) |
 | 16     | u32       | crc32          | CRC-32 (IEEE, as zlib `crc32()`) of the image               |
 | 20     | u8[24]    | blocks         | Block numbers in image byte order (unused entries 0)        |
 | 44     | char[52]  | name           | Title, NUL terminated when shorter than 52 characters       |
@@ -104,8 +104,10 @@ are right, the geometry in the header equals the detected one, and every
 record is consistent:
 
 - status valid or incomplete (or unused); ids unique and not 0;
-- valid: `1 ≤ original_size ≤ 1.5 MiB`; RAW with `stored_size ==
-  original_size`, or DEFLATE with `1 ≤ stored_size ≤ original_size`;
+- valid: RAW with `1 ≤ original_size ≤ 1.5 MiB` and `stored_size ==
+  original_size`, or DEFLATE with `1 ≤ original_size ≤ 3 MiB` (version 3;
+  1.5 MiB in a version 2 catalog) and `1 ≤ stored_size ≤ original_size +
+  original_size/64 + 1024` (the deflate worst case);
   `block_count` = the blocks `stored_size` needs, at most 24 and at most
   the blocks of 1.5 MiB at this block size;
 - every block number in 1…`data_blocks`, and no block used twice (across
@@ -144,15 +146,20 @@ as a disk.
 1…n (catalog update only).
 
 **Compression** (setting *Compress new images*, off by default): a new
-read-only image is deflated (ROM miniz), inflated again and CRC-checked
-before anything is stored; only when that succeeds and saves space is it
-stored DEFLATE, else RAW. `crc32` is always that of the image itself; a
-load reads the stored bytes, inflates them and checks the CRC. Images
-already stored are never converted. A DEFLATE image that is set to
-READ_WRITE is first unpacked to RAW copy-on-write (free blocks, read back,
-one catalog update), because written sectors are saved block by block.
+image is deflated (ROM miniz), inflated again and CRC-checked before
+anything is stored; when that succeeds it is stored DEFLATE (also when it
+did not get smaller: at most `size + size/64 + 1024` bytes), else RAW.
+`crc32` is always that of the image itself; a load reads the stored
+bytes, inflates them and checks the CRC. Images already stored are never
+converted.
 
-**Sectors written by the computer** (`image_store_commit_blocks`): every
+**Written compressed disks** (`image_store_commit_image`): written sectors
+of a DEFLATE image (or of any image while compression is on) are saved by
+storing the whole image anew — compressed, to free blocks, read back — and
+one catalog update switching blocks, sizes, storage format and CRC.
+
+**Sectors written by the computer** (`image_store_commit_blocks`, RAW
+images with compression off): every
 changed block of the image is written to a *free* block and read back;
 then the whole image (unchanged blocks from the flash plus the new ones)
 is checked against the new CRC-32, and one catalog update puts the new

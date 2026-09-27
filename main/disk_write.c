@@ -26,6 +26,7 @@
 #include "flux_stream.h"
 #include "image_store.h"
 #include "machine.h"
+#include "settings.h"
 #include "mfm_track.h"
 
 #define RX_RESOLUTION_HZ    10000000    /* 0.1 us per tick */
@@ -119,7 +120,9 @@ static const char *protect_reason(void)
         return "image storage not usable";
     }
     image_store_usage(&u);
-    if (u.blocks_free < r.block_count) {
+    /* Every save must fit, also when the disk fills up with data that
+     * does not compress: room for the whole image, uncompressed or not. */
+    if (u.blocks_free < image_store_blocks_needed(IMG_DEFLATE_MAX(r.original_size))) {
         return "not enough free storage to save changes";
     }
     if (save_error) {
@@ -318,11 +321,26 @@ static esp_err_t save_now(void)
     if (err == ESP_OK) {
         int64_t t0 = esp_timer_get_time();
         uint32_t crc = esp_rom_crc32_le(0, snap.data, snap.size);
-        err = image_store_commit_blocks(snap.image_id, snap.mask, snap.data, snap.size, crc);
+        settings_t cfg;
+        image_record_t r;
+        settings_get(&cfg);
+        bool raw = image_store_get(snap.image_id, &r) && r.storage_format == IMG_STORE_RAW;
+        /* RAW and staying RAW: only the changed blocks. Compressed (or to
+         * become so): the whole image again, compressed when the setting
+         * is on. Both copy-on-write with one catalog update. */
+        if (raw && !cfg.compress) {
+            err = image_store_commit_blocks(snap.image_id, snap.mask, snap.data, snap.size, crc);
+        } else {
+            if (cfg.compress) {
+                disk_verify_cancel();
+            }
+            err = image_store_commit_image(snap.image_id, snap.data, snap.size, crc, cfg.compress);
+        }
         free(snap.data);
-        if (err == ESP_OK) {
-            printf("Write: saved image %u (%d block(s), %lld ms)\n", snap.image_id,
-                   __builtin_popcount(snap.mask), (esp_timer_get_time() - t0) / 1000);
+        if (err == ESP_OK && image_store_get(snap.image_id, &r)) {
+            printf("Write: saved image %u (%s, %u block(s), %lld ms)\n", snap.image_id,
+                   r.storage_format == IMG_STORE_DEFLATE ? "compressed" : "raw", r.block_count,
+                   (esp_timer_get_time() - t0) / 1000);
         } else {
             disk_snapshot_failed(&snap);
         }

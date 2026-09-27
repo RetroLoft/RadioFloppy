@@ -56,12 +56,25 @@
                 padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
   ul.slots li.free { padding: 4px 10px; color: var(--muted); }
   ul.slots li.active { border: 2px solid var(--active); background: var(--active-bg); }
+  #images li { position: relative; padding-left: 30px; }
+  .grip { position: absolute; left: 0; top: 0; bottom: 0; width: 20px; border-radius: 7px 0 0 7px;
+          background: repeating-linear-gradient(to bottom, var(--line) 0 2px, transparent 2px 5px) center / 8px 60% no-repeat,
+                      var(--bg);
+          border-right: 1px solid var(--line); cursor: grab; touch-action: none; }
+  .grip:hover, .grip:focus-visible { background-color: var(--line); outline: none; }
+  .grip.off { cursor: default; opacity: .5; }
+  #images li.dragging { opacity: .85; box-shadow: 0 6px 18px rgba(0, 0, 0, .25); z-index: 2; }
+  #images li.dragging .grip { cursor: grabbing; }
   .slotno { font-weight: 700; text-align: right; color: var(--muted); }
   .slotname { font-weight: 600; word-break: break-word; }
   label.wp { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
   .actions button { padding: 5px 10px; }
-  button.icon { padding: 5px 8px; min-width: 32px; }
+  button.icon, a.btn.icon { padding: 5px 8px; min-width: 32px; display: inline-flex; align-items: center;
+                            justify-content: center; }
+  a.btn { border-radius: 8px; border: 1px solid var(--line); text-decoration: none; color: var(--accent); }
+  a.btn:hover { border-color: var(--accent); }
+  svg.ico { vertical-align: -3px; }
   button.danger { background: transparent; color: var(--err); border-color: var(--line); }
   .meter { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 6px 0 4px; }
   .meter > div { height: 100%; background: var(--accent); }
@@ -124,7 +137,7 @@
     <h2 id="h-upload">Add a floppy</h2>
     <form id="upform" class="current" autocomplete="off">
       <div class="row">
-        <input id="file" type="file" accept=".st,.ST" class="grow" aria-label="Choose a .ST file">
+        <input id="file" type="file" accept=".st,.ST,.hfe,.HFE" class="grow" aria-label="Choose a .ST or .HFE file">
       </div>
       <p id="fileinfo" class="small muted" style="margin:0">
         Supported: <strong>.ST</strong> images with <strong>79–84 tracks</strong>,
@@ -167,11 +180,11 @@
     <h2 id="h-images">My floppy images <span id="imgcount" class="muted small"></span></h2>
     <div id="storage" class="small" style="margin-bottom:12px"></div>
     <div id="storefix" class="banner err hidden" style="margin-bottom:12px"></div>
-    <p class="small muted" style="margin:0 0 12px">An image with <em>Write protection</em> off can be
+    <p class="small muted" style="margin:0 0 12px">An image that is not <em>Write protected</em> can be
       written by the Atari (.ST only; new). Written sectors are saved when the drive motor has been off
       for 2 seconds; wait for “all changes saved” before switching the power off.</p>
     <ul id="images" class="slots"><li class="free">Loading…</li></ul>
-    <input type="file" id="replacefile" accept=".st,.ST" class="hidden" aria-hidden="true" tabindex="-1">
+    <input type="file" id="replacefile" accept=".st,.ST,.hfe,.HFE" class="hidden" aria-hidden="true" tabindex="-1">
   </section>
 
   <section aria-labelledby="h-auth" id="authsec" class="hidden">
@@ -255,9 +268,9 @@
   <section aria-labelledby="h-store">
     <h2 id="h-store">Storage</h2>
     <label class="opt"><input type="checkbox" id="compress">
-      <span><strong>Compress new images</strong> <span class="muted small">— images added from now on are
-      stored compressed when that saves space (typically 30–60%); loading takes a moment longer. Images
-      already stored stay as they are. Disks that can be written are never compressed.</span></span></label>
+      <span><strong>Compress new images</strong> <span class="muted small">— images added from now on, and
+      writable disks when their changes are saved, are stored compressed (game disks typically 20–85% of
+      their size, a new empty disk almost nothing). Images already stored stay as they are.</span></span></label>
   </section>
 
   <section aria-labelledby="h-fw">
@@ -285,6 +298,7 @@ const S = {
   storage: null,        // storage use from /images
   current: null,        // last /current answer
   busy: false,          // own load or upload in progress: no polling
+  dragging: false,      // a row is being dragged: the list is not re-rendered
   online: null,
   drive: "B:",          // drive letter RadioFloppy answers as (from /status)
   driveDirty: false,    // settings: drive choice changed, not saved yet
@@ -298,6 +312,9 @@ const S = {
 const POLL_CURRENT_MS = 3000;
 const POLL_IMAGES_MS = 15000;
 const MAX_SIZE = 1572864;               // 1.5 MiB: storage limit of the image library
+const MAX_HFE_SIZE = 3145728;           // 3 MiB: HFE, always stored compressed
+const isHfe = (name) => /\.hfe$/i.test(name);
+const maxSizeOf = (name) => isHfe(name) ? MAX_HFE_SIZE : MAX_SIZE;
 // Same rule as the firmware (st_image.c): 79-84 tracks, 9-11 sectors, 1-2 sides.
 function geometryOf(size) {
   if (size % 512 || size > MAX_SIZE) return null;
@@ -353,7 +370,7 @@ const ERRORS = {
   NO_SPACE: "Not enough free storage. Delete an image first, or replace an existing one.",
   INVALID_IMAGE: "This file is not a valid .ST disk image.",
   UNSUPPORTED_GEOMETRY: "This .ST format is not supported. Images need 79–84 tracks, 9–11 sectors per track and 1 or 2 sides.",
-  IMAGE_TOO_LARGE: "The file is too large: 1.5 MiB at most.",
+  IMAGE_TOO_LARGE: "The file is too large: 1.5 MiB at most (HFE: 3 MiB).",
   DRIVE_BUSY: "The Atari is still using drive {drive}. The current floppy was not replaced.",
   CHECKSUM_MISMATCH: "The file was damaged in transit. Please try again.",
   UPLOAD_INCOMPLETE: "The upload was interrupted. Please try again.",
@@ -375,9 +392,12 @@ const ERRORS = {
   INVALID_HOSTNAME: "Invalid host name: use letters, digits and ‘-’ (not at the start or end), up to 32 characters.",
 };
 
-function errorText(data, status) {
+// ownWords: show the device's message instead of the fixed text (HFE: the
+// check says exactly what is wrong with the file).
+function errorText(data, status, ownWords) {
   const e = (data && data.error) || {};
-  const text = (ERRORS[e.code] || e.message || ("Unexpected error (HTTP " + status + ")."))
+  const own = ownWords && e.message ? e.message.charAt(0).toUpperCase() + e.message.slice(1) + "." : "";
+  const text = (own || ERRORS[e.code] || e.message || ("Unexpected error (HTTP " + status + ")."))
     .replace("{drive}", S.drive);
   return { text, code: e.code || ("HTTP " + status), detail: e.message || "" };
 }
@@ -393,8 +413,8 @@ function showMsg(kind, html) {
   m.innerHTML = html;
   m.classList.remove("hidden");
 }
-function showError(data, status, prefix) {
-  const e = errorText(data, status);
+function showError(data, status, prefix, ownWords) {
+  const e = errorText(data, status, ownWords);
   if (e.code === "UNAUTHORIZED" && !S.authRequired) {
     S.authRequired = true;          // a token was configured meanwhile: ask for it
     renderAuth();
@@ -480,10 +500,28 @@ function renderStorage() {
     " blocks of " + (st.block_size / 1024) + " KiB</span>";
 }
 
+// Tabler icons (MIT), stroke = currentColor.
+const ICON_PATHS = {
+  refresh: '<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/>',
+  trash: '<path d="M4 7l16 0"/><path d="M10 11l0 6"/><path d="M14 11l0 6"/>' +
+         '<path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12"/><path d="M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3"/>',
+  download: '<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/>' +
+            '<path d="M12 17v-6"/><path d="M9.5 14.5l2.5 2.5l2.5 -2.5"/>',
+  zip: '<path d="M6 20.735a2 2 0 0 1 -1 -1.735v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2h-1"/>' +
+       '<path d="M11 17a2 2 0 0 1 2 2v2a1 1 0 0 1 -1 1h-2a1 1 0 0 1 -1 -1v-2a2 2 0 0 1 2 -2"/>' +
+       '<path d="M11 5l-1 0"/><path d="M13 7l-1 0"/><path d="M11 9l-1 0"/><path d="M13 11l-1 0"/>' +
+       '<path d="M11 13l-1 0"/><path d="M13 15l-1 0"/>',
+};
+function icon(name, size = 18) {
+  return '<svg class="ico" width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    ICON_PATHS[name] + "</svg>";
+}
+
 function button(text, cls, title, disabled, onClick) {
   const b = document.createElement("button");
   b.type = "button";
-  b.textContent = text;
+  if (text.startsWith("<svg")) b.innerHTML = text; else b.textContent = text;
   if (cls) b.className = cls;
   if (title) { b.title = title; b.setAttribute("aria-label", title); }
   b.disabled = disabled;
@@ -491,10 +529,78 @@ function button(text, cls, title, disabled, onClick) {
   return b;
 }
 
+// Drag handle: drag the row to a new place (mouse or touch), or focus it
+// and use the arrow keys. Only the order changes; no image data moves.
+function makeGrip(li, im, index, enabled) {
+  const g = document.createElement("div");
+  g.className = "grip" + (enabled ? "" : " off");
+  g.title = enabled ? "Drag to change the order" : "";
+  g.setAttribute("role", "button");
+  g.setAttribute("aria-label", "Move " + im.name + " (arrow keys)");
+  g.tabIndex = enabled ? 0 : -1;
+  if (!enabled) return g;
+  g.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowUp" && index > 0) { ev.preventDefault(); moveImage(im, index); }
+    if (ev.key === "ArrowDown" && index < S.images.length - 1) { ev.preventDefault(); moveImage(im, index + 2); }
+  });
+  g.addEventListener("pointerdown", (ev) => {
+    if (S.busy || ev.button > 0) return;
+    ev.preventDefault();
+    const list = $("images");
+    const from = [...list.children].indexOf(li);
+    S.dragging = true;
+    li.classList.add("dragging");
+    // Listen on the window: moving the row in the DOM ends any pointer capture.
+    const move = (e) => {
+      if (e.pointerId !== ev.pointerId) return;
+      const y = e.clientY;
+      if (y < 60) window.scrollBy(0, -12);                       // follow the finger
+      if (y > window.innerHeight - 60) window.scrollBy(0, 12);
+      for (const other of list.children) {
+        if (other === li) continue;
+        const r = other.getBoundingClientRect();
+        if (y > r.top && y < r.bottom) {
+          list.insertBefore(li, y < r.top + r.height / 2 ? other : other.nextSibling);
+          break;
+        }
+      }
+    };
+    const up = (e) => {
+      if (e.pointerId !== ev.pointerId) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      li.classList.remove("dragging");
+      S.dragging = false;
+      const to = [...list.children].indexOf(li);
+      if (to !== from) moveImage(im, to + 1);
+      else renderImages();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  });
+  return g;
+}
+
+// Download: always the uncompressed .st (the browser saves it).
+function downloadLink(im, enabled) {
+  const title = enabled ? "Download (.st, uncompressed)" : "Download: wait until the changes are saved";
+  if (!enabled) return button(icon("download"), "secondary icon", title, true, () => {});
+  const a = document.createElement("a");
+  a.className = "btn secondary icon";
+  a.href = "/api/v1/images/" + im.id + "/data";
+  a.setAttribute("download", "");
+  a.title = title;
+  a.setAttribute("aria-label", title);
+  a.innerHTML = icon("download");
+  return a;
+}
+
 function renderImages() {
   const list = $("images");
   renderStorage();
-  if (!S.images) return;
+  if (!S.images || S.dragging) return;       // never rebuild the list under a drag
   const canChange = (!S.authRequired || !!S.token) && !S.busy && S.online !== false;
   const lock = S.authRequired && !S.token ? "Enter the API token first" : "";
   list.innerHTML = "";
@@ -512,11 +618,12 @@ function renderImages() {
       (valid && im.access === "READ_WRITE" ? ' <span class="badge temp">Read-write</span>' : "") +
       '<br><span class="small muted">' +
       (valid ? kib(im.size) + (im.storage_format === "deflate"
-                 ? " · stored compressed: " + kib(im.stored_size) + " (" + Math.round(100 * im.stored_size / im.size) + "%)" : "")
+                 ? ' · <span title="Stored compressed">' + icon("zip", 14) + "</span> " + kib(im.stored_size) +
+                   " (" + Math.round(100 * im.stored_size / im.size) + "%)" : "")
              : '<span style="color:var(--err)">incomplete — replacing failed; replace or delete it</span>') +
       "</span></span>";
     if (valid) {
-      // Write protection switch: on = READ_ONLY, off = READ_WRITE (metadata only for now).
+      // "Write protected": on = READ_ONLY, off = READ_WRITE.
       const wp = document.createElement("label");
       wp.className = "wp small";
       const cb = document.createElement("input");
@@ -524,7 +631,7 @@ function renderImages() {
       cb.checked = im.access !== "READ_WRITE";
       cb.disabled = !canChange || !im.write_supported;
       cb.addEventListener("change", () => setAccess(im, cb.checked ? "READ_ONLY" : "READ_WRITE", cb));
-      wp.append(cb, " Write protection");
+      wp.append(cb, " Write protected");
       if (!im.write_supported) {
         const n = document.createElement("span");
         n.className = "muted";
@@ -536,15 +643,16 @@ function renderImages() {
     const a = document.createElement("div");
     a.className = "actions";
     a.append(
-      button("↑", "secondary icon", "Move up", !canChange || i === 0, () => moveImage(im, i)),
-      button("↓", "secondary icon", "Move down", !canChange || i === S.images.length - 1, () => moveImage(im, i + 2)),
-      button("Load", "", im.active ? "This image is already active" : lock, !canChange || !valid || im.active,
+      button("Insert", "", im.active ? "This disk is already in drive " + S.drive
+             : lock || "Put this disk into floppy drive " + S.drive, !canChange || !valid || im.active,
              () => loadImage(im.id, im.name)),
-      button("Replace…", "secondary", busyDisk ? "Changes written by the Atari are not saved yet" : lock,
-             !canChange || busyDisk, () => chooseReplacement(im)),
-      button("Delete", "danger", busyDisk ? "Changes written by the Atari are not saved yet" : lock,
-             !canChange || busyDisk, () => deleteImage(im)));
+      downloadLink(im, valid && !busyDisk),
+      button(icon("refresh"), "secondary icon", busyDisk ? "Changes written by the Atari are not saved yet"
+             : lock || "Replace with another file…", !canChange || busyDisk, () => chooseReplacement(im)),
+      button(icon("trash"), "danger icon", busyDisk ? "Changes written by the Atari are not saved yet"
+             : lock || "Delete", !canChange || busyDisk, () => deleteImage(im)));
     li.appendChild(a);
+    li.prepend(makeGrip(li, im, i, canChange));
     list.appendChild(li);
   });
   const n = S.images.filter((x) => x.status === "valid").length;
@@ -805,9 +913,12 @@ function updateUploadForm() {
   const f = $("file").files[0];
   const info = $("fileinfo");
   if (!f) return;
-  if (f.size > MAX_SIZE) {
+  if (f.size > maxSizeOf(f.name)) {
     info.innerHTML = '<span style="color:var(--err)">' + esc(f.name) + " is " + kib(f.size) +
-      ": too large (1.5 MiB at most).</span>";
+      ": too large (" + (isHfe(f.name) ? "3" : "1.5") + " MiB at most).</span>";
+  } else if (isHfe(f.name)) {
+    info.innerHTML = esc(f.name) + ": " + kib(f.size) + ", HFE image. RadioFloppy checks it " +
+      "(HFE playback is still in development).";
   } else if (!geometryOf(f.size)) {
     info.innerHTML = '<span style="color:var(--warn)">' + esc(f.name) + " is " + f.size +
       " bytes: probably a format that is not supported yet (79–84 tracks, 9–11 sectors). " +
@@ -862,7 +973,7 @@ async function upload(ev) {
 
 // Upload file with the options in body (POST /uploads, then PUT the bytes).
 async function uploadFile(file, body) {
-  if (file.size > MAX_SIZE) { showMsg("err", esc(ERRORS.IMAGE_TOO_LARGE)); return; }
+  if (file.size > maxSizeOf(file.name)) { showMsg("err", esc(ERRORS.IMAGE_TOO_LARGE)); return; }
   if (S.busy) return;
   setBusy(true);
   setStage("Reading file…", null);
@@ -872,7 +983,7 @@ async function uploadFile(file, body) {
     setStage("Preparing upload…", null);
     const c = await api("POST", "/api/v1/uploads", body, 15000, true);
     if (c.status !== 201 || !c.data || !c.data.upload_url) {
-      showError(c.data, c.status, "Upload refused.");
+      showError(c.data, c.status, "Upload refused.", isHfe(file.name));
       return;
     }
     setStage("Sending file… 0%", 0);
@@ -895,7 +1006,7 @@ async function uploadFile(file, body) {
       $("later").addEventListener("click", () => loadImage(id, name));
     } else {
       setStage("");
-      showError(u, r.status, "Upload failed.");
+      showError(u, r.status, "Upload failed.", isHfe(file.name));
     }
   } catch (e) {
     setStage("");

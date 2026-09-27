@@ -140,9 +140,17 @@ shorter than their file system — the missing tracks then read as
 unformatted, as they would from the real disk. Other geometries (8 sectors, 40 or 70
 cylinders, HD with 18 sectors, …) are recognised but not supported
 (`UNSUPPORTED_GEOMETRY`); anything above 1.5 MiB (1 572 864 bytes) is
-refused as `IMAGE_TOO_LARGE`. `.MSA` and `.HFE` are not supported. The
-drive is **read-only** for the Atari: it reports the disk as
-write-protected.
+refused as `IMAGE_TOO_LARGE`. `.MSA` is not supported. The Atari may
+write to an image set to `READ_WRITE` (see *Writing*); otherwise the drive
+reports the disk as write-protected.
+
+HFE (HxC Floppy Emulator) files are recognised and fully checked (HFEv1
+and HFEv3 by their header; ISO MFM, 250 kbit/s, 1 or 2 sides, at most 84
+cylinders, and the tracks must fit the drive's track buffers), but they
+are still refused with `UNSUPPORTED_FORMAT` while HFE playback is in
+development. HFEv2 ("HXCPICFE" revision 1) is always refused: convert it
+to HFEv1 or HFEv3. An HFE file may be up to 3 MiB; it is always stored
+compressed and must fit in the blocks of one image (1.5 MiB).
 
 The track layout follows FlashFloppy: GAP3 84 (9 sectors), 30 (10
 sectors) or 3 with interleave 2 (11 sectors). An 11-sector track is
@@ -190,6 +198,7 @@ web page asks for the token.
 | `GET /api/v1/images`            |       | All images in `sequence` order + storage use |
 | `POST /api/v1/images`           | (yes) | Create a new, empty, formatted disk         |
 | `GET /api/v1/images/{id}`       |       | One image                                   |
+| `GET /api/v1/images/{id}/data`  |       | Download the image file (uncompressed)      |
 | `PUT /api/v1/images/{id}`       | (yes) | Change the position (`sequence`)            |
 | `DELETE /api/v1/images/{id}`    | (yes) | Delete an image                             |
 | `GET /api/v1/storage`           |       | Storage use and geometry                    |
@@ -335,6 +344,23 @@ Response `200`: the image object. Errors: `400 INVALID_REQUEST` (neither
 field, `sequence` < 1, or another `access` value), `404 IMAGE_NOT_FOUND`
 (also for an incomplete image), `422 FORMAT_NOT_WRITABLE`,
 `503 STORAGE_NOT_READY`.
+
+---
+
+### `GET /api/v1/images/{id}/data`
+
+The image file itself, as uploaded or as the computer wrote it — always
+uncompressed, also when it is stored compressed (the CRC-32 is checked
+before sending). `Content-Type: application/octet-stream`,
+`Content-Disposition: attachment` with the title as file name and the
+format's extension (`.st`, `.hfe`).
+
+| Error                       | When                                                          |
+| --------------------------- | ------------------------------------------------------------- |
+| `404 IMAGE_NOT_FOUND`       | No valid image with this id                                   |
+| `409 UNSAVED_CHANGES`       | The active disk has writes that are not saved yet; try again once they are (a few seconds after the drive motor stops) |
+| `500 FLASH_ERROR`           | Reading or checking the stored image failed                   |
+| `507 INSUFFICIENT_MEMORY`   | No PSRAM for the image                                        |
 
 ---
 
@@ -510,6 +536,7 @@ On failure the HTTP status matches the error, and the upload object has
 | `409 DRIVE_BUSY`           | Stored (if `flash`) but not activated — see below           |
 | `422 INVALID_IMAGE` / `UNSUPPORTED_GEOMETRY` | The content is not a supported `.ST` image |
 | `422 CHECKSUM_MISMATCH`    | Data does not match the given `crc32`                       |
+| `422 UNSUPPORTED_FORMAT`   | A recognised but unplayable format (HFE for now, HFEv2)     |
 | `500 FLASH_ERROR`          | Writing or verifying failed (nothing stored; when replacing, the old image is lost) |
 | `500 PREPARE_FAILED`       | The disk could not be prepared for the drive                |
 | `507 NO_SPACE`             | Not enough free blocks any more                             |
@@ -581,15 +608,16 @@ Body (`Content-Type: application/json`), every field optional:
   is the line in use until then.
 - `buzzer`: `true`/`false` — clicks for head steps and button presses.
   Takes effect at once.
-- `compression`: `true`/`false` (default `false`) — store images added from
-  now on compressed (raw deflate) when that saves space. Checked before
-  storing: the compressed data is inflated and must give the image's CRC,
-  else it is stored uncompressed. Stored images are not converted. Disks
-  that can be written (`READ_WRITE`, new disks) are always stored
-  uncompressed; setting a compressed image to `READ_WRITE` unpacks it
-  (needs free blocks for the whole image, else `507 NO_SPACE`).
-  Typical results: 18–45% for game disks with free space, 70–85% for
-  full ones; activating takes about the same time (0.5–1 s).
+- `compression`: `true`/`false` (default `false`) — images added from now
+  on (uploads, new disks) are always stored compressed (raw deflate), and
+  a writable disk is stored compressed each time its written sectors are
+  saved. Checked before storing: the compressed data is inflated and must
+  give the image's CRC, else it is stored uncompressed. Stored images are
+  not converted. Typical results: 18–45% for game disks with free space,
+  70–85% for full ones, a few KiB for a new empty disk; activating takes
+  about the same time (0.5–1 s). A compressed writable disk is saved as a
+  whole (compress, write all its blocks, one catalog update): a save takes
+  a few seconds instead of about one.
 - `machine`: the connected computer, `"ATARI"` (Atari 16-bit, default),
   `"AMIGA"` (Commodore Amiga) or `"DOS"` (IBM PC / DOS); else
   `422 INVALID_MACHINE`. Takes effect after a restart; `machine_active` is
@@ -760,6 +788,7 @@ change. A failed upload carries the same `error` inside its upload object.
 | 422  | `INVALID_IMAGE`        | The file is not a floppy image                         |
 | 422  | `UNSUPPORTED_GEOMETRY` | Use an image with 79–84 tracks and 9–11 sectors        |
 | 422  | `CHECKSUM_MISMATCH`    | The file was damaged in transit — send it again        |
+| 422  | `UNSUPPORTED_FORMAT`   | A recognised format that cannot be played (yet), e.g. HFE, HFEv2 |
 | 422  | `INVALID_HOSTNAME`     | Use 1–32 letters, digits or `-`                        |
 | 422  | `INVALID_DRIVE_SELECT` | Use `"DS0"` or `"DS1"`                                 |
 | 400  | `INVALID_NAME`         | Use 1–52 printable characters                          |

@@ -42,6 +42,7 @@
 #include "machine.h"
 #include "settings.h"
 #include "step_sound.h"
+#include "hfe.h"
 #include "image_store.h"
 #include "st_format.h"
 #include "st_image.h"
@@ -429,7 +430,8 @@ static const char *status_for(const char *code)
         { "UPLOAD_INCOMPLETE", HTTP_400 }, { "INSUFFICIENT_MEMORY", HTTP_507 },
         { "FLASH_ERROR", HTTP_500 },       { "PREPARE_FAILED", HTTP_500 },
         { "IMAGE_NOT_FOUND", HTTP_404 },   { "STORAGE_NOT_READY", HTTP_503 },
-        { "MACHINE_NOT_SUPPORTED", HTTP_409 },   { "UNSAVED_CHANGES", HTTP_409 },   { "INVALID_NAME", HTTP_400 },
+        { "MACHINE_NOT_SUPPORTED", HTTP_409 },   { "UNSAVED_CHANGES", HTTP_409 },
+        { "UNSUPPORTED_FORMAT", HTTP_422 },   { "INVALID_NAME", HTTP_400 },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].code, code) == 0) {
@@ -443,10 +445,30 @@ static const char *status_for(const char *code)
 
 /* Validate and store/activate a completely received upload. */
 /* *raw: the received image; set to NULL when it is kept as the PSRAM disk. */
+/* HFE: recognised by its header, never by the file name. */
+static bool is_hfe(const uint8_t *raw, uint32_t size)
+{
+    return size >= 8 && (memcmp(raw, "HXCPICFE", 8) == 0 || memcmp(raw, "HXCHFEV3", 8) == 0);
+}
+
 static void process_upload(uint8_t **rawp)
 {
     const uint8_t *raw = *rawp;
     st_info_t st;
+
+    if (is_hfe(raw, up.size)) {
+        hfe_info_t hi;
+        hfe_result_t hr = hfe_check(raw, up.size, DISK_TRACKS_BYTES, &hi);
+        if (hr != HFE_OK) {
+            fail_upload(hr == HFE_V2 || hr == HFE_UNSUPPORTED ? "UNSUPPORTED_FORMAT"
+                        : hr == HFE_TOO_LARGE ? "IMAGE_TOO_LARGE" : "INVALID_IMAGE",
+                        "%s", hi.detail);
+            return;
+        }
+        /* Phase 1: recognised and checked, not playable yet. */
+        fail_upload("UNSUPPORTED_FORMAT", "%s: HFE playback is still in development", hi.detail);
+        return;
+    }
     st_result_t r = st_check_image(raw, up.size, &st);
     if (r != ST_OK) {
         fail_upload(r == ST_UNSUPPORTED ? "UNSUPPORTED_GEOMETRY"
@@ -472,6 +494,9 @@ static void process_upload(uint8_t **rawp)
         uint16_t id = 0;
         settings_t cfg;
         settings_get(&cfg);
+        if (cfg.compress) {
+            disk_verify_cancel();
+        }
         int64_t t0 = esp_timer_get_time();
         esp_err_t err = image_store_save_ex(up.replace_id, up.name, IMG_FMT_ST, raw, up.size,
                                             cfg.compress, &id);
@@ -615,13 +640,75 @@ static esp_err_t get_storage(httpd_req_t *req)
     return send_json(req, "200 OK", storage_json());
 }
 
-/* GET /api/v1/images/{id} */
+/*
+ * GET /api/v1/images/{id}/data: the image itself (uncompressed, as it was
+ * uploaded or as the computer wrote it), as a file download.
+ */
+static esp_err_t get_image_data(httpd_req_t *req, uint16_t id)
+{
+    image_record_t r;
+    char title[IMG_TITLE_SIZE], fname[IMG_TITLE_SIZE + 8], hdr[IMG_TITLE_SIZE + 40];
+
+    if (!id || !image_store_get(id, &r) || !image_store_is_valid(&r)) {
+        return send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no valid image with this id");
+    }
+    if (active_unsaved(id)) {
+        return send_error(req, HTTP_409, "UNSAVED_CHANGES", "the computer wrote to this disk and "
+                          "the changes are not saved yet; download it once they are");
+    }
+    uint8_t *buf = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        return send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no PSRAM for the download");
+    }
+    esp_err_t err = image_store_load(id, buf);      /* inflates, checks the CRC */
+    if (err != ESP_OK) {
+        free(buf);
+        return send_error(req, HTTP_500, "FLASH_ERROR", "reading the image failed (%s)",
+                          esp_err_to_name(err));
+    }
+    /* File name: the title, characters a file system dislikes replaced. */
+    image_store_title(&r, title);
+    size_t n = 0;
+    for (const char *p = title; *p && n < sizeof(title) - 1; p++) {
+        fname[n++] = strchr("\\/:*?\"<>|", *p) ? '_' : *p;
+    }
+    if (!n) {
+        fname[n++] = 'd';
+    }
+    /* Extension from the format ("st", "hfe"; HFEv3 is also .hfe). */
+    uint8_t fmt = image_format(&r);
+    snprintf(fname + n, sizeof(fname) - n, ".%s",
+             fmt == IMG_FMT_HFE3 ? "hfe" : image_format_name(fmt));
+    snprintf(hdr, sizeof(hdr), "attachment; filename=\"%s\"", fname);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", hdr);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    for (uint32_t off = 0; err == ESP_OK && off < r.original_size; off += 8192) {
+        uint32_t k = r.original_size - off < 8192 ? r.original_size - off : 8192;
+        err = httpd_resp_send_chunk(req, (const char *)buf + off, k);
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    free(buf);
+    return err;
+}
+
+/* GET /api/v1/images/{id} and GET /api/v1/images/{id}/data */
 static esp_err_t get_image(httpd_req_t *req)
 {
     disk_info_t d;
     image_record_t r;
-    uint16_t id = parse_image_id(req->uri + strlen("/api/v1/images/"));
+    char seg[16];
+    const char *p = req->uri + strlen("/api/v1/images/");
+    const char *slash = strchr(p, '/');
 
+    if (slash && strcmp(slash, "/data") == 0 && (size_t)(slash - p) < sizeof(seg)) {
+        memcpy(seg, p, slash - p);
+        seg[slash - p] = 0;
+        return get_image_data(req, parse_image_id(seg));
+    }
+    uint16_t id = parse_image_id(p);
     if (!id || !image_store_get(id, &r)) {
         return send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no image with this id");
     }
@@ -672,9 +759,7 @@ static esp_err_t put_image(httpd_req_t *req)
     } else if (err == ESP_ERR_NOT_SUPPORTED) {
         ret = send_error(req, HTTP_422, "FORMAT_NOT_WRITABLE",
                          "this image format does not support writing");
-    } else if (err == ESP_ERR_NO_MEM) {
-        ret = send_error(req, HTTP_507, "NO_SPACE", "not enough free storage to unpack the "
-                         "compressed image for writing");
+
     } else if (err != ESP_OK || !image_store_get(id, &r)) {
         ret = send_error(req, HTTP_500, "FLASH_ERROR", "catalog update failed");
     } else {
@@ -751,8 +836,11 @@ static esp_err_t post_image(httpd_req_t *req)
     } else {
         st_format_blank(raw, esp_random() & 0xffffff);
         uint16_t id = 0;
-        esp_err_t err = image_store_save(0, name, IMG_FMT_ST | IMG_FLAG_READ_WRITE, raw,
-                                         ST_BLANK_SIZE, &id);
+        if (cfg.compress) {
+            disk_verify_cancel();
+        }
+        esp_err_t err = image_store_save_ex(0, name, IMG_FMT_ST | IMG_FLAG_READ_WRITE, raw,
+                                            ST_BLANK_SIZE, cfg.compress, &id);
         image_record_t r;
         if (err == ESP_ERR_NO_MEM) {
             ret = send_error(req, HTTP_507, "NO_SPACE", "not enough free storage");
@@ -954,7 +1042,16 @@ static esp_err_t post_upload(httpd_req_t *req)
 
     uint32_t size = (uint32_t)jsize->valuedouble;
     st_info_t st;
-    st_result_t r = st_check_size(size, &st);
+    /* The name only decides which size check comes first; the format is
+     * recognised from the content once it has arrived. */
+    size_t fl = strlen(jfn->valuestring);
+    bool maybe_hfe = fl >= 4 && strcasecmp(jfn->valuestring + fl - 4, ".hfe") == 0;
+    st_result_t r = maybe_hfe ? (size > RF_MAX_LOGICAL_SIZE ? ST_TOO_LARGE : ST_OK)
+                              : st_check_size(size, &st);
+    if (maybe_hfe && r != ST_OK) {
+        snprintf(st.detail, sizeof(st.detail), "%lu bytes, an HFE image may have at most %u",
+                 (unsigned long)size, RF_MAX_LOGICAL_SIZE);
+    }
     if (r != ST_OK) {
         const char *code = r == ST_TOO_LARGE ? "IMAGE_TOO_LARGE"
                            : r == ST_UNSUPPORTED ? "UNSUPPORTED_GEOMETRY" : "INVALID_IMAGE";
@@ -982,7 +1079,7 @@ static esp_err_t post_upload(httpd_req_t *req)
         settings_get(&cfg);
         /* With compression the stored size is known only after compressing:
          * then the final check is done when storing (507 NO_SPACE). */
-        if (!cfg.compress && !image_store_fits(size, replace_id)) {
+        if (!cfg.compress && !maybe_hfe && !image_store_fits(size, replace_id)) {
             store_usage_t u;
             image_store_usage(&u);
             ret = send_error(req, HTTP_507, "NO_SPACE",

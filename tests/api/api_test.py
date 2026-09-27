@@ -11,6 +11,7 @@ stored when the test starts are left alone (same ids, order and data): the
 test adds its own images, deletes exactly those, and ends with the first
 original image active (if there is one).
 """
+import atexit
 import http.client
 import json
 import os
@@ -103,6 +104,12 @@ def main():
     print("status / images / storage")
     s = call("GET", "/api/v1/status")
     check(s[0] == 200 and s[1]["storage"]["state"] == "valid", "GET /status: storage valid")
+    # Block counts below assume uncompressed storage; compression gets
+    # its own section. The device setting is restored at exit.
+    compression = call("GET", "/api/v1/settings")[1]["compression"]
+    atexit.register(lambda: call("PUT", "/api/v1/settings", {"compression": compression}))
+    r = call("PUT", "/api/v1/settings", {"compression": False})
+    check(r[0] == 200 and not r[1]["compression"], "compression off for the block checks")
     orig, st0 = library()
     check(st0["block_size"] >= 65536 and st0["blocks_total"] <= 255, "geometry: %d KiB blocks, %d data blocks"
           % (st0["block_size"] // 1024, st0["blocks_total"]))
@@ -287,6 +294,29 @@ def main():
         check(d and d[0] == 200 and d[1]["image_id"] == fill[0], "replacing works with the flash nearly full")
         r = call("PUT", "/api/v1/current", {"image_id": fill[0]})
         check(r[0] == 200 and r[1]["crc32"] == crc(big2), "replaced image reads back correctly")
+
+    print("compression")
+    for i in fill:                      # room again
+        call("DELETE", "/api/v1/images/%d" % i)
+        mine.remove(i)
+    r = call("PUT", "/api/v1/settings", {"compression": True})
+    check(r[0] == 200 and r[1]["compression"], "compression on")
+    before = library()[1]["blocks_used"]
+    c, d = upload(big, "Compressed.st", destination="flash")
+    check(d and d[0] == 200, "compressed upload stored")
+    if d and d[0] == 200:
+        z = d[1]["image_id"]
+        mine.append(z)
+        im = call("GET", "/api/v1/images/%d" % z)[1]
+        check(im["storage_format"] == "deflate" and im["stored_size"] < im["size"] == len(big),
+              "stored deflated: %d of %d bytes" % (im["stored_size"], im["size"]))
+        check(library()[1]["blocks_used"] == before + blocks(im["stored_size"]),
+              "uses %d blocks (compressed)" % blocks(im["stored_size"]))
+        r = call("GET", "/api/v1/images/%d/data" % z)
+        check(r[0] == 200 and r[1] == big, "download gives the uncompressed image")
+        r = call("PUT", "/api/v1/current", {"image_id": z})
+        check(r[0] == 200 and r[1]["crc32"] == crc(big), "compressed image activates with the right CRC")
+    r = call("PUT", "/api/v1/settings", {"compression": False})
 
     print("delete own images")
     first = orig_ids[0] if orig_ids else None

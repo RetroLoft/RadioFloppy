@@ -130,7 +130,7 @@ static void verify_task(void *arg)
         vTaskDelay(1);
     }
     if (verify_abort) {
-        printf("MFM verify: aborted by a disk change\n");
+        printf("MFM verify: aborted (disk change or store)\n");
     } else {
         printf("MFM verify: %d/%d tracks OK (%lld ms, background)%s\n", done - bad, done,
                (esp_timer_get_time() - t0) / 1000, bad ? " - ERRORS" : "");
@@ -149,6 +149,11 @@ static void verify_stop(void)
         }
         verify_abort = false;
     }
+}
+
+void disk_verify_cancel(void)
+{
+    verify_stop();
 }
 
 /* Check the active tracks against raw in the background (raw is copied). */

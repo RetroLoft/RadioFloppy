@@ -14,6 +14,7 @@ gcc $CFLAGS -DSETTINGS_NO_LOCK -DSETTINGS_DEFAULT_HOSTNAME='"RadioFloppy"' -DSET
 gcc $CFLAGS -o test_st_format test_st_format.c ../../main/st_format.c ../../main/st_image.c \
     ../../main/mfm_track.c
 gcc $CFLAGS -o test_mfm_write test_mfm_write.c ../../main/mfm_track.c
+gcc $CFLAGS -o test_hfe test_hfe.c ../../main/hfe.c
 gcc $CFLAGS -o test_title test_title.c ../../main/disk_title.c ../../main/oled_gfx.c
 
 echo "== image store =="; ./test_image_store
@@ -23,3 +24,4 @@ echo "== titles and OLED wrap =="; ./test_title
 echo "== settings =="; ./test_settings
 echo "== blank disk =="; ./test_st_format
 echo "== MFM write decoding =="; ./test_mfm_write
+echo "== HFE =="; ./test_hfe ~/Downloads/road_runner_us_gold/*.hfe

@@ -50,12 +50,17 @@
 #define IMG_FMT_MSA         0x02    /* Atari: Magic Shadow Archiver (reserved) */
 #define IMG_FMT_STX         0x03    /* Atari: Pasti (reserved) */
 #define IMG_FMT_IPF         0x04    /* Atari/Amiga: SPS IPF (reserved) */
-#define IMG_FMT_HFE         0x05    /* HxC flux (reserved) */
+#define IMG_FMT_HFE         0x05    /* HxC Floppy Emulator, HFEv1 */
 #define IMG_FMT_ADF         0x06    /* Amiga: AmigaDOS disk (reserved) */
 #define IMG_FMT_IMG         0x07    /* DOS: raw sector image .img/.ima (reserved) */
+#define IMG_FMT_HFE3        0x08    /* HxC Floppy Emulator, HFEv3 (with opcodes) */
 
 #define IMG_STORE_RAW       0x00    /* storage format: the image as it is */
-#define IMG_STORE_DEFLATE   0x01    /* raw deflate (RFC 1951); read-only images only */
+#define IMG_STORE_DEFLATE   0x01    /* raw deflate (RFC 1951) */
+
+/* Largest stored size of a DEFLATE image: incompressible data grows a
+ * little (stored deflate blocks). */
+#define IMG_DEFLATE_MAX(size)   ((size) + (size) / 64 + 1024)
 
 typedef struct __attribute__((packed)) {
     uint16_t id;                /* 1..65535, never reused while stored */
@@ -142,8 +147,8 @@ esp_err_t image_store_save(uint16_t replace_id, const char *name, uint8_t format
 
 /*
  * As image_store_save, optionally compressed: with compress the image is
- * deflated and stored that way when that is smaller and inflates back to
- * exactly the image (else RAW). A READ_WRITE disk is always stored RAW.
+ * always deflated and stored that way, unless the compressed data does not
+ * inflate back to exactly the image (or would not fit): then RAW.
  */
 esp_err_t image_store_save_ex(uint16_t replace_id, const char *name, uint8_t format,
                               const uint8_t *data, uint32_t size, bool compress,
@@ -157,7 +162,17 @@ esp_err_t image_store_delete(uint16_t id);
 esp_err_t image_store_set_position(uint16_t id, int position);
 
 /*
- * Store changed blocks of a valid image (sectors written by the computer).
+ * Store a written image completely anew (used for compressed images, or to
+ * change between RAW and DEFLATE): the whole image (compressed when
+ * compress) goes to free blocks, is read back, and one catalog update
+ * switches blocks, sizes, storage format and CRC. The old version stays
+ * valid until then. ESP_ERR_NO_MEM: not enough free blocks (nothing changed).
+ */
+esp_err_t image_store_commit_image(uint16_t id, const uint8_t *image, uint32_t size,
+                                   uint32_t crc, bool compress);
+
+/*
+ * Store changed blocks of a valid RAW image (sectors written by the computer).
  * mask: bit i = block i of the image changed; image: the complete image
  * (size bytes, as the record says); crc: its CRC-32. Every changed block
  * goes to a free block and is read back; then the whole image is checked
@@ -189,10 +204,8 @@ const char *image_format_name(uint8_t format);
 
 /*
  * Set the write setting of a valid image (catalog update only, none when
- * unchanged). A compressed image set to READ_WRITE is first unpacked to
- * RAW, copy-on-write into free blocks (ESP_ERR_NO_MEM: not enough free
- * blocks; nothing changed). ESP_ERR_NOT_SUPPORTED: READ_WRITE for a format
- * that cannot be written; ESP_ERR_NOT_FOUND: no valid image with this id.
+ * unchanged). ESP_ERR_NOT_SUPPORTED: READ_WRITE for a format that cannot
+ * be written; ESP_ERR_NOT_FOUND: no valid image with this id.
  */
 esp_err_t image_store_set_read_write(uint16_t id, bool read_write);
 

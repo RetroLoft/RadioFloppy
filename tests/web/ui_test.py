@@ -162,8 +162,16 @@ def row(image_id):
 
 
 def btn(image_id, label):
-    return "[...%s.querySelectorAll('button')].find(x => x.textContent.startsWith(%s))" % (
-        row(image_id), json.dumps(label))
+    """A row's button by its text or, for icon buttons, its aria-label."""
+    return ("[...%s.querySelectorAll('button')].find(x => x.textContent.startsWith(%s) || "
+            "(x.getAttribute('aria-label') || '').startsWith(%s))" % (
+                row(image_id), json.dumps(label), json.dumps(label)))
+
+
+def grip_key(image_id, key):
+    """Press an arrow key on a row's drag handle (keyboard reordering)."""
+    return ("%s.querySelector('.grip').dispatchEvent(new KeyboardEvent('keydown', "
+            "{key: %s, bubbles: true}))" % (row(image_id), json.dumps(key)))
 
 
 def synthetic(path, size, seed):
@@ -240,7 +248,7 @@ def main():
         if auth:
             print("wrong token")
             b.js("document.getElementById('token').value='wrong'; document.getElementById('authform').requestSubmit()")
-            b.js(btn(target, "Load") + ".click()")
+            b.js(btn(target, "Insert") + ".click()")
             check(b.wait("document.getElementById('msg').innerText.includes('token is missing or wrong')"),
                   "401: understandable message")
 
@@ -248,8 +256,8 @@ def main():
         if auth:
             b.js("document.getElementById('token').value=%s; document.getElementById('authform').requestSubmit()"
                  % json.dumps(TOKEN))
-        check(b.wait("!" + btn(target, "Load") + ".disabled"), "Load enabled")
-        b.js(btn(target, "Load") + ".click()")
+        check(b.wait("!" + btn(target, "Insert") + ".disabled"), "Load enabled")
+        b.js(btn(target, "Insert") + ".click()")
         check(b.wait("document.getElementById('msg').innerText.startsWith('Loading floppy')", 5),
               "progress 'Loading floppy…' shown")
         ok = b.wait("document.getElementById('msg').innerText.includes('is now the active floppy')")
@@ -261,7 +269,7 @@ def main():
                 (o && o.method == 'PUT' && u.endsWith('/current'))
                 ? Promise.resolve(new Response(JSON.stringify({error:{code:'DRIVE_BUSY',message:'x'}}), {status:409}))
                 : window._fetch(u, o);""")
-        b.js(btn(other, "Load") + ".click()")
+        b.js(btn(other, "Insert") + ".click()")
         check(b.wait("document.getElementById('msg').innerText.includes('still using drive B')"),
               "DRIVE_BUSY: 'still using drive B:' shown")
         check(b.js("!!document.getElementById('retry')"), "DRIVE_BUSY: 'Try again' button")
@@ -299,13 +307,13 @@ def main():
 
         print("change the order")
         crc_before = {x["id"]: x.get("crc32") for x in images()}
-        b.js(btn(big_img["id"], "↑") + ".click()")
+        b.js(grip_key(big_img["id"], "ArrowUp"))
         check(b.wait("S.images.length > 1 && S.images[S.images.length - 2].id == %d" % big_img["id"], 20),
-              "Move up: one place up")
+              "arrow up on the handle: one place up")
         check(images()[-2]["id"] == big_img["id"], "order changed on the device")
         check({x["id"]: x.get("crc32") for x in images()} == crc_before, "no image data changed")
-        b.js(btn(big_img["id"], "↓") + ".click()")
-        check(b.wait("S.images[S.images.length - 1].id == %d" % big_img["id"], 20), "Move down: back again")
+        b.js(grip_key(big_img["id"], "ArrowDown"))
+        check(b.wait("S.images[S.images.length - 1].id == %d" % big_img["id"], 20), "arrow down on the handle: back again")
         check(b.js("[...document.querySelectorAll('#images li')].slice(0, %d).map(li => "
                    "li.querySelector('.slotname').innerText).join('|')" % len(orig))
               == "|".join(x["name"] for x in orig), "original images keep their order")

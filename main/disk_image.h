@@ -82,6 +82,10 @@ esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info);
  * compare with raw (copied; result only in the log). */
 void disk_verify_active(const uint8_t *raw, const disk_info_t *info);
 
+/* Stop that check and free its copy: compressing an image for the store
+ * needs the PSRAM more. */
+void disk_verify_cancel(void);
+
 /*
  * Make the prepared buffer the active disk. Waits up to timeout_ms for our
  * drive to be deselected; ESP_ERR_TIMEOUT (= drive busy) leaves the

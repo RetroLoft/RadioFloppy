@@ -14,10 +14,18 @@
  *
  * Single SPI (READ 03h) at 40 MHz. WP#/IO2 and IO3 are driven HIGH as plain GPIOs so
  * they can never protect or reset the chip.
+ *
+ * Several tasks use the chip (HTTP uploads, settings, disk load and save).
+ * The SPI bus lock only arbitrates between devices: one device used from
+ * two tasks at once can deadlock (spi_share_hw_ctrl.h), so every access
+ * goes through our own mutex.
  */
 #include <stdio.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_flash.h"
@@ -32,6 +40,7 @@
 static esp_flash_t *chip;
 static uint32_t chip_size;
 static uint32_t chip_id;
+static SemaphoreHandle_t lock;
 
 static esp_err_t ext_flash_probe(void);
 
@@ -44,6 +53,10 @@ esp_err_t ext_flash_init(void)
         return result;
     }
     tried = true;
+    lock = xSemaphoreCreateMutex();
+    if (!lock) {
+        return result = ESP_ERR_NO_MEM;
+    }
     result = ext_flash_probe();
     return result;
 }
@@ -130,7 +143,10 @@ esp_err_t ext_flash_read(uint32_t addr, void *buf, size_t len)
     if (!chip) {
         return ESP_ERR_INVALID_STATE;
     }
-    return esp_flash_read(chip, buf, addr, len);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    esp_err_t err = esp_flash_read(chip, buf, addr, len);
+    xSemaphoreGive(lock);
+    return err;
 }
 
 esp_err_t ext_flash_write(uint32_t addr, const void *buf, size_t len)
@@ -138,7 +154,13 @@ esp_err_t ext_flash_write(uint32_t addr, const void *buf, size_t len)
     if (!chip) {
         return ESP_ERR_INVALID_STATE;
     }
-    return esp_flash_write(chip, buf, addr, len);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    esp_err_t err = esp_flash_write(chip, buf, addr, len);
+    xSemaphoreGive(lock);
+    if (len >= EXT_FLASH_SECTOR_SIZE) {
+        vTaskDelay(1);      /* programming busy-waits: let the idle task run */
+    }
+    return err;
 }
 
 esp_err_t ext_flash_erase(uint32_t addr, size_t len)
@@ -151,7 +173,10 @@ esp_err_t ext_flash_erase(uint32_t addr, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
     /* Uses 64 KiB block erase for aligned parts, 4 KiB sectors elsewhere. */
-    return esp_flash_erase_region(chip, addr, len);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    esp_err_t err = esp_flash_erase_region(chip, addr, len);
+    xSemaphoreGive(lock);
+    return err;
 }
 
 bool ext_flash_is_blank(uint32_t addr, size_t len)

@@ -24,6 +24,9 @@
 #define RF_SECTOR_SIZE          0x1000u     /* 4 KiB erase sector */
 
 #define RF_MAX_IMAGE_SIZE       (1536u * 1024u)     /* 1.5 MiB = 1 572 864 bytes */
+/* A compressed image may be larger than it is stored (HFE: about 2 MB),
+ * as long as its stored bytes fit the RF_MAX_BLOCKS_PER_IMAGE blocks. */
+#define RF_MAX_LOGICAL_SIZE     (3u * 1024u * 1024u)
 #define RF_BLOCK_SIZE_MIN       (64u * 1024u)
 #define RF_MAX_BLOCKS           256u        /* logical blocks incl. block 0 */
 #define RF_MAX_DATA_BLOCKS      255u        /* blocks 1..255: fits uint8_t */

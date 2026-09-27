@@ -560,52 +560,111 @@ static void test_compression(void)
     CHECK(image_store_get(d, &r) && r.storage_format == IMG_STORE_RAW);
     CHECK(image_store_load(d, got) == ESP_OK && memcmp(got, img, size) == 0);
 
-    /* A new writable disk is never compressed. */
+    /* A new writable disk is compressed as well. */
     uint16_t e = 0;
     CHECK(image_store_save_ex(0, "Blank", IMG_FMT_ST | IMG_FLAG_READ_WRITE, img, size, true, &e) == ESP_OK);
-    CHECK(image_store_get(e, &r) && r.storage_format == IMG_STORE_RAW && image_read_write(&r));
+    CHECK(image_store_get(e, &r) && r.storage_format == IMG_STORE_DEFLATE && image_read_write(&r));
 
-    /* Written sectors cannot go into a compressed image. */
-    CHECK(image_store_commit_blocks(a, 1, img, size, esp_rom_crc32_le(0, img, size)) == ESP_ERR_NOT_SUPPORTED);
+    /* Written sectors cannot go block by block into a compressed image. */
+    CHECK(image_store_commit_blocks(e, 1, img, size, esp_rom_crc32_le(0, img, size)) == ESP_ERR_NOT_SUPPORTED);
 
-    /* READ_WRITE unpacks it to RAW, copy-on-write, in one catalog update. */
+    /* READ_WRITE is only metadata: a compressed image stays compressed. */
     image_record_t before;
     CHECK(image_store_get(a, &before));
-    uint32_t gen = image_store_generation();
     CHECK(image_store_set_read_write(a, true) == ESP_OK);
+    CHECK(image_store_get(a, &r) && r.storage_format == IMG_STORE_DEFLATE && image_read_write(&r) &&
+          r.stored_size == before.stored_size);
+
+    /* The whole written image anew, compressed: one catalog update. */
+    memset(img + 300000, 0x77, 4096);           /* the computer wrote a file */
+    uint32_t crc = esp_rom_crc32_le(0, img, size);
+    uint32_t gen = image_store_generation();
+    CHECK(image_store_commit_image(e, img, size, crc, true) == ESP_OK);
     CHECK(image_store_generation() == gen + 1);
-    CHECK(image_store_get(a, &r) && r.storage_format == IMG_STORE_RAW && image_read_write(&r));
-    CHECK(r.stored_size == size && r.block_count == 12 && r.crc32 == before.crc32);
-    CHECK(r.id == before.id && r.sequence == before.sequence && strncmp(r.name, "Packed", 6) == 0);
-    CHECK(image_store_load(a, got) == ESP_OK && memcmp(got, img, size) == 0);
-    CHECK(image_store_set_read_write(a, false) == ESP_OK);      /* back to read-only: stays RAW */
-    CHECK(image_store_get(a, &r) && r.storage_format == IMG_STORE_RAW);
+    CHECK(image_store_get(e, &r) && r.storage_format == IMG_STORE_DEFLATE && r.crc32 == crc &&
+          image_read_write(&r));
+    CHECK(image_store_load(e, got) == ESP_OK && memcmp(got, img, size) == 0);
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_load(e, got) == ESP_OK &&
+          memcmp(got, img, size) == 0);
 
-    /* Unpacking needs free blocks for the whole image: else nothing changes. */
-    uint16_t f = 0;
-    CHECK(image_store_save_ex(0, "Packed 2", IMG_FMT_ST, img, size, true, &f) == ESP_OK);
-    fill_until_free(3);
-    gen = image_store_generation();
-    CHECK(image_store_set_read_write(f, true) == ESP_ERR_NO_MEM);
-    CHECK(image_store_generation() == gen);
-    CHECK(image_store_get(f, &r) && r.storage_format == IMG_STORE_DEFLATE && !image_read_write(&r));
-    CHECK(image_store_load(f, got) == ESP_OK && memcmp(got, img, size) == 0);
+    /* Compression switched off: the next save stores it RAW. */
+    memset(img + 400000, 0x66, 512);
+    crc = esp_rom_crc32_le(0, img, size);
+    CHECK(image_store_commit_image(e, img, size, crc, false) == ESP_OK);
+    CHECK(image_store_get(e, &r) && r.storage_format == IMG_STORE_RAW && r.block_count == 12);
+    CHECK(image_store_load(e, got) == ESP_OK && memcmp(got, img, size) == 0);
+    /* ... and RAW + blocks works again. */
+    memset(img + 10, 0x55, 512);
+    crc = esp_rom_crc32_le(0, img, size);
+    CHECK(image_store_commit_blocks(e, 1, img, size, crc) == ESP_OK);
+    CHECK(image_store_load(e, got) == ESP_OK && memcmp(got, img, size) == 0);
 
-    /* Power cut while unpacking: the compressed version stays. */
-    fresh(16 * MIB);
-    CHECK(image_store_save_ex(0, "Packed 3", IMG_FMT_ST, img, size, true, &f) == ESP_OK);
+    /* Power cut while writing the new version: the stored one stays. */
+    CHECK(image_store_commit_image(e, img, size, crc, true) == ESP_OK);     /* compressed again */
+    memset(img + 500000, 0x44, 512);
+    uint32_t crc2 = esp_rom_crc32_le(0, img, size);
     gen = image_store_generation();
-    mock_fail_writes_after = 5;         /* part of the RAW blocks */
-    CHECK(image_store_set_read_write(f, true) != ESP_OK);
+    mock_fail_writes_after = 1;
+    CHECK(image_store_commit_image(e, img, size, crc2, true) != ESP_OK);
     mock_fail_writes_after = -1;
     CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_generation() == gen);
-    CHECK(image_store_get(f, &r) && r.storage_format == IMG_STORE_DEFLATE);
-    CHECK(image_store_load(f, got) == ESP_OK && memcmp(got, img, size) == 0);
+    CHECK(image_store_get(e, &r) && r.crc32 == crc && image_store_load(e, got) == ESP_OK);
+
+    /* Not enough free blocks: nothing changes. */
+    fill_until_free(0);
+    CHECK(image_store_commit_image(e, img, size, crc2, false) == ESP_ERR_NO_MEM);
+    CHECK(image_store_get(e, &r) && r.crc32 == crc);
     CHECK(mock_program_violations == 0 && mock_out_of_range == 0);
 
     free(img);
     free(noise);
     free(got);
+}
+
+/* Catalog version 2 (before logical sizes > 1.5 MiB): read, becomes 3. */
+static void test_catalog_v2(void)
+{
+    fresh(16 * MIB);
+    uint16_t a = save_new(368640, 100, "Old");
+    uint32_t gen = image_store_generation();
+    uint32_t addr = (gen % 2) ? RF_CAT_A : RF_CAT_B;
+    uint8_t *c = mock_flash + addr;
+    size_t cat_size = 64 + IMG_MAX_RECORDS * sizeof(image_record_t);
+    c[4] = 2; c[5] = 0;                         /* version 2 */
+    memset(c + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, c, cat_size);
+    memcpy(c + 12, &crc, 4);
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_generation() == gen);
+    CHECK(image_matches(a, 368640, 100));
+    CHECK(c[4] == 2);                           /* read, not rewritten */
+    /* The next update writes version 3 into the other copy; v2 stays behind. */
+    save_new(1000, 101, "New");
+    uint8_t *c3 = mock_flash + ((image_store_generation() % 2) ? RF_CAT_A : RF_CAT_B);
+    CHECK(c3 != c && c3[4] == 3 && c[4] == 2);
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_matches(a, 368640, 100));
+
+    /* Logical size above 1.5 MiB: only compressed, only in version 3. */
+    uint32_t big = 2 * MIB;
+    uint8_t *img = sparse_image(big, 102);
+    uint16_t b = 0;
+    CHECK(image_store_save_ex(0, "Big", IMG_FMT_HFE, img, big, false, &b) == ESP_ERR_INVALID_SIZE);
+    CHECK(image_store_save_ex(0, "Big", IMG_FMT_HFE, img, big, true, &b) == ESP_OK);
+    image_record_t r;
+    CHECK(image_store_get(b, &r) && r.original_size == big && r.storage_format == IMG_STORE_DEFLATE &&
+          r.block_count <= 24);
+    uint8_t *got = malloc(big);
+    CHECK(image_store_load(b, got) == ESP_OK && memcmp(got, img, big) == 0);
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_load(b, got) == ESP_OK);
+    /* Does not compress into 24 blocks: refused, nothing stored. */
+    uint8_t *noise = test_image(big, 103);
+    uint16_t n = 0;
+    store_usage_t u0, u1;
+    image_store_usage(&u0);
+    CHECK(image_store_save_ex(0, "Noise", IMG_FMT_HFE, noise, big, true, &n) == ESP_ERR_INVALID_SIZE);
+    image_store_usage(&u1);
+    CHECK(u1.blocks_used == u0.blocks_used && u1.images == u0.images);
+    CHECK(image_store_save_ex(0, "Huge", IMG_FMT_HFE, img, RF_MAX_LOGICAL_SIZE + 1, true, &n) == ESP_ERR_INVALID_SIZE);
+    free(img); free(noise); free(got);
 }
 
 static void test_capacity(uint32_t capacity)
@@ -650,6 +709,7 @@ int main(void)
     printf("write setting\n");        test_write_setting();
     printf("copy-on-write of written blocks\n");  test_commit_blocks();
     printf("compression\n");            test_compression();
+    printf("catalog version 2 -> 3, logical size\n");  test_catalog_v2();
     printf("32 MiB\n");                 test_capacity(32 * MIB);
     printf("64 MiB\n");                 test_capacity(64 * MIB);
     printf(failures ? "FAILED (%d)\n" : "image store OK\n", failures);
