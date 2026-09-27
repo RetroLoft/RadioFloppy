@@ -144,13 +144,27 @@ refused as `IMAGE_TOO_LARGE`. `.MSA` is not supported. The Atari may
 write to an image set to `READ_WRITE` (see *Writing*); otherwise the drive
 reports the disk as write-protected.
 
-HFE (HxC Floppy Emulator) files are recognised and fully checked (HFEv1
+HFE (HxC Floppy Emulator) files are uploaded with the `.hfe` extension,
+only to the library (`"destination": "flash"`; the temporary PSRAM disk is
+for `.ST` only). They are never whole in the device's memory: while the
+file arrives it is checked, CRC-summed and compressed straight into free
+storage blocks; afterwards the stored data is decompressed and checked
+again (HFE format, length and CRC-32). Only then does the image appear;
+an interrupted or refused upload leaves nothing behind. Checked are: HFEv1
 and HFEv3 by their header; ISO MFM, 250 kbit/s, 1 or 2 sides, at most 84
-cylinders, and the tracks must fit the drive's track buffers), but they
-are still refused with `UNSUPPORTED_FORMAT` while HFE playback is in
-development. HFEv2 ("HXCPICFE" revision 1) is always refused: convert it
-to HFEv1 or HFEv3. An HFE file may be up to 3 MiB; it is always stored
-compressed and must fit in the blocks of one image (1.5 MiB).
+cylinders, single step; the track table before the track data and the
+tracks in ascending order (as HxC tools write them; other layouts are
+refused with `UNSUPPORTED_FORMAT`); and that the decoded tracks fit the
+drive's track buffer (else `IMAGE_TOO_LARGE`), so every stored HFE image
+can be inserted. A file that is wrong from the start (e.g. HFEv2,
+"HXCPICFE" revision 1: convert it to HFEv1 or HFEv3) is refused as soon
+as its header has arrived; the rest of the data is still received but
+ignored. An HFE file may be up to 3 MiB; compressed it must fit in the
+blocks of one image (1.5 MiB), else `IMAGE_TOO_LARGE`. HFE images are
+always READ_ONLY.
+
+While HFE playback is in development, a completely checked and stored HFE
+upload is still refused with `UNSUPPORTED_FORMAT` and not kept.
 
 The track layout follows FlashFloppy: GAP3 84 (9 sectors), 30 (10
 sectors) or 3 with interleave 2 (11 sectors). An 11-sector track is

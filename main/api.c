@@ -43,7 +43,9 @@
 #include "settings.h"
 #include "step_sound.h"
 #include "hfe.h"
+#include "hfe_import.h"
 #include "image_store.h"
+#include "img_codec.h"
 #include "st_format.h"
 #include "st_image.h"
 #include "wifi_net.h"
@@ -51,6 +53,13 @@
 #define API_BODY_MAX        1024        /* JSON request bodies */
 #define RECV_CHUNK          4096
 #define UPLOAD_TIMEOUT_MS   60000       /* created but no data: expires */
+
+/* HFE uploads are checked and stored as a stream; they are kept (made an
+ * image) only once the HFE player exists, so no image is listed that
+ * cannot be inserted. 0: everything runs, then the result is discarded. */
+#ifndef HFE_PLAYBACK
+#define HFE_PLAYBACK        0
+#endif
 
 typedef enum {
     UP_NONE,
@@ -72,6 +81,7 @@ typedef struct {
     uint32_t size;
     bool to_flash;
     uint16_t replace_id;    /* flash: image to replace, 0 = new image */
+    bool hfe;               /* .hfe: stored as a stream (hfe_import) */
     bool activate;
     bool have_crc;
     uint32_t expected_crc;
@@ -432,6 +442,7 @@ static const char *status_for(const char *code)
         { "IMAGE_NOT_FOUND", HTTP_404 },   { "STORAGE_NOT_READY", HTTP_503 },
         { "MACHINE_NOT_SUPPORTED", HTTP_409 },   { "UNSAVED_CHANGES", HTTP_409 },
         { "UNSUPPORTED_FORMAT", HTTP_422 },   { "INVALID_NAME", HTTP_400 },
+        { "UPLOAD_BUSY", HTTP_409 },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].code, code) == 0) {
@@ -445,28 +456,14 @@ static const char *status_for(const char *code)
 
 /* Validate and store/activate a completely received upload. */
 /* *raw: the received image; set to NULL when it is kept as the PSRAM disk. */
-/* HFE: recognised by its header, never by the file name. */
-static bool is_hfe(const uint8_t *raw, uint32_t size)
-{
-    return size >= 8 && (memcmp(raw, "HXCPICFE", 8) == 0 || memcmp(raw, "HXCHFEV3", 8) == 0);
-}
-
+/* HFE files (.hfe) do not come here: receive_hfe stores them as a stream. */
 static void process_upload(uint8_t **rawp)
 {
     const uint8_t *raw = *rawp;
     st_info_t st;
 
-    if (is_hfe(raw, up.size)) {
-        hfe_info_t hi;
-        hfe_result_t hr = hfe_check(raw, up.size, DISK_TRACKS_BYTES, &hi);
-        if (hr != HFE_OK) {
-            fail_upload(hr == HFE_V2 || hr == HFE_UNSUPPORTED ? "UNSUPPORTED_FORMAT"
-                        : hr == HFE_TOO_LARGE ? "IMAGE_TOO_LARGE" : "INVALID_IMAGE",
-                        "%s", hi.detail);
-            return;
-        }
-        /* Phase 1: recognised and checked, not playable yet. */
-        fail_upload("UNSUPPORTED_FORMAT", "%s: HFE playback is still in development", hi.detail);
+    if (hfe_signature(raw, up.size)) {
+        fail_upload("INVALID_IMAGE", "this is an HFE file: upload it with the .hfe extension");
         return;
     }
     st_result_t r = st_check_image(raw, up.size, &st);
@@ -542,6 +539,135 @@ static void process_upload(uint8_t **rawp)
     }
     up.state = UP_DONE;
     up.touched_us = esp_timer_get_time();
+}
+
+/* ---- HFE uploads: a stream into the library ---------------------------------- */
+
+/* API error for a failed HFE import. */
+static void fail_hfe(hfe_import_error_t e, const hfe_import_t *imp)
+{
+    const hfe_info_t *hi = imp ? hfe_import_info(imp) : NULL;
+    hfe_result_t hr = imp ? hfe_import_result(imp) : HFE_OK;
+
+    switch (e) {
+    case HFE_IMPORT_FORMAT:
+        fail_upload(hr == HFE_V2 || hr == HFE_UNSUPPORTED || hr == HFE_BAD_LAYOUT ? "UNSUPPORTED_FORMAT"
+                    : hr == HFE_TOO_LARGE ? "IMAGE_TOO_LARGE" : "INVALID_IMAGE",
+                    "%s", hi && hi->detail[0] ? hi->detail : "not a valid HFE file");
+        break;
+    case HFE_IMPORT_STORED_TOO_LARGE:
+        fail_upload("IMAGE_TOO_LARGE", "compressed, it needs more than the %u KiB one image may "
+                    "occupy", (unsigned)(RF_MAX_IMAGE_SIZE / 1024));
+        break;
+    case HFE_IMPORT_NO_SPACE:
+        fail_upload("NO_SPACE", "not enough free storage for the compressed image");
+        break;
+    case HFE_IMPORT_NO_MEMORY:
+        fail_upload("INSUFFICIENT_MEMORY", "no memory to store the image");
+        break;
+    case HFE_IMPORT_BUSY:
+        fail_upload("UPLOAD_BUSY", "another image is being written");
+        break;
+    default:
+        fail_upload("FLASH_ERROR", "storing the image failed (%s); nothing stored",
+                    hfe_import_error_name(e));
+        break;
+    }
+}
+
+/*
+ * PUT data of an .hfe upload: received in pieces, compressed into the
+ * library while it arrives and verified afterwards (hfe_import). A bad
+ * file is recognised early; the rest of its data is then only drained.
+ */
+static esp_err_t receive_hfe(httpd_req_t *req)
+{
+    hfe_import_t *imp = NULL;
+    hfe_import_error_t e;
+    uint8_t *chunk = heap_caps_malloc(RECV_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    int64_t t0 = esp_timer_get_time(), t_recv = 0;
+
+    disk_verify_cancel();               /* its copy of the active disk: PSRAM */
+    e = chunk ? hfe_import_begin(up.size, DISK_TRACKS_BYTES, &imp) : HFE_IMPORT_NO_MEMORY;
+    if (e != HFE_IMPORT_OK) {
+        fail_hfe(e, NULL);
+    } else {
+        up.state = UP_RECEIVING;
+    }
+    up.touched_us = esp_timer_get_time();
+    while (up.received < up.size && chunk) {
+        uint32_t want = up.size - up.received < RECV_CHUNK ? up.size - up.received : RECV_CHUNK;
+        int n = httpd_req_recv(req, (char *)chunk, want);
+        if (n <= 0) {
+            break;      /* closed or timed out (recv_wait_timeout) */
+        }
+        up.received += n;
+        up.touched_us = esp_timer_get_time();
+        if (up.state == UP_RECEIVING && (e = hfe_import_write(imp, chunk, n)) != HFE_IMPORT_OK) {
+            fail_hfe(e, imp);           /* refused early: drain the rest */
+            hfe_import_abort(imp);
+            imp = NULL;
+        }
+    }
+    free(chunk);
+    t_recv = esp_timer_get_time();
+
+    uint32_t crc = 0;
+    if (up.state == UP_RECEIVING && up.received != up.size) {
+        fail_upload("UPLOAD_INCOMPLETE", "received %lu of %lu bytes",
+                    (unsigned long)up.received, (unsigned long)up.size);
+    }
+    if (up.state == UP_RECEIVING) {
+        up.state = UP_PROCESSING;
+        e = hfe_import_end(imp, &crc);
+        up.crc32 = crc;
+        if (e != HFE_IMPORT_OK) {
+            fail_hfe(e, imp);
+        } else if (up.have_crc && crc != up.expected_crc) {
+            fail_upload("CHECKSUM_MISMATCH", "received data has CRC-32 %08lx, expected %08lx",
+                        (unsigned long)crc, (unsigned long)up.expected_crc);
+        } else if (!HFE_PLAYBACK) {
+            const hfe_info_t *hi = hfe_import_info(imp);
+            printf("API: HFE \"%s\" checked and stored in %lld + %lld ms (%lu -> %lu bytes), "
+                   "then discarded: playback not built in\n", up.name, (t_recv - t0) / 1000,
+                   (esp_timer_get_time() - t_recv) / 1000, (unsigned long)up.size,
+                   (unsigned long)hfe_import_stored(imp));
+            fail_upload("UNSUPPORTED_FORMAT", "%s: HFE playback is still in development", hi->detail);
+        } else {
+            hfe_info_t hi = *hfe_import_info(imp);
+            uint32_t stored = hfe_import_stored(imp);
+            uint16_t id = 0;
+            e = hfe_import_commit(imp, up.replace_id, up.name, &id);
+            imp = NULL;
+            if (e != HFE_IMPORT_OK) {
+                fail_hfe(e, NULL);
+            } else {
+                if (up.replace_id) {
+                    disk_note_image_changed(up.replace_id);
+                }
+                up.result_id = id;
+                printf("API: \"%s\" %s image %u (%s, %lu bytes, stored compressed %lu bytes = %lu%%, "
+                       "CRC32 %08lx, receive %lld ms, verify %lld ms)\n", up.name,
+                       up.replace_id ? "replaced" : "stored as", id, hi.detail,
+                       (unsigned long)up.size, (unsigned long)stored,
+                       (unsigned long)(stored * 100ull / up.size), (unsigned long)crc,
+                       (t_recv - t0) / 1000, (esp_timer_get_time() - t_recv) / 1000);
+                if (up.activate) {
+                    fail_upload("UNSUPPORTED_FORMAT", "stored as image %u; inserting an HFE "
+                                "image is still in development", id);
+                } else {
+                    up.state = UP_DONE;
+                    up.touched_us = esp_timer_get_time();
+                }
+            }
+        }
+    }
+    hfe_import_abort(imp);
+    const char *status = up.state == UP_DONE ? "200 OK" : status_for(up.err_code);
+    if (up.state == UP_FAILED) {
+        printf("API: upload %lu failed: %s - %s\n", (unsigned long)up.id, up.err_code, up.err_msg);
+    }
+    return send_json(req, status, upload_json());
 }
 
 /* ---- Handlers ----------------------------------------------------------- */
@@ -640,9 +766,62 @@ static esp_err_t get_storage(httpd_req_t *req)
     return send_json(req, "200 OK", storage_json());
 }
 
+/* ---- Downloads: the image streamed from the flash ------------------------------ */
+
+typedef struct {
+    const image_record_t *r;
+    httpd_req_t *req;           /* NULL: only compute the CRC */
+    uint32_t crc;
+    uint32_t len;
+} download_t;
+
+static esp_err_t download_out(void *ctx, const uint8_t *data, size_t len)
+{
+    download_t *dl = ctx;
+    if (len > dl->r->original_size - dl->len) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    dl->crc = image_store_crc32(dl->crc, data, len);
+    dl->len += (uint32_t)len;
+    return dl->req ? httpd_resp_send_chunk(dl->req, (const char *)data, len) : ESP_OK;
+}
+
+static esp_err_t download_read(void *ctx, uint32_t off, uint8_t *buf, size_t len)
+{
+    return image_store_read(ctx, off, buf, (uint32_t)len);
+}
+
+/* The image once through out (decompressed if needed); OK only if the
+ * length and CRC-32 are those of the record. */
+static esp_err_t download_pass(const image_record_t *r, httpd_req_t *req)
+{
+    download_t dl = { .r = r, .req = req };
+    esp_err_t err;
+
+    if (r->storage_format == IMG_STORE_DEFLATE) {
+        err = img_inflate_stream(r->stored_size, download_read, (void *)r, download_out, &dl, NULL);
+    } else {
+        uint8_t *buf = heap_caps_malloc(RECV_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        err = buf ? ESP_OK : ESP_ERR_NO_MEM;
+        for (uint32_t off = 0; err == ESP_OK && off < r->original_size; off += RECV_CHUNK) {
+            uint32_t n = r->original_size - off < RECV_CHUNK ? r->original_size - off : RECV_CHUNK;
+            if ((err = image_store_read(r, off, buf, n)) == ESP_OK) {
+                err = download_out(&dl, buf, n);
+            }
+        }
+        free(buf);
+    }
+    if (err == ESP_OK && (dl.len != r->original_size || dl.crc != r->crc32)) {
+        err = ESP_ERR_INVALID_CRC;
+    }
+    return err;
+}
+
 /*
  * GET /api/v1/images/{id}/data: the image itself (uncompressed, as it was
- * uploaded or as the computer wrote it), as a file download.
+ * uploaded or as the computer wrote it), as a file download. Streamed:
+ * first checked once without sending (so a damaged image gets an error
+ * status), then sent. Never whole in memory.
  */
 static esp_err_t get_image_data(httpd_req_t *req, uint16_t id)
 {
@@ -656,13 +835,11 @@ static esp_err_t get_image_data(httpd_req_t *req, uint16_t id)
         return send_error(req, HTTP_409, "UNSAVED_CHANGES", "the computer wrote to this disk and "
                           "the changes are not saved yet; download it once they are");
     }
-    uint8_t *buf = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        return send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no PSRAM for the download");
+    esp_err_t err = download_pass(&r, NULL);
+    if (err == ESP_ERR_NO_MEM) {
+        return send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no memory for the download");
     }
-    esp_err_t err = image_store_load(id, buf);      /* inflates, checks the CRC */
     if (err != ESP_OK) {
-        free(buf);
         return send_error(req, HTTP_500, "FLASH_ERROR", "reading the image failed (%s)",
                           esp_err_to_name(err));
     }
@@ -683,15 +860,13 @@ static esp_err_t get_image_data(httpd_req_t *req, uint16_t id)
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Content-Disposition", hdr);
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    for (uint32_t off = 0; err == ESP_OK && off < r.original_size; off += 8192) {
-        uint32_t k = r.original_size - off < 8192 ? r.original_size - off : 8192;
-        err = httpd_resp_send_chunk(req, (const char *)buf + off, k);
+    /* Checked again while sending: if the data changed meanwhile, the
+     * download is cut off instead of completed with wrong data. */
+    if ((err = download_pass(&r, req)) != ESP_OK) {
+        printf("API: download of image %u stopped (%s)\n", id, esp_err_to_name(err));
+        return ESP_FAIL;                /* closes the connection: incomplete */
     }
-    if (err == ESP_OK) {
-        err = httpd_resp_send_chunk(req, NULL, 0);
-    }
-    free(buf);
-    return err;
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 /* GET /api/v1/images/{id} and GET /api/v1/images/{id}/data */
@@ -1089,7 +1264,14 @@ static esp_err_t post_upload(httpd_req_t *req)
             goto out;
         }
     }
-    if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < size) {
+    if (maybe_hfe && !to_flash) {
+        ret = send_error(req, status_for("UNSUPPORTED_FORMAT"), "UNSUPPORTED_FORMAT",
+                         "HFE images are stored in the library (\"destination\": \"flash\"); "
+                         "the temporary PSRAM disk is for .ST images only");
+        goto out;
+    }
+    /* HFE is received as a stream: no buffer for the whole file. */
+    if (!maybe_hfe && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < size) {
         ret = send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no PSRAM for a %lu byte upload",
                          (unsigned long)size);
         goto out;
@@ -1102,6 +1284,7 @@ static esp_err_t post_upload(httpd_req_t *req)
     up.size = size;
     up.to_flash = to_flash;
     up.replace_id = replace_id;
+    up.hfe = maybe_hfe;
     up.activate = activate;
     up.have_crc = have_crc;
     up.expected_crc = crc;
@@ -1171,6 +1354,11 @@ static esp_err_t put_upload_data(httpd_req_t *req)
         fail_upload("UPLOAD_INCOMPLETE", "Content-Length %u does not match the announced size %lu",
                     (unsigned)req->content_len, (unsigned long)up.size);
         ret = send_json(req, HTTP_400, upload_json());
+        goto out;
+    }
+
+    if (up.hfe) {
+        ret = receive_hfe(req);
         goto out;
     }
 

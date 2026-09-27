@@ -695,6 +695,170 @@ static void test_capacity(uint32_t capacity)
     CHECK(mock_out_of_range == 0 && mock_program_violations == 0);
 }
 
+/* ---- Streaming writer ------------------------------------------------------- */
+
+/* The lowest block no image uses. */
+static uint32_t lowest_free_block(void)
+{
+    static image_record_t list[IMG_MAX_RECORDS];
+    uint8_t used[256] = { 1 };
+    int n = image_store_list(list, IMG_MAX_RECORDS);
+    for (int i = 0; i < n; i++)
+        if (list[i].status == IMG_VALID)
+            for (int b = 0; b < list[i].block_count; b++) used[list[i].blocks[b]] = 1;
+    for (uint32_t b = 1; b < 256; b++)
+        if (!used[b]) return b;
+    return 0;
+}
+
+/* Write d[n] in random pieces (1 byte .. 70 KiB). */
+static esp_err_t write_pieces(image_writer_t *w, const uint8_t *d, uint32_t n)
+{
+    esp_err_t err = ESP_OK;
+    for (uint32_t o = 0; o < n && err == ESP_OK;) {
+        uint32_t k = (uint32_t)(rand() % (70 * KIB)) + 1;
+        if (k > n - o) k = n - o;
+        err = image_store_writer_write(w, d + o, k);
+        o += k;
+    }
+    return err;
+}
+
+static void test_writer(uint32_t capacity)
+{
+    fresh(capacity);
+    const rf_geometry_t *g = image_store_geometry();
+    uint32_t max_stored = (uint32_t)g->max_blocks * g->block_size;
+    store_usage_t u0, u;
+    image_record_t r;
+    image_writer_t *w = NULL, *w2 = NULL;
+    uint16_t id = 0;
+
+    /* A stream as a compressed HFE: 1.2 MB stored, 2.5 MB logical. */
+    uint32_t n = 1200 * KIB + 777;
+    uint8_t *d = test_image(n, 9);
+    uint8_t *back = malloc(max_stored + 1);
+    image_store_usage(&u0);
+    CHECK(image_store_writer_open(&w) == ESP_OK && w);
+    CHECK(image_store_writer_open(&w2) == ESP_ERR_INVALID_STATE && !w2);   /* one at a time */
+    CHECK(write_pieces(w, d, n / 2) == ESP_OK);
+    /* Meanwhile another image: never in the reserved blocks. */
+    uint16_t other = save_new(300 * KIB, 3, "Other");
+    CHECK(image_store_format() == ESP_ERR_INVALID_STATE);     /* not while writing */
+    CHECK(write_pieces(w, d + n / 2, n - n / 2) == ESP_OK);
+    CHECK(image_store_writer_finish(w) == ESP_OK && image_store_writer_size(w) == n);
+    CHECK(image_store_find_name("Streamed") == 0);             /* nothing before the commit */
+    image_store_usage(&u);
+    CHECK(u.images == u0.images + 1 &&
+          u.blocks_used == u0.blocks_used + rf_blocks_for(g, n) + rf_blocks_for(g, 300 * KIB));
+    CHECK(image_store_writer_read(w, 0, back, n) == ESP_OK && memcmp(back, d, n) == 0);
+    CHECK(image_store_writer_commit(w, 0, "Streamed", IMG_FMT_HFE, IMG_STORE_DEFLATE, 2500 * KIB,
+                                    0x1234abcd, &id) == ESP_OK && id);
+    CHECK(image_store_get(id, &r) && r.status == IMG_VALID && r.storage_format == IMG_STORE_DEFLATE &&
+          r.original_size == 2500 * KIB && r.stored_size == n && r.crc32 == 0x1234abcd &&
+          r.block_count == rf_blocks_for(g, n) && image_format(&r) == IMG_FMT_HFE &&
+          !image_read_write(&r));
+    CHECK(image_store_read(&r, 0, back, n) == ESP_OK && memcmp(back, d, n) == 0);
+    CHECK(image_matches(other, 300 * KIB, 3));
+    CHECK(image_store_open(capacity) == STORE_VALID);         /* as after a restart */
+    CHECK(image_store_get(id, &r) && r.status == IMG_VALID);
+    CHECK(image_store_writer_open(&w) == ESP_OK);            /* the writer was released */
+    image_store_writer_abort(w);
+
+    /* Abandoned halfway: no record, all blocks free again. */
+    image_store_usage(&u0);
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, d, 500 * KIB) == ESP_OK);
+    image_store_usage(&u);
+    CHECK(u.blocks_used > u0.blocks_used);                    /* reserved meanwhile */
+    image_store_writer_abort(w);
+    image_store_usage(&u);
+    CHECK(u.blocks_used == u0.blocks_used && u.images == u0.images);
+
+    /* More than the blocks of one image: refused, sticky. */
+    uint8_t *big = test_image(max_stored + 1, 4);
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, big, max_stored + 1) == ESP_ERR_INVALID_SIZE);
+    CHECK(image_store_writer_write(w, big, 1) == ESP_ERR_INVALID_SIZE);
+    image_store_writer_abort(w);
+    /* Exactly the blocks of one image: fine. */
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, big, max_stored) == ESP_OK && image_store_writer_finish(w) == ESP_OK);
+    uint16_t full = 0;
+    CHECK(image_store_writer_commit(w, 0, "Full", IMG_FMT_HFE, IMG_STORE_DEFLATE, 3 * MIB,
+                                    1, &full) == ESP_OK);
+    CHECK(image_store_get(full, &r) && r.block_count == g->max_blocks);
+    CHECK(image_store_delete(full) == ESP_OK);
+    free(big);
+
+    /* Replacing: the old image stays until the commit. */
+    image_record_t old;
+    CHECK(image_store_get(other, &old));
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, d, 200 * KIB) == ESP_OK && image_store_writer_finish(w) == ESP_OK);
+    image_store_writer_abort(w);
+    CHECK(image_matches(other, 300 * KIB, 3));
+    image_store_usage(&u0);
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, d, 200 * KIB) == ESP_OK && image_store_writer_finish(w) == ESP_OK);
+    CHECK(image_store_writer_commit(w, other, "Other v2", IMG_FMT_HFE, IMG_STORE_DEFLATE, 900 * KIB,
+                                    7, &id) == ESP_OK && id == other);
+    CHECK(image_store_get(other, &r) && r.sequence == old.sequence && r.stored_size == 200 * KIB);
+    CHECK(image_store_read(&r, 0, back, 200 * KIB) == ESP_OK && memcmp(back, d, 200 * KIB) == 0);
+    image_store_usage(&u);
+    CHECK(u.images == u0.images &&
+          u.blocks_used == u0.blocks_used - rf_blocks_for(g, 300 * KIB) + rf_blocks_for(g, 200 * KIB));
+
+    /* Damaged on the flash before the commit: refused, nothing changes. */
+    image_store_usage(&u0);
+    uint32_t first = lowest_free_block();
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, d, 100 * KIB) == ESP_OK && image_store_writer_finish(w) == ESP_OK);
+    CHECK(memcmp(mock_flash + first * g->block_size, d, 4096) == 0);   /* it took that block */
+    mock_flash[first * g->block_size + 10] ^= 0x01;
+    CHECK(image_store_writer_commit(w, 0, "Bad", IMG_FMT_HFE, IMG_STORE_DEFLATE, 900 * KIB, 7, &id) ==
+          ESP_ERR_INVALID_CRC);
+    image_store_usage(&u);
+    CHECK(u.blocks_used == u0.blocks_used && u.images == u0.images && !image_store_find_name("Bad"));
+
+    /* RAW needs stored == logical size. */
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, d, 100 * KIB) == ESP_OK && image_store_writer_finish(w) == ESP_OK);
+    CHECK(image_store_writer_commit(w, 0, "Raw", IMG_FMT_ST, IMG_STORE_RAW, 200 * KIB, 7, &id) ==
+          ESP_ERR_INVALID_SIZE);
+
+    /* A write failing (power cut): sticky error, nothing in the catalog after a restart. */
+    image_store_usage(&u0);
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    mock_fail_writes_after = 2;
+    CHECK(write_pieces(w, d, 400 * KIB) != ESP_OK);
+    mock_fail_writes_after = -1;
+    CHECK(image_store_writer_write(w, d, 10) != ESP_OK);
+    image_store_writer_abort(w);
+    CHECK(image_store_open(capacity) == STORE_VALID);
+    image_store_usage(&u);
+    CHECK(u.images == u0.images && u.blocks_used == u0.blocks_used);
+
+    /* Flash full: no free block → ESP_ERR_NO_MEM, the rest untouched. */
+    while (true) {
+        image_store_usage(&u);
+        if (u.blocks_free < 2) break;
+        uint32_t sz = (u.blocks_free - 1) * g->block_size;
+        if (sz > RF_MAX_IMAGE_SIZE) sz = RF_MAX_IMAGE_SIZE;
+        if (!save_new(sz, 5, "Filler")) break;
+    }
+    image_store_usage(&u0);
+    CHECK(image_store_writer_open(&w) == ESP_OK);
+    CHECK(write_pieces(w, d, (u0.blocks_free + 1) * g->block_size) == ESP_ERR_NO_MEM);
+    image_store_writer_abort(w);
+    image_store_usage(&u);
+    CHECK(u.blocks_used == u0.blocks_used);
+
+    CHECK(mock_program_violations == 0 && mock_out_of_range == 0);
+    free(d);
+    free(back);
+}
+
 int main(void)
 {
     printf("geometry\n");               test_geometry();
@@ -710,6 +874,8 @@ int main(void)
     printf("copy-on-write of written blocks\n");  test_commit_blocks();
     printf("compression\n");            test_compression();
     printf("catalog version 2 -> 3, logical size\n");  test_catalog_v2();
+    printf("streaming writer 16/32/64 MiB\n");
+    test_writer(16 * MIB); test_writer(32 * MIB); test_writer(64 * MIB);
     printf("32 MiB\n");                 test_capacity(32 * MIB);
     printf("64 MiB\n");                 test_capacity(64 * MIB);
     printf(failures ? "FAILED (%d)\n" : "image store OK\n", failures);

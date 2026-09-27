@@ -19,6 +19,18 @@
  *
  * Supported for the Atari profile: ISO MFM, 250 kbit/s nominal, 1 or 2
  * sides, at most 84 cylinders, single step.
+ *
+ * The file is read as a stream (it is never whole in memory): header,
+ * track table, then the tracks one cylinder at a time. That needs the
+ * track table before the track data and the tracks in ascending order
+ * of cylinder, as HxC tools write them; other layouts are refused
+ * (HFE_BAD_LAYOUT).
+ *
+ * Decoded tracks go into a packed track buffer (the player's format):
+ * a table of HFE_SLOTS slots, then per track its cells (MSB first,
+ * 32-bit aligned), its timing segments and its weak areas. Checking a
+ * file runs the same packing without a buffer, so a file that passes
+ * the check with the buffer size also fits when it is played.
  */
 #pragma once
 
@@ -29,6 +41,7 @@
 #define HFE_MAX_SEGMENTS    16      /* bitrate changes per track */
 #define HFE_MAX_WEAK        32      /* weak (RAND) areas per track */
 #define HFE_MAX_TRACK_CELLS (32767u * 8)   /* one side: 16-bit length / 2 * 8 */
+#define HFE_REGION_MAX      65536u  /* track data of one cylinder, both sides */
 
 typedef enum {
     HFE_OK,
@@ -37,8 +50,9 @@ typedef enum {
     HFE_BAD_HEADER,         /* header values inconsistent */
     HFE_UNSUPPORTED,        /* valid, but not for our Atari drive */
     HFE_BAD_TRACKS,         /* track table / track data outside the file */
+    HFE_BAD_LAYOUT,         /* valid, but tracks not in stream order */
     HFE_BAD_OPCODE,         /* v3: unknown or malformed opcode */
-    HFE_TOO_LARGE,          /* does not fit the track buffers */
+    HFE_TOO_LARGE,          /* does not fit the track buffer */
 } hfe_result_t;
 
 typedef struct {
@@ -49,7 +63,7 @@ typedef struct {
     uint16_t bitrate;       /* kbit/s */
     uint16_t lut_block;
     uint32_t cells_total;   /* all tracks, both sides, as played */
-    uint32_t bytes_needed;  /* packed track buffer bytes for all tracks */
+    uint32_t bytes_needed;  /* packed track buffer bytes (with the slot table) */
     uint32_t max_cells;     /* longest track */
     uint16_t opcodes;       /* v3 opcodes seen (all tracks) */
     uint16_t weak_areas;
@@ -78,23 +92,82 @@ typedef struct {
     hfe_weak_t weak[HFE_MAX_WEAK];
 } hfe_track_t;
 
+/* ---- Packed track buffer --------------------------------------------------- */
+
+#define HFE_SLOTS           (HFE_MAX_CYLS * 2)
+
+/* Slot of cylinder c, side s: HFE_SLOTS entries at the buffer start. */
+typedef struct {
+    uint32_t offset;        /* of the cells, from the buffer start (0: no track) */
+    uint32_t cells;
+    uint8_t nseg;           /* segments follow the cells (32-bit aligned) */
+    uint8_t nweak;          /* weak areas follow the segments */
+    uint16_t reserved;
+} hfe_slot_t;
+
+#define HFE_TABLE_BYTES     ((uint32_t)(HFE_SLOTS * sizeof(hfe_slot_t)))
+
+typedef struct {
+    uint8_t *buf;           /* NULL: count only (checking a file) */
+    uint32_t cap;
+    uint32_t used;
+} hfe_pack_t;
+
+/* One packed track, for the player. cells NULL: no track (unformatted). */
+typedef struct {
+    const uint8_t *cells;   /* MSB first; cell 0 follows the index pulse */
+    uint32_t count;
+    const hfe_segment_t *seg;
+    uint8_t nseg;
+    const hfe_weak_t *weak;
+    uint8_t nweak;
+} hfe_packed_track_t;
+
+void hfe_pack_init(hfe_pack_t *p, uint8_t *buf, uint32_t cap);
+void hfe_packed_track(const uint8_t *buf, int cyl, int side, hfe_packed_track_t *t);
+
+/* ---- Streaming reader -------------------------------------------------------- */
+
+typedef struct {
+    hfe_pack_t *pack;       /* where tracks go (count-only for a check) */
+    uint8_t *region;        /* HFE_REGION_MAX bytes: one cylinder */
+    uint32_t file_size;
+    uint32_t pos;           /* file offset of the next byte */
+    uint32_t want;          /* bytes to collect for the current part */
+    uint32_t have;
+    int phase;
+    int cyl;
+    uint32_t ns_x16;        /* default cell time */
+    hfe_result_t result;    /* sticky */
+    hfe_info_t info;
+    hfe_track_t trk;        /* scratch for the side being decoded */
+    uint8_t hdr[512];
+    uint8_t lut[HFE_MAX_CYLS * 4];
+} hfe_stream_t;
+
 /*
- * Check a whole file: signature and version, header values, the track
- * table, every track (bounds; v3 opcodes decoded and checked) and whether
- * it fits in `buffer_bytes` of packed track buffer. Never reads outside
- * data[size].
+ * Read a file of file_size bytes that arrives in pieces. region: a buffer
+ * of HFE_REGION_MAX bytes. Every track is decoded and packed into pack
+ * (hfe_pack_init first; a NULL buffer only counts). Checks everything
+ * hfe_check does, as early as possible; after an error, feeding does
+ * nothing and returns it again.
+ */
+void hfe_stream_init(hfe_stream_t *s, uint32_t file_size, uint8_t *region, hfe_pack_t *pack);
+hfe_result_t hfe_stream_feed(hfe_stream_t *s, const uint8_t *data, uint32_t len);
+/* After the last byte: HFE_OK when the whole file was read and packed. */
+hfe_result_t hfe_stream_end(hfe_stream_t *s);
+static inline const hfe_info_t *hfe_stream_info(const hfe_stream_t *s) { return &s->info; }
+
+/*
+ * Check a whole file in memory (a stream fed at once): signature and
+ * version, header values, the track table and its layout, every track
+ * (bounds; v3 opcodes decoded and checked) and whether it fits in
+ * buffer_bytes of packed track buffer. Never reads outside data[size].
  */
 hfe_result_t hfe_check(const uint8_t *data, uint32_t size, uint32_t buffer_bytes,
                        hfe_info_t *info);
 
-/*
- * Decode one track (cylinder cyl, side 0/1) of a checked file into cells:
- * out gets them packed MSB first (cell 0 = bit 7 of out[0]), at most
- * cap_bytes. Opcodes are removed; the track is rotated so that a v3 INDEX
- * opcode lands on cell 0. Side 1 of a single-sided file gives 0 cells.
- */
-hfe_result_t hfe_decode_track(const uint8_t *data, uint32_t size, const hfe_info_t *info,
-                              int cyl, int side, uint8_t *out, uint32_t cap_bytes,
-                              hfe_track_t *trk);
+/* Recognise an HFE file from its first 8 bytes (any version). */
+bool hfe_signature(const uint8_t *data, uint32_t size);
 
 const char *hfe_result_name(hfe_result_t r);

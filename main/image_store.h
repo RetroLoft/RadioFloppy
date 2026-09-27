@@ -154,6 +154,45 @@ esp_err_t image_store_save_ex(uint16_t replace_id, const char *name, uint8_t for
                               const uint8_t *data, uint32_t size, bool compress,
                               uint16_t *id_out);
 
+/*
+ * Streaming writer, for images that are never whole in memory (HFE): the
+ * stored bytes (already compressed, if so) are written in pieces into
+ * free blocks, reserved meanwhile so nothing else uses them. Only
+ * image_store_writer_commit makes an image: until then nothing is in the
+ * catalog, and an abandoned or failed writer leaves no trace but free
+ * blocks. One writer at a time; its calls from one task.
+ */
+typedef struct image_writer image_writer_t;
+
+/* ESP_ERR_INVALID_STATE: storage not usable or a writer is open. */
+esp_err_t image_store_writer_open(image_writer_t **w);
+
+/* Append stored bytes. ESP_ERR_INVALID_SIZE: more than the blocks of one
+ * image hold; ESP_ERR_NO_MEM: no free block. Errors are sticky. */
+esp_err_t image_store_writer_write(image_writer_t *w, const uint8_t *data, uint32_t len);
+
+/* After the last byte: program what is still staged. */
+esp_err_t image_store_writer_finish(image_writer_t *w);
+uint32_t image_store_writer_size(const image_writer_t *w);
+
+/* Read back written bytes (after finish), e.g. to decompress and check them. */
+esp_err_t image_store_writer_read(const image_writer_t *w, uint32_t offset, void *buf,
+                                  uint32_t len);
+
+/*
+ * Check the flash against what was written and make it an image with one
+ * catalog update: new (replace_id 0, at the end of the order) or replacing
+ * replace_id (same id and position; its old blocks become free only now).
+ * size and crc: of the image itself; storage_format IMG_STORE_*. Frees
+ * the writer, also on failure (then the old state is unchanged).
+ */
+esp_err_t image_store_writer_commit(image_writer_t *w, uint16_t replace_id, const char *name,
+                                    uint8_t format, uint8_t storage_format, uint32_t size,
+                                    uint32_t crc, uint16_t *id_out);
+
+/* Abandon: the blocks are free again. NULL is fine. */
+void image_store_writer_abort(image_writer_t *w);
+
 /* Remove an image; its blocks are free at once (erased when reused). */
 esp_err_t image_store_delete(uint16_t id);
 

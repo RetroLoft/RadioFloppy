@@ -83,6 +83,8 @@ static catalog_t *work;             /* scratch for the next generation */
 static int cat_copy = -1;           /* copy the catalog came from */
 static store_state_t state = STORE_NO_FLASH;
 static rf_geometry_t geo;
+static uint8_t reserved[256];       /* blocks the open image writer has taken */
+static image_writer_t *open_writer; /* at most one */
 
 uint32_t image_store_crc32(uint32_t crc, const void *data, uint32_t len)
 {
@@ -241,7 +243,7 @@ static void empty_catalog(catalog_t *c, uint32_t generation)
 
 static esp_err_t format_unlocked(void)
 {
-    if (!cat || state == STORE_NO_FLASH) {
+    if (!cat || state == STORE_NO_FLASH || open_writer) {
         return ESP_ERR_INVALID_STATE;
     }
     /* Both copies erased (this also removes old-format catalogs), then an
@@ -454,7 +456,8 @@ uint16_t image_store_find_name(const char *name)
     return id;
 }
 
-/* Blocks owned by valid records, except `skip` (record index or -1). */
+/* Blocks owned by valid records, except `skip` (record index or -1), and
+ * blocks reserved by the image writer. */
 static void used_map(const catalog_t *c, int skip, uint8_t used[256])
 {
     memset(used, 0, 256);
@@ -469,6 +472,8 @@ static void used_map(const catalog_t *c, int skip, uint8_t used[256])
                 used[r->blocks[b]] = 1;
             }
         }
+    }    for (int b = 1; b < 256; b++) {
+        used[b] |= reserved[b];         /* being written by the image writer */
     }
 }
 
@@ -631,6 +636,31 @@ static esp_err_t readback_crc(const image_record_t *r, uint32_t *crc_out)
 
 /* ---- Writing ------------------------------------------------------------------ */
 
+/* In `work`: the next unused id (after 65535 it wraps and skips ids in
+ * use) and the last position in the order, for a new record. */
+static void new_id(image_record_t *rec)
+{
+    uint16_t id = work->hdr.next_id;
+    for (bool taken = true; taken;) {
+        taken = false;
+        for (int i = 0; i < IMG_MAX_RECORDS && !taken; i++) {
+            taken = work->rec[i].status != IMG_FREE && work->rec[i].id == id;
+        }
+        if (taken && ++id == 0) {
+            id = 1;
+        }
+    }
+    rec->id = id;
+    work->hdr.next_id = (uint16_t)(id + 1) ? (uint16_t)(id + 1) : 1;
+    uint16_t seq = 0;
+    for (int i = 0; i < IMG_MAX_RECORDS; i++) {
+        if (work->rec[i].status != IMG_FREE && work->rec[i].sequence > seq) {
+            seq = work->rec[i].sequence;
+        }
+    }
+    rec->sequence = seq + 1;
+}
+
 /*
  * Store an image whose bytes on the flash are stored[stored_size] in
  * storage format sfmt (RAW: the image itself; DEFLATE: compressed);
@@ -724,26 +754,7 @@ static esp_err_t store_unlocked(uint16_t replace_id, const char *name, uint8_t f
         rec.id = w->id;
         rec.sequence = w->sequence;
     } else {
-        /* Next unused id (after 65535 it wraps and skips ids in use). */
-        uint16_t id = work->hdr.next_id;
-        for (bool taken = true; taken;) {
-            taken = false;
-            for (int i = 0; i < IMG_MAX_RECORDS && !taken; i++) {
-                taken = work->rec[i].status != IMG_FREE && work->rec[i].id == id;
-            }
-            if (taken && ++id == 0) {
-                id = 1;
-            }
-        }
-        rec.id = id;
-        work->hdr.next_id = (uint16_t)(id + 1) ? (uint16_t)(id + 1) : 1;
-        uint16_t seq = 0;
-        for (int i = 0; i < IMG_MAX_RECORDS; i++) {
-            if (work->rec[i].status != IMG_FREE && work->rec[i].sequence > seq) {
-                seq = work->rec[i].sequence;
-            }
-        }
-        rec.sequence = seq + 1;
+        new_id(&rec);
     }
     rec.status = IMG_VALID;
     /* New uploads and replacements are READ_ONLY; READ_WRITE only when the
@@ -1076,6 +1087,271 @@ static esp_err_t commit_blocks_unlocked(uint16_t id, uint32_t mask, const uint8_
     work->rec[idx].crc32 = crc;
     memcpy(work->rec[idx].blocks, rec.blocks, sizeof(rec.blocks));
     return commit_work();
+}
+
+/* ---- Streaming writer: an image written in pieces ---------------------------- */
+
+/*
+ * The stored bytes go through a staging buffer of IMG_STAGE_SIZE into
+ * free blocks, which are reserved (used_map counts them) until the
+ * commit puts them in a record or the writer is abandoned. The stage
+ * size divides every block size (a power of two >= 64 KiB), so a stage
+ * never spans two blocks; each block is erased piecewise just before its
+ * part is programmed. Nothing is in the catalog before the commit.
+ */
+#define IMG_STAGE_SIZE  RF_BLOCK_SIZE_MIN
+_Static_assert(RF_BLOCK_SIZE_MIN % IMG_STAGE_SIZE == 0, "stage divides every block size");
+
+struct image_writer {
+    uint8_t *stage;
+    uint32_t fill;              /* bytes in the stage */
+    uint32_t size;              /* stored bytes so far, staged ones included */
+    uint32_t crc;               /* CRC-32 of the stored bytes so far */
+    uint8_t blocks[RF_MAX_BLOCKS_PER_IMAGE];
+    uint8_t nblocks;
+    esp_err_t err;              /* first error: sticky */
+};
+
+static void unreserve(image_writer_t *w)
+{
+    store_lock();
+    for (int i = 0; i < w->nblocks; i++) {
+        reserved[w->blocks[i]] = 0;
+    }
+    store_unlock();
+}
+
+/* The lowest free block, reserved for w. */
+static esp_err_t take_block(image_writer_t *w)
+{
+    uint8_t used[256];
+    esp_err_t err = ESP_ERR_NO_MEM;
+
+    if (w->nblocks >= geo.max_blocks) {
+        return ESP_ERR_INVALID_SIZE;            /* more than one image may occupy */
+    }
+    writer_lock();
+    if (state != STORE_VALID) {
+        err = ESP_ERR_INVALID_STATE;
+    } else {
+        used_map(cat, -1, used);
+        for (int b = 1; b <= geo.data_blocks; b++) {
+            if (!used[b]) {
+                store_lock();
+                reserved[b] = 1;
+                store_unlock();
+                w->blocks[w->nblocks++] = (uint8_t)b;
+                err = ESP_OK;
+                break;
+            }
+        }
+    }
+    writer_unlock();
+    return err;
+}
+
+/* Program the staged bytes at their place (erasing just that part first). */
+static esp_err_t flush_stage(image_writer_t *w)
+{
+    uint32_t off = w->size - w->fill;           /* stored offset of the stage */
+    uint32_t within = off % geo.block_size;
+    esp_err_t err;
+
+    if (w->fill == 0) {
+        return ESP_OK;
+    }
+    if (within == 0 && (err = take_block(w)) != ESP_OK) {
+        return err;
+    }
+    uint32_t addr = rf_block_addr(&geo, w->blocks[off / geo.block_size]) + within;
+    uint32_t erase = (w->fill + RF_SECTOR_SIZE - 1) / RF_SECTOR_SIZE * RF_SECTOR_SIZE;
+    if ((err = ext_flash_erase(addr, erase)) != ESP_OK ||
+        (err = ext_flash_write(addr, w->stage, w->fill)) != ESP_OK) {
+        return err;
+    }
+    w->fill = 0;
+    return ESP_OK;
+}
+
+esp_err_t image_store_writer_open(image_writer_t **wp)
+{
+    *wp = NULL;
+    if (state != STORE_VALID) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    image_writer_t *w = calloc(1, sizeof(*w));
+    uint8_t *stage = heap_caps_malloc(IMG_STAGE_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!w || !stage) {
+        free(w);
+        free(stage);
+        return ESP_ERR_NO_MEM;
+    }
+    w->stage = stage;
+    writer_lock();
+    bool busy = open_writer != NULL;
+    if (!busy) {
+        open_writer = w;
+    }
+    writer_unlock();
+    if (busy) {
+        free(stage);
+        free(w);
+        return ESP_ERR_INVALID_STATE;
+    }
+    *wp = w;
+    return ESP_OK;
+}
+
+esp_err_t image_store_writer_write(image_writer_t *w, const uint8_t *data, uint32_t len)
+{
+    if (w->err != ESP_OK) {
+        return w->err;
+    }
+    if (len > (uint32_t)geo.max_blocks * geo.block_size - w->size) {
+        return w->err = ESP_ERR_INVALID_SIZE;   /* does not fit in one image's blocks */
+    }
+    w->crc = image_store_crc32(w->crc, data, len);
+    while (len) {
+        uint32_t n = IMG_STAGE_SIZE - w->fill < len ? IMG_STAGE_SIZE - w->fill : len;
+        memcpy(w->stage + w->fill, data, n);
+        w->fill += n;
+        w->size += n;
+        data += n;
+        len -= n;
+        if (w->fill == IMG_STAGE_SIZE && (w->err = flush_stage(w)) != ESP_OK) {
+            return w->err;
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t image_store_writer_finish(image_writer_t *w)
+{
+    if (w->err == ESP_OK) {
+        w->err = w->size ? flush_stage(w) : ESP_ERR_INVALID_SIZE;
+    }
+    return w->err;
+}
+
+uint32_t image_store_writer_size(const image_writer_t *w)
+{
+    return w->size;
+}
+
+/* The written bytes as a record (for reading them back). */
+static void writer_record(const image_writer_t *w, image_record_t *r)
+{
+    memset(r, 0, sizeof(*r));
+    r->block_count = w->nblocks;
+    memcpy(r->blocks, w->blocks, w->nblocks);
+    r->stored_size = w->size;
+}
+
+esp_err_t image_store_writer_read(const image_writer_t *w, uint32_t offset, void *buf,
+                                  uint32_t len)
+{
+    image_record_t r;
+
+    if (w->err != ESP_OK || w->fill) {
+        return ESP_ERR_INVALID_STATE;           /* finish first */
+    }
+    writer_record(w, &r);
+    return image_store_read(&r, offset, buf, len);
+}
+
+void image_store_writer_abort(image_writer_t *w)
+{
+    if (!w) {
+        return;
+    }
+    unreserve(w);
+    writer_lock();
+    open_writer = NULL;
+    writer_unlock();
+    free(w->stage);
+    free(w);
+}
+
+static esp_err_t writer_commit_unlocked(image_writer_t *w, uint16_t replace_id, const char *name,
+                                        uint8_t format, uint8_t sfmt, uint32_t size,
+                                        uint32_t image_crc, uint16_t *id_out)
+{
+    image_record_t rec;
+    uint32_t back = 0;
+    esp_err_t err;
+
+    if (state != STORE_VALID) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (w->err != ESP_OK || w->fill) {
+        return w->err != ESP_OK ? w->err : ESP_ERR_INVALID_STATE;
+    }
+    if (size == 0 || (sfmt != IMG_STORE_RAW && sfmt != IMG_STORE_DEFLATE) ||
+        size > (sfmt == IMG_STORE_RAW ? RF_MAX_IMAGE_SIZE : RF_MAX_LOGICAL_SIZE) ||
+        (sfmt == IMG_STORE_RAW ? w->size != size : w->size > IMG_DEFLATE_MAX(size))) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    int idx = -1;
+    if (replace_id) {
+        if ((idx = find_index(replace_id)) < 0) {
+            return ESP_ERR_NOT_FOUND;
+        }
+    } else {
+        for (int i = 0; i < IMG_MAX_RECORDS && idx < 0; i++) {
+            if (cat->rec[i].status == IMG_FREE) {
+                idx = i;
+            }
+        }
+        if (idx < 0) {
+            return ESP_ERR_NO_MEM;              /* no free record */
+        }
+    }
+    /* What is on the flash is what was written. */
+    writer_record(w, &rec);
+    if ((err = readback_crc(&rec, &back)) != ESP_OK) {
+        return err;
+    }
+    if (back != w->crc) {
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    begin_update();
+    image_record_t *r = &work->rec[idx];
+    if (replace_id) {
+        rec.id = r->id;                         /* same id and place in the order */
+        rec.sequence = r->sequence;
+    } else {
+        new_id(&rec);
+    }
+    rec.status = IMG_VALID;
+    rec.format = (format & IMG_FMT_MASK) |
+                 ((format & IMG_FLAG_READ_WRITE) && image_format_writable(format & IMG_FMT_MASK)
+                  ? IMG_FLAG_READ_WRITE : 0);
+    rec.storage_format = sfmt;
+    rec.original_size = size;
+    rec.crc32 = image_crc;
+    memset(rec.name, 0, sizeof(rec.name));
+    memcpy(rec.name, name, strnlen(name, sizeof(rec.name)));
+    *r = rec;
+    if ((err = commit_work()) != ESP_OK) {
+        return err;
+    }
+    if (id_out) {
+        *id_out = rec.id;
+    }
+    return ESP_OK;
+}
+
+esp_err_t image_store_writer_commit(image_writer_t *w, uint16_t replace_id, const char *name,
+                                    uint8_t format, uint8_t storage_format, uint32_t size,
+                                    uint32_t crc, uint16_t *id_out)
+{
+    writer_lock();
+    esp_err_t err = writer_commit_unlocked(w, replace_id, name, format, storage_format, size,
+                                           crc, id_out);
+    writer_unlock();
+    image_store_writer_abort(w);        /* committed or not: the reservation ends here */
+    return err;
 }
 
 /* ---- Public writers: one at a time -------------------------------------------- */

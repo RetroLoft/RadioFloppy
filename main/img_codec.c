@@ -8,6 +8,7 @@
  * The ROM compressor needs more stack than the HTTP server task has, so it
  * runs in a short-lived task with its own stack (freed afterwards).
  */
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -131,5 +132,201 @@ esp_err_t img_inflate_crc(const uint8_t *src, size_t n, size_t out_len, uint32_t
     free(d);
     free(dict);
     *crc = c;
+    return err;
+}
+
+/* ---- Streaming ------------------------------------------------------------------ */
+
+struct img_deflate_stream {
+    tdefl_compressor *c;
+    img_out_fn out;
+    void *ctx;
+    SemaphoreHandle_t go;       /* caller -> worker: a job (or quit) */
+    SemaphoreHandle_t done;     /* worker -> caller: job finished */
+    const uint8_t *data;
+    size_t len;
+    bool finish;
+    bool quit;
+    bool busy;                  /* a job is with the worker */
+    esp_err_t err;              /* first error */
+    size_t total;
+};
+
+static mz_bool stream_put(const void *buf, int len, void *user)
+{
+    img_deflate_stream_t *s = user;
+    esp_err_t err = s->out(s->ctx, buf, (size_t)len);
+    if (err != ESP_OK) {
+        s->err = err;
+        return MZ_FALSE;
+    }
+    s->total += (size_t)len;
+    return MZ_TRUE;
+}
+
+static void stream_task(void *arg)
+{
+    img_deflate_stream_t *s = arg;
+
+    while (true) {
+        xSemaphoreTake(s->go, portMAX_DELAY);
+        if (s->quit) {
+            break;
+        }
+        if (s->err == ESP_OK) {
+            tdefl_status st = tdefl_compress_buffer(s->c, s->data, s->len,
+                                                    s->finish ? TDEFL_FINISH : TDEFL_NO_FLUSH);
+            if (s->err == ESP_OK &&
+                (st < 0 || st == TDEFL_STATUS_PUT_BUF_FAILED ||
+                 (s->finish && st != TDEFL_STATUS_DONE))) {
+                s->err = ESP_FAIL;
+            }
+        }
+        xSemaphoreGive(s->done);
+    }
+    xSemaphoreGive(s->done);
+    vTaskDelete(NULL);
+}
+
+static void stream_wait(img_deflate_stream_t *s)
+{
+    if (s->busy) {
+        xSemaphoreTake(s->done, portMAX_DELAY);
+        s->busy = false;
+    }
+}
+
+static void stream_free(img_deflate_stream_t *s)
+{
+    if (s->go) {
+        vSemaphoreDelete(s->go);
+    }
+    if (s->done) {
+        vSemaphoreDelete(s->done);
+    }
+    free(s->c);
+    free(s);
+}
+
+esp_err_t img_deflate_open(img_out_fn out, void *ctx, img_deflate_stream_t **sp)
+{
+    img_deflate_stream_t *s = calloc(1, sizeof(*s));
+
+    *sp = NULL;
+    if (!s) {
+        return ESP_ERR_NO_MEM;
+    }
+    s->out = out;
+    s->ctx = ctx;
+    s->c = heap_caps_malloc(sizeof(*s->c), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s->go = xSemaphoreCreateBinary();
+    s->done = xSemaphoreCreateBinary();
+    if (!s->c || !s->go || !s->done ||
+        tdefl_init(s->c, stream_put, s, DEFLATE_FLAGS) != TDEFL_STATUS_OKAY) {
+        stream_free(s);
+        return ESP_ERR_NO_MEM;
+    }
+    /* Core 1 with the HTTP server, away from the floppy ISRs on core 0. */
+    if (xTaskCreatePinnedToCore(stream_task, "deflate", DEFLATE_STACK, s,
+                                uxTaskPriorityGet(NULL), NULL, 1) != pdPASS) {
+        stream_free(s);
+        return ESP_ERR_NO_MEM;
+    }
+    *sp = s;
+    return ESP_OK;
+}
+
+esp_err_t img_deflate_write(img_deflate_stream_t *s, const uint8_t *data, size_t len)
+{
+    stream_wait(s);
+    if (s->err != ESP_OK || len == 0) {
+        return s->err;
+    }
+    s->data = data;
+    s->len = len;
+    s->finish = false;
+    s->busy = true;
+    xSemaphoreGive(s->go);
+    return ESP_OK;
+}
+
+esp_err_t img_deflate_close(img_deflate_stream_t *s, bool abort, size_t *total)
+{
+    stream_wait(s);
+    if (!abort && s->err == ESP_OK) {
+        s->data = NULL;
+        s->len = 0;
+        s->finish = true;
+        s->busy = true;
+        xSemaphoreGive(s->go);
+        stream_wait(s);
+    }
+    s->quit = true;
+    xSemaphoreGive(s->go);
+    xSemaphoreTake(s->done, portMAX_DELAY);    /* the worker has left its loop */
+    esp_err_t err = abort ? ESP_OK : s->err;
+    if (total) {
+        *total = s->total;
+    }
+    stream_free(s);
+    return err;
+}
+
+#define INFLATE_CHUNK   4096
+
+esp_err_t img_inflate_stream(size_t in_len, img_read_fn read, void *rctx, img_out_fn out,
+                             void *octx, size_t *out_total)
+{
+    tinfl_decompressor *d = heap_caps_malloc(sizeof(*d), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *dict = heap_caps_malloc(TINFL_LZ_DICT_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *in = heap_caps_malloc(INFLATE_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t read_ofs = 0, in_pos = 0, in_avail = 0, dict_ofs = 0, total = 0;
+    esp_err_t err = ESP_ERR_INVALID_CRC;
+
+    if (!d || !dict || !in) {
+        err = ESP_ERR_NO_MEM;
+        goto out;
+    }
+    tinfl_init(d);
+    while (true) {
+        if (in_avail == 0 && read_ofs < in_len) {
+            size_t n = in_len - read_ofs < INFLATE_CHUNK ? in_len - read_ofs : INFLATE_CHUNK;
+            if ((err = read(rctx, (uint32_t)read_ofs, in, n)) != ESP_OK) {
+                goto out;
+            }
+            read_ofs += n;
+            in_pos = 0;
+            in_avail = n;
+        }
+        size_t in_size = in_avail;
+        size_t out_size = TINFL_LZ_DICT_SIZE - dict_ofs;
+        tinfl_status st = tinfl_decompress(d, in + in_pos, &in_size, dict, dict + dict_ofs,
+                                           &out_size,
+                                           read_ofs < in_len ? TINFL_FLAG_HAS_MORE_INPUT : 0);
+        in_pos += in_size;
+        in_avail -= in_size;
+        if (out_size) {
+            if ((err = out(octx, dict + dict_ofs, out_size)) != ESP_OK) {
+                goto out;
+            }
+            total += out_size;
+        }
+        dict_ofs = (dict_ofs + out_size) & (TINFL_LZ_DICT_SIZE - 1);
+        if (st == TINFL_STATUS_DONE) {
+            err = ESP_OK;
+            break;
+        }
+        if (st < 0 || (st == TINFL_STATUS_NEEDS_MORE_INPUT && in_avail == 0 && read_ofs >= in_len)) {
+            err = ESP_ERR_INVALID_CRC;          /* damaged or cut short */
+            break;
+        }
+    }
+out:
+    free(d);
+    free(dict);
+    free(in);
+    if (out_total) {
+        *out_total = total;
+    }
     return err;
 }

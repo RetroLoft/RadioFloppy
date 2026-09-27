@@ -2,6 +2,7 @@
  * HFE disk images. See hfe.h.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hfe.h"
@@ -43,6 +44,7 @@ const char *hfe_result_name(hfe_result_t r)
     case HFE_BAD_HEADER:    return "invalid header";
     case HFE_UNSUPPORTED:   return "not supported for this drive";
     case HFE_BAD_TRACKS:    return "invalid track table";
+    case HFE_BAD_LAYOUT:    return "track layout not supported";
     case HFE_BAD_OPCODE:    return "invalid HFEv3 opcode";
     default:                return "too large";
     }
@@ -158,14 +160,18 @@ static hfe_result_t walk(const uint8_t *track, int side, uint32_t len, bool v3,
     return HFE_OK;
 }
 
-/* Header and table checks shared by hfe_check and hfe_decode_track. */
+
+/* ---- Header ------------------------------------------------------------------ */
+
+bool hfe_signature(const uint8_t *data, uint32_t size)
+{
+    return size >= 8 && (memcmp(data, "HXCPICFE", 8) == 0 || memcmp(data, "HXCHFEV3", 8) == 0);
+}
+
+/* The 512-byte header of a file of `size` bytes. */
 static hfe_result_t header(const uint8_t *data, uint32_t size, hfe_info_t *info)
 {
     memset(info, 0, sizeof(*info));
-    if (size < HDR_SIZE) {
-        snprintf(info->detail, sizeof(info->detail), "file too small for an HFE header");
-        return HFE_NOT_HFE;
-    }
     bool v1 = memcmp(data, "HXCPICFE", 8) == 0;
     bool v3 = memcmp(data, "HXCHFEV3", 8) == 0;
     uint8_t revision = data[8];
@@ -178,7 +184,7 @@ static hfe_result_t header(const uint8_t *data, uint32_t size, hfe_info_t *info)
                  "HFEv2 (HXCPICFE revision 1) is not supported; convert it to HFEv1 or HFEv3");
         return HFE_V2;
     }
-    if ((v1 && revision != 0) || (v3 && revision != 0)) {
+    if (revision != 0) {
         snprintf(info->detail, sizeof(info->detail), "unknown HFE revision %u", revision);
         return HFE_BAD_HEADER;
     }
@@ -229,100 +235,11 @@ static hfe_result_t header(const uint8_t *data, uint32_t size, hfe_info_t *info)
     return HFE_OK;
 }
 
-/* Track data of cylinder cyl: pointer and length of one side; bounds checked. */
-static hfe_result_t track_ptr(const uint8_t *data, uint32_t size, const hfe_info_t *info,
-                              int cyl, const uint8_t **track, uint32_t *len)
+/* ---- Rotation to the INDEX opcode ---------------------------------------------- */
+
+/* Cells: in place, by reversal (rev(0,k), rev(k,n), rev(0,n)). */
+static void rotate_cells(uint8_t *out, uint32_t k, uint32_t n)
 {
-    const uint8_t *e = data + info->lut_block * BLOCK + cyl * 4;
-    uint32_t off = (uint32_t)le16(e) * BLOCK;
-    uint32_t both = le16(e + 2);
-    *len = both / 2;
-    uint32_t blocks = (*len + HALF - 1) / HALF;
-    if (both == 0 || off < HDR_SIZE || off + blocks * BLOCK > size) {
-        return HFE_BAD_TRACKS;
-    }
-    *track = data + off;
-    return HFE_OK;
-}
-
-hfe_result_t hfe_check(const uint8_t *data, uint32_t size, uint32_t buffer_bytes,
-                       hfe_info_t *info)
-{
-    hfe_result_t r = header(data, size, info);
-    if (r != HFE_OK) {
-        return r;
-    }
-    uint32_t ns = 500u * 16000u * 2 / info->bitrate / 2;   /* 1/16 ns per cell */
-    static hfe_track_t trk;
-    for (int c = 0; c < info->cylinders; c++) {
-        const uint8_t *track;
-        uint32_t len;
-        if (track_ptr(data, size, info, c, &track, &len) != HFE_OK) {
-            snprintf(info->detail, sizeof(info->detail), "track %d outside the file", c);
-            return HFE_BAD_TRACKS;
-        }
-        for (int s = 0; s < info->sides; s++) {
-            r = walk(track, s, len, info->version == 3, ns, NULL, HFE_MAX_TRACK_CELLS, &trk,
-                     &info->opcodes);
-            if (r != HFE_OK) {
-                snprintf(info->detail, sizeof(info->detail), "track %d side %d: %s", c, s,
-                         hfe_result_name(r));
-                return r;
-            }
-            if (trk.cells < 1000) {
-                snprintf(info->detail, sizeof(info->detail), "track %d side %d has only %lu cells",
-                         c, s, (unsigned long)trk.cells);
-                return HFE_BAD_TRACKS;
-            }
-            info->cells_total += trk.cells;
-            info->bytes_needed += (trk.cells + 31) / 32 * 4;    /* 32-bit aligned */
-            if (trk.cells > info->max_cells) {
-                info->max_cells = trk.cells;
-            }
-            info->weak_areas += trk.nweak;
-            info->bitrate_changes += trk.nseg - 1;
-        }
-    }
-    if (info->bytes_needed > buffer_bytes) {
-        snprintf(info->detail, sizeof(info->detail),
-                 "its tracks need %lu KiB of track buffer, %lu KiB available",
-                 (unsigned long)(info->bytes_needed / 1024), (unsigned long)(buffer_bytes / 1024));
-        return HFE_TOO_LARGE;
-    }
-    snprintf(info->detail, sizeof(info->detail), "HFEv%u, %u cylinders, %u side(s), %u kbit/s%s",
-             info->version, info->cylinders, info->sides, info->bitrate,
-             info->opcodes ? ", with opcodes" : "");
-    return HFE_OK;
-}
-
-hfe_result_t hfe_decode_track(const uint8_t *data, uint32_t size, const hfe_info_t *info,
-                              int cyl, int side, uint8_t *out, uint32_t cap_bytes,
-                              hfe_track_t *trk)
-{
-    const uint8_t *track;
-    uint32_t len;
-    uint16_t ops = 0;
-
-    memset(trk, 0, sizeof(*trk));
-    trk->index_cell = -1;
-    if (cyl < 0 || cyl >= info->cylinders || side < 0 || side > 1) {
-        return HFE_BAD_TRACKS;
-    }
-    if (side >= info->sides) {
-        return HFE_OK;                          /* single-sided: no track */
-    }
-    if (track_ptr(data, size, info, cyl, &track, &len) != HFE_OK) {
-        return HFE_BAD_TRACKS;
-    }
-    uint32_t ns = 500u * 16000u * 2 / info->bitrate / 2;
-    hfe_result_t r = walk(track, side, len, info->version == 3, ns, out, cap_bytes * 8, trk, &ops);
-    if (r != HFE_OK || trk->index_cell <= 0) {
-        return r;
-    }
-
-    /* Rotate so the INDEX opcode position becomes cell 0. */
-    uint32_t k = (uint32_t)trk->index_cell, n = trk->cells;
-    /* In-place rotation of a bit array by reversal: rev(0,k), rev(k,n), rev(0,n). */
     #define BIT(i)      ((out[(i) >> 3] >> (7 - ((i) & 7))) & 1)
     #define SETBIT(i, v) (out[(i) >> 3] = (out[(i) >> 3] & ~(0x80 >> ((i) & 7))) | ((v) << (7 - ((i) & 7))))
     uint32_t spans[3][2] = { { 0, k }, { k, n }, { 0, n } };
@@ -335,9 +252,16 @@ hfe_result_t hfe_decode_track(const uint8_t *data, uint32_t size, const hfe_info
     }
     #undef BIT
     #undef SETBIT
-    /* Timing segments move with the cells: the one in force at old cell k
-     * starts the track; later ones follow; earlier ones come after the wrap. */
-    hfe_segment_t seg[HFE_MAX_SEGMENTS];
+}
+
+/* Segments and weak areas move with the cells; old cell k becomes cell 0. */
+static hfe_result_t rotate_meta(hfe_track_t *trk, uint32_t k)
+{
+    uint32_t n = trk->cells;
+
+    /* The segment in force at old cell k starts the track; later ones
+     * follow; earlier ones come after the wrap. */
+    hfe_segment_t seg[HFE_MAX_SEGMENTS + 1];
     int m = 0, in_force = 0;
     for (int i = 0; i < trk->nseg; i++) {
         if (trk->seg[i].start <= k) {
@@ -348,7 +272,7 @@ hfe_result_t hfe_decode_track(const uint8_t *data, uint32_t size, const hfe_info
     for (int i = in_force + 1; i < trk->nseg; i++) {
         seg[m++] = (hfe_segment_t) { .start = trk->seg[i].start - k, .ns_x16 = trk->seg[i].ns_x16 };
     }
-    for (int i = 0; i <= in_force && m < HFE_MAX_SEGMENTS; i++) {
+    for (int i = 0; i <= in_force; i++) {
         if (trk->seg[i].start + n - k < n) {
             seg[m++] = (hfe_segment_t) { .start = trk->seg[i].start + n - k,
                                          .ns_x16 = trk->seg[i].ns_x16 };
@@ -361,6 +285,9 @@ hfe_result_t hfe_decode_track(const uint8_t *data, uint32_t size, const hfe_info
             continue;
         }
         seg[u++] = seg[i];
+    }
+    if (u > HFE_MAX_SEGMENTS) {
+        return HFE_BAD_OPCODE;
     }
     memcpy(trk->seg, seg, u * sizeof(seg[0]));
     trk->nseg = (uint8_t)u;
@@ -394,4 +321,335 @@ hfe_result_t hfe_decode_track(const uint8_t *data, uint32_t size, const hfe_info
     trk->nweak = (uint8_t)w;
     trk->index_cell = 0;
     return HFE_OK;
+}
+
+/* ---- Packed track buffer --------------------------------------------------- */
+
+static inline uint32_t cell_bytes(uint32_t cells)
+{
+    return (cells + 31) / 32 * 4;               /* 32-bit aligned */
+}
+
+void hfe_pack_init(hfe_pack_t *p, uint8_t *buf, uint32_t cap)
+{
+    p->buf = buf;
+    p->cap = cap;
+    p->used = HFE_TABLE_BYTES;
+    if (buf && cap >= HFE_TABLE_BYTES) {
+        memset(buf, 0, HFE_TABLE_BYTES);        /* every slot: no track */
+    }
+}
+
+void hfe_packed_track(const uint8_t *buf, int cyl, int side, hfe_packed_track_t *t)
+{
+    const hfe_slot_t *s = (const hfe_slot_t *)buf + cyl * 2 + side;
+
+    memset(t, 0, sizeof(*t));
+    if (cyl < 0 || cyl >= HFE_MAX_CYLS || side < 0 || side > 1 || !s->offset) {
+        return;
+    }
+    t->cells = buf + s->offset;
+    t->count = s->cells;
+    t->seg = (const hfe_segment_t *)(buf + s->offset + cell_bytes(s->cells));
+    t->nseg = s->nseg;
+    t->weak = (const hfe_weak_t *)(t->seg + s->nseg);
+    t->nweak = s->nweak;
+}
+
+/*
+ * Decode one side of the cylinder in `region` and pack it. With a buffer
+ * the cells are written in place and it must fit now; counting only,
+ * `used` may pass `cap` (hfe_stream_end reports the total).
+ */
+static hfe_result_t pack_side(hfe_pack_t *p, int cyl, int side, const uint8_t *region,
+                              uint32_t len, bool v3, uint32_t ns, hfe_track_t *trk,
+                              uint16_t *ops)
+{
+    uint32_t at = p->used;
+    uint8_t *out = p->buf ? p->buf + at : NULL;
+    uint32_t cap_cells = HFE_MAX_TRACK_CELLS;
+    if (out) {
+        uint32_t room = p->cap > at ? p->cap - at : 0;
+        if (room / 4 * 32 < cap_cells) {
+            cap_cells = room / 4 * 32;
+        }
+    }
+    hfe_result_t r = walk(region, side, len, v3, ns, out, cap_cells, trk, ops);
+    if (r != HFE_OK) {
+        return r;
+    }
+    if (trk->index_cell > 0) {
+        if (out) {
+            rotate_cells(out, (uint32_t)trk->index_cell, trk->cells);
+        }
+        if ((r = rotate_meta(trk, (uint32_t)trk->index_cell)) != HFE_OK) {
+            return r;
+        }
+    }
+    uint32_t meta = trk->nseg * sizeof(hfe_segment_t) + trk->nweak * sizeof(hfe_weak_t);
+    uint32_t bytes = cell_bytes(trk->cells) + meta;
+    if (out) {
+        if (at + bytes > p->cap) {
+            return HFE_TOO_LARGE;
+        }
+        uint8_t *m = out + cell_bytes(trk->cells);
+        memcpy(m, trk->seg, trk->nseg * sizeof(hfe_segment_t));
+        memcpy(m + trk->nseg * sizeof(hfe_segment_t), trk->weak, trk->nweak * sizeof(hfe_weak_t));
+        hfe_slot_t *s = (hfe_slot_t *)p->buf + cyl * 2 + side;
+        *s = (hfe_slot_t) { .offset = at, .cells = trk->cells, .nseg = trk->nseg,
+                            .nweak = trk->nweak };
+    }
+    p->used = at + bytes;
+    return HFE_OK;
+}
+
+/* ---- Streaming reader -------------------------------------------------------- */
+
+enum { P_HEADER, P_TABLE, P_TRACK, P_TAIL };
+
+/* Track data of cylinder c from the table: file offset, bytes per side, region bytes. */
+static void table_entry(const hfe_stream_t *s, int c, uint32_t *off, uint32_t *len,
+                        uint32_t *region)
+{
+    const uint8_t *e = s->lut + c * 4;
+    *off = (uint32_t)le16(e) * BLOCK;
+    *len = le16(e + 2) / 2;
+    *region = (*len + HALF - 1) / HALF * BLOCK;
+}
+
+static hfe_result_t fail(hfe_stream_t *s, hfe_result_t r)
+{
+    s->result = r;
+    return r;
+}
+
+void hfe_stream_init(hfe_stream_t *s, uint32_t file_size, uint8_t *region, hfe_pack_t *pack)
+{
+    memset(s, 0, sizeof(*s));
+    s->file_size = file_size;
+    s->region = region;
+    s->pack = pack;
+    s->phase = P_HEADER;
+    s->want = HDR_SIZE;
+    if (file_size < HDR_SIZE) {
+        snprintf(s->info.detail, sizeof(s->info.detail), "file too small for an HFE header");
+        s->result = HFE_NOT_HFE;
+    }
+}
+
+/* The track table is complete: check every entry before any track data. */
+static hfe_result_t check_table(hfe_stream_t *s)
+{
+    hfe_info_t *info = &s->info;
+    uint32_t table_end = ((uint32_t)info->lut_block * BLOCK + info->cylinders * 4u + BLOCK - 1) /
+                         BLOCK * BLOCK;
+    uint32_t prev_end = table_end;
+
+    for (int c = 0; c < info->cylinders; c++) {
+        uint32_t off, len, region;
+        table_entry(s, c, &off, &len, &region);
+        if (len == 0 || off + region > s->file_size) {
+            snprintf(info->detail, sizeof(info->detail), "track %d outside the file", c);
+            return fail(s, HFE_BAD_TRACKS);
+        }
+        if (off < table_end) {
+            snprintf(info->detail, sizeof(info->detail),
+                     "track layout not supported: track %d lies before the end of the track "
+                     "table (the tracks must follow the table in ascending order)", c);
+            return fail(s, HFE_BAD_LAYOUT);
+        }
+        if (off < prev_end) {
+            snprintf(info->detail, sizeof(info->detail),
+                     "track layout not supported: track %d starts inside or before track %d "
+                     "(the tracks must follow the table in ascending order)", c, c - 1);
+            return fail(s, HFE_BAD_LAYOUT);
+        }
+        prev_end = off + region;
+    }
+    return HFE_OK;
+}
+
+/* The region of s->cyl is complete: decode and pack its sides. */
+static hfe_result_t do_cylinder(hfe_stream_t *s)
+{
+    hfe_info_t *info = &s->info;
+    uint32_t off, len, region;
+    hfe_track_t *trk = &s->trk;
+
+    table_entry(s, s->cyl, &off, &len, &region);
+    for (int side = 0; side < info->sides; side++) {
+        hfe_result_t r = pack_side(s->pack, s->cyl, side, s->region, len, info->version == 3,
+                                   s->ns_x16, trk, &info->opcodes);
+        if (r != HFE_OK) {
+            if (r == HFE_TOO_LARGE) {
+                snprintf(info->detail, sizeof(info->detail),
+                         "track %d side %d does not fit the track buffer", s->cyl, side);
+            } else {
+                snprintf(info->detail, sizeof(info->detail), "track %d side %d: %s", s->cyl, side,
+                         hfe_result_name(r));
+            }
+            return fail(s, r);
+        }
+        if (trk->cells < 1000) {
+            snprintf(info->detail, sizeof(info->detail), "track %d side %d has only %lu cells",
+                     s->cyl, side, (unsigned long)trk->cells);
+            return fail(s, HFE_BAD_TRACKS);
+        }
+        info->cells_total += trk->cells;
+        if (trk->cells > info->max_cells) {
+            info->max_cells = trk->cells;
+        }
+        info->weak_areas += trk->nweak;
+        info->bitrate_changes += trk->nseg - 1;
+    }
+    return HFE_OK;
+}
+
+/* A part (header, table or a cylinder) is complete: act on it, set up the next. */
+static hfe_result_t part_done(hfe_stream_t *s)
+{
+    hfe_info_t *info = &s->info;
+    hfe_result_t r;
+    uint32_t off, len, region;
+
+    switch (s->phase) {
+    case P_HEADER:
+        if ((r = header(s->hdr, s->file_size, info)) != HFE_OK) {
+            return fail(s, r);
+        }
+        s->ns_x16 = 500u * 16000u / info->bitrate;     /* 1/16 ns per cell */
+        s->phase = P_TABLE;
+        s->want = info->cylinders * 4u;
+        break;
+    case P_TABLE:
+        if ((r = check_table(s)) != HFE_OK) {
+            return r;
+        }
+        s->phase = P_TRACK;
+        s->cyl = 0;
+        table_entry(s, 0, &off, &len, &region);
+        s->want = region;
+        break;
+    case P_TRACK:
+        if ((r = do_cylinder(s)) != HFE_OK) {
+            return r;
+        }
+        if (++s->cyl == info->cylinders) {
+            s->phase = P_TAIL;
+            s->want = 0;
+        } else {
+            table_entry(s, s->cyl, &off, &len, &region);
+            s->want = region;
+        }
+        break;
+    }
+    s->have = 0;
+    return HFE_OK;
+}
+
+/* File offset where the current part starts. */
+static uint32_t part_start(const hfe_stream_t *s)
+{
+    uint32_t off, len, region;
+
+    switch (s->phase) {
+    case P_HEADER:
+        return 0;
+    case P_TABLE:
+        return (uint32_t)s->info.lut_block * BLOCK;
+    case P_TRACK:
+        table_entry(s, s->cyl, &off, &len, &region);
+        return off;
+    default:
+        return s->file_size;
+    }
+}
+
+hfe_result_t hfe_stream_feed(hfe_stream_t *s, const uint8_t *data, uint32_t len)
+{
+    if (s->result != HFE_OK) {
+        return s->result;
+    }
+    if (len > s->file_size - s->pos) {
+        snprintf(s->info.detail, sizeof(s->info.detail), "more data than the %lu bytes announced",
+                 (unsigned long)s->file_size);
+        return fail(s, HFE_BAD_TRACKS);
+    }
+    while (len) {
+        if (s->phase == P_TAIL) {
+            s->pos += len;                      /* after the last track: ignored */
+            return HFE_OK;
+        }
+        uint32_t start = part_start(s);
+        if (s->pos < start) {
+            uint32_t n = start - s->pos < len ? start - s->pos : len;
+            s->pos += n;                        /* between parts: skipped */
+            data += n;
+            len -= n;
+            continue;
+        }
+        uint8_t *dst = s->phase == P_HEADER ? s->hdr : s->phase == P_TABLE ? s->lut : s->region;
+        uint32_t n = s->want - s->have < len ? s->want - s->have : len;
+        memcpy(dst + s->have, data, n);
+        s->have += n;
+        s->pos += n;
+        data += n;
+        len -= n;
+        if (s->have == s->want) {
+            hfe_result_t r = part_done(s);
+            if (r != HFE_OK) {
+                return r;
+            }
+        }
+    }
+    return HFE_OK;
+}
+
+hfe_result_t hfe_stream_end(hfe_stream_t *s)
+{
+    hfe_info_t *info = &s->info;
+
+    if (s->result != HFE_OK) {
+        return s->result;
+    }
+    if (s->pos != s->file_size || s->phase != P_TAIL) {
+        snprintf(info->detail, sizeof(info->detail), "file incomplete: %lu of %lu bytes",
+                 (unsigned long)s->pos, (unsigned long)s->file_size);
+        return fail(s, HFE_BAD_TRACKS);
+    }
+    info->bytes_needed = s->pack->used;
+    if (info->bytes_needed > s->pack->cap) {
+        snprintf(info->detail, sizeof(info->detail),
+                 "its tracks need %lu KiB of track buffer, %lu KiB available",
+                 (unsigned long)(info->bytes_needed / 1024), (unsigned long)(s->pack->cap / 1024));
+        return fail(s, HFE_TOO_LARGE);
+    }
+    snprintf(info->detail, sizeof(info->detail), "HFEv%u, %u cylinders, %u side(s), %u kbit/s%s",
+             info->version, info->cylinders, info->sides, info->bitrate,
+             info->opcodes ? ", with opcodes" : "");
+    return HFE_OK;
+}
+
+hfe_result_t hfe_check(const uint8_t *data, uint32_t size, uint32_t buffer_bytes,
+                       hfe_info_t *info)
+{
+    hfe_pack_t pack;
+    hfe_stream_t *s = malloc(sizeof(*s));
+    uint8_t *region = malloc(HFE_REGION_MAX);
+
+    if (!s || !region) {
+        free(s);
+        free(region);
+        memset(info, 0, sizeof(*info));
+        snprintf(info->detail, sizeof(info->detail), "no memory to check the file");
+        return HFE_TOO_LARGE;
+    }
+    hfe_pack_init(&pack, NULL, buffer_bytes);
+    hfe_stream_init(s, size, region, &pack);
+    hfe_stream_feed(s, data, size);
+    hfe_result_t r = hfe_stream_end(s);
+    *info = s->info;
+    free(region);
+    free(s);
+    return r;
 }
