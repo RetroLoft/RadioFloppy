@@ -84,10 +84,10 @@ Image record (96 bytes):
 | 2      | u16       | sequence       | Display order; changing it never moves data                 |
 | 4      | u8        | status         | `0xFF` unused record, `0x01` valid, `0x02` incomplete       |
 | 5      | u8        | format         | bits 0–5: image format as recognised from the contents: `0x01` ST (the only one supported); reserved `0x02` MSA, `0x03` STX, `0x04` IPF, `0x05` HFE, `0x06` ADF, `0x07` IMG. Bit 7: write setting, 1 = READ_WRITE, 0 = READ_ONLY (default; records from before this setting read as READ_ONLY). Bit 6: reserved, 0 |
-| 6      | u8        | storage_format | `0x00` = RAW (the only one for now; reserved for compression) |
+| 6      | u8        | storage_format | `0x00` RAW (the image itself), `0x01` DEFLATE (raw deflate, RFC 1951; read-only images only) |
 | 7      | u8        | block_count    | Blocks used (0 when incomplete)                             |
 | 8      | u32       | original_size  | Image size in bytes                                         |
-| 12     | u32       | stored_size    | Bytes in the blocks (RAW: = original_size)                  |
+| 12     | u32       | stored_size    | Bytes in the blocks (RAW: = original_size; DEFLATE: compressed size, ≤ original_size) |
 | 16     | u32       | crc32          | CRC-32 (IEEE, as zlib `crc32()`) of the image               |
 | 20     | u8[24]    | blocks         | Block numbers in image byte order (unused entries 0)        |
 | 44     | char[52]  | name           | Title, NUL terminated when shorter than 52 characters       |
@@ -104,9 +104,10 @@ are right, the geometry in the header equals the detected one, and every
 record is consistent:
 
 - status valid or incomplete (or unused); ids unique and not 0;
-- valid: `1 ≤ original_size ≤ 1.5 MiB`, `storage_format` RAW,
-  `stored_size == original_size`, `block_count` = the blocks that size
-  needs, at most 24 and at most the blocks of 1.5 MiB at this block size;
+- valid: `1 ≤ original_size ≤ 1.5 MiB`; RAW with `stored_size ==
+  original_size`, or DEFLATE with `1 ≤ stored_size ≤ original_size`;
+  `block_count` = the blocks `stored_size` needs, at most 24 and at most
+  the blocks of 1.5 MiB at this block size;
 - every block number in 1…`data_blocks`, and no block used twice (across
   all valid records);
 - incomplete: `block_count` 0.
@@ -142,6 +143,15 @@ as a disk.
 **Order:** the image moves to a position and all sequences are renumbered
 1…n (catalog update only).
 
+**Compression** (setting *Compress new images*, off by default): a new
+read-only image is deflated (ROM miniz), inflated again and CRC-checked
+before anything is stored; only when that succeeds and saves space is it
+stored DEFLATE, else RAW. `crc32` is always that of the image itself; a
+load reads the stored bytes, inflates them and checks the CRC. Images
+already stored are never converted. A DEFLATE image that is set to
+READ_WRITE is first unpacked to RAW copy-on-write (free blocks, read back,
+one catalog update), because written sectors are saved block by block.
+
 **Sectors written by the computer** (`image_store_commit_blocks`): every
 changed block of the image is written to a *free* block and read back;
 then the whole image (unchanged blocks from the flash plus the new ones)
@@ -174,7 +184,7 @@ wins. Until anything is saved, the firmware uses its menuconfig defaults.
 | Offset | Type     | Field          | Meaning                                         |
 | ------ | -------- | -------------- | ----------------------------------------------- |
 | 0      | u32      | magic          | `0x54534652` ("RFST")                           |
-| 4      | u16      | version        | 4 (older versions are still read: 3 = 152 bytes without machine → Atari; 2 = also without buzzer_off/last_image_id, those bytes 0; 1 = 148 bytes, read as DS1) |
+| 4      | u16      | version        | 5 (older versions are still read: 4 = without compress, that byte 0; 3 = 152 bytes without machine → Atari; 2 = also without buzzer_off/last_image_id, those bytes 0; 1 = 148 bytes, read as DS1) |
 | 6      | u16      | size           | record size in bytes (156)                      |
 | 8      | u32      | generation     | +1 on every save                                |
 | 12     | u32      | crc32          | CRC-32 over the record with this field = 0      |
@@ -186,7 +196,8 @@ wins. Until anything is saved, the firmware uses its menuconfig defaults.
 | 149    | u8       | buzzer_off     | 0 = buzzer on (default), 1 = off                |
 | 150    | u16      | last_image_id  | Image active at power-off (0 = none); written 5 s after the last disk change, only when it differs |
 | 152    | u8       | machine        | 0 = Atari 16-bit (default), 1 = Commodore Amiga, 2 = IBM PC / DOS (only 0 supported yet) |
-| 153    | 3        | padding        | 0                                               |
+| 153    | u8       | compress       | 1 = store new read-only images compressed (default 0) |
+| 154    | 2        | padding        | 0                                               |
 | 4092   | u32      | commit         | `0x21544D43` ("CMT!"), written last             |
 
 The WiFi password is stored in plain text: anyone with the board in hand can

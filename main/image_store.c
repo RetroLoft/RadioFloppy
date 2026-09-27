@@ -21,6 +21,7 @@
 
 #include "ext_flash.h"
 #include "image_store.h"
+#include "img_codec.h"
 
 #ifdef IMAGE_STORE_NO_LOCK              /* host tests: single threaded */
 #define store_lock()
@@ -131,8 +132,11 @@ static bool catalog_consistent(const catalog_t *c)
             }
             continue;
         }
+        bool raw = r->storage_format == IMG_STORE_RAW;
         if (r->original_size == 0 || r->original_size > RF_MAX_IMAGE_SIZE ||
-            r->storage_format != IMG_STORE_RAW || r->stored_size != r->original_size ||
+            (!raw && r->storage_format != IMG_STORE_DEFLATE) ||
+            (raw ? r->stored_size != r->original_size
+                 : r->stored_size == 0 || r->stored_size > r->original_size) ||
             r->block_count == 0 || r->block_count > RF_MAX_BLOCKS_PER_IMAGE ||
             r->block_count > geo.max_blocks ||
             r->block_count != rf_blocks_for(&geo, r->stored_size)) {
@@ -581,7 +585,20 @@ esp_err_t image_store_load(uint16_t id, uint8_t *buf)
     if (!image_store_get(id, &r) || r.status != IMG_VALID) {
         return ESP_ERR_NOT_FOUND;
     }
-    esp_err_t err = image_store_read(&r, 0, buf, r.original_size);
+    esp_err_t err;
+    if (r.storage_format == IMG_STORE_DEFLATE) {
+        uint8_t *packed = heap_caps_malloc(r.stored_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!packed) {
+            return ESP_ERR_NO_MEM;
+        }
+        err = image_store_read(&r, 0, packed, r.stored_size);
+        if (err == ESP_OK) {
+            err = img_inflate(packed, r.stored_size, buf, r.original_size);
+        }
+        free(packed);
+    } else {
+        err = image_store_read(&r, 0, buf, r.original_size);
+    }
     if (err == ESP_OK && image_store_crc32(0, buf, r.original_size) != r.crc32) {
         err = ESP_ERR_INVALID_CRC;
     }
@@ -608,8 +625,14 @@ static esp_err_t readback_crc(const image_record_t *r, uint32_t *crc_out)
 
 /* ---- Writing ------------------------------------------------------------------ */
 
-static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t format,
-                           const uint8_t *data, uint32_t size, uint16_t *id_out)
+/*
+ * Store an image whose bytes on the flash are stored[stored_size] in
+ * storage format sfmt (RAW: the image itself; DEFLATE: compressed);
+ * size and crc are those of the image itself.
+ */
+static esp_err_t store_unlocked(uint16_t replace_id, const char *name, uint8_t format,
+                                const uint8_t *data, uint32_t stored_size, uint8_t sfmt,
+                                uint32_t size, uint32_t image_crc, uint16_t *id_out)
 {
     image_record_t rec;
     esp_err_t err;
@@ -617,10 +640,10 @@ static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t fo
     if (state != STORE_VALID) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (size == 0 || size > RF_MAX_IMAGE_SIZE) {
+    if (size == 0 || size > RF_MAX_IMAGE_SIZE || stored_size == 0 || stored_size > size) {
         return ESP_ERR_INVALID_SIZE;
     }
-    uint32_t need = rf_blocks_for(&geo, size);
+    uint32_t need = rf_blocks_for(&geo, stored_size);
     if (need > geo.max_blocks) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -665,7 +688,7 @@ static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t fo
      * as the image goes). */
     for (uint32_t i = 0; i < need; i++) {
         uint32_t off = i * geo.block_size;
-        uint32_t n = size - off < geo.block_size ? size - off : geo.block_size;
+        uint32_t n = stored_size - off < geo.block_size ? stored_size - off : geo.block_size;
         uint32_t addr = rf_block_addr(&geo, rec.blocks[i]);
         uint32_t erase = (n + RF_SECTOR_SIZE - 1) / RF_SECTOR_SIZE * RF_SECTOR_SIZE;
         if ((err = ext_flash_erase(addr, erase)) != ESP_OK ||
@@ -674,10 +697,11 @@ static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t fo
         }
     }
 
-    uint32_t crc = image_store_crc32(0, data, size);
+    uint32_t crc = image_store_crc32(0, data, stored_size);    /* of the stored bytes */
     uint32_t back = 0;
     rec.block_count = (uint8_t)need;
-    rec.original_size = rec.stored_size = size;
+    rec.original_size = size;
+    rec.stored_size = stored_size;
     if ((err = readback_crc(&rec, &back)) != ESP_OK) {
         return err;
     }
@@ -719,8 +743,8 @@ static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t fo
     rec.format = (format & IMG_FMT_MASK) |
                  ((format & IMG_FLAG_READ_WRITE) && image_format_writable(format & IMG_FMT_MASK)
                   ? IMG_FLAG_READ_WRITE : 0);
-    rec.storage_format = IMG_STORE_RAW;
-    rec.crc32 = crc;
+    rec.storage_format = sfmt;
+    rec.crc32 = image_crc;
     memset(rec.name, 0, sizeof(rec.name));
     memcpy(rec.name, name, strnlen(name, sizeof(rec.name)));   /* 52 chars: no NUL needed */
     *w = rec;
@@ -731,6 +755,52 @@ static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t fo
         *id_out = rec.id;
     }
     return ESP_OK;
+}
+
+/* Compress data; the result is used only if it is smaller and inflates
+ * back to exactly the image (checked here, before anything is stored). */
+static uint8_t *pack(const uint8_t *data, uint32_t size, uint32_t crc, uint32_t *packed_size)
+{
+    uint8_t *packed = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t n = 0;
+    uint32_t back = 0;
+    const char *why = "no memory";
+
+    if (packed) {
+        n = img_deflate(data, size, packed, size);
+        why = "not smaller";
+        if (n && (img_inflate_crc(packed, n, size, &back) != ESP_OK || back != crc)) {
+            n = 0;                      /* never store what does not come back */
+            why = "check failed";
+        }
+    }
+    if (!n) {
+        printf("Image store: stored uncompressed (%s)\n", why);
+        free(packed);
+        return NULL;
+    }
+    *packed_size = (uint32_t)n;
+    return packed;
+}
+
+static esp_err_t save_unlocked(uint16_t replace_id, const char *name, uint8_t format,
+                               const uint8_t *data, uint32_t size, bool compress,
+                               uint16_t *id_out)
+{
+    if (size == 0 || size > RF_MAX_IMAGE_SIZE) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint32_t crc = image_store_crc32(0, data, size);
+    uint32_t packed_size = 0;
+    /* A disk that may be written stays RAW: written sectors are saved block by block. */
+    uint8_t *packed = compress && !(format & IMG_FLAG_READ_WRITE) ?
+                      pack(data, size, crc, &packed_size) : NULL;
+    esp_err_t err = packed ?
+        store_unlocked(replace_id, name, format, packed, packed_size, IMG_STORE_DEFLATE, size,
+                       crc, id_out) :
+        store_unlocked(replace_id, name, format, data, size, IMG_STORE_RAW, size, crc, id_out);
+    free(packed);
+    return err;
 }
 
 static esp_err_t delete_unlocked(uint16_t id)
@@ -816,6 +886,71 @@ const char *image_format_name(uint8_t format)
     return "unknown";
 }
 
+/*
+ * A compressed image becomes RAW (to be written): the image goes to free
+ * blocks, is read back, and one catalog update switches blocks, storage
+ * format and the new format byte. The compressed version stays valid
+ * until then.
+ */
+static esp_err_t unpack_unlocked(int idx, uint8_t new_format)
+{
+    static uint8_t check[1024];
+    image_record_t rec = cat->rec[idx];
+    uint8_t used[256];
+    esp_err_t err;
+
+    uint32_t size = rec.original_size;
+    uint32_t need = rf_blocks_for(&geo, size);
+    uint8_t *img = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!img) {
+        return ESP_ERR_NO_MEM;
+    }
+    if ((err = image_store_load(rec.id, img)) != ESP_OK) {
+        free(img);
+        return err;
+    }
+    used_map(cat, -1, used);
+    memset(rec.blocks, 0, sizeof(rec.blocks));
+    uint32_t n = 0;
+    for (int b = 1; b <= geo.data_blocks && n < need; b++) {
+        if (!used[b]) {
+            rec.blocks[n++] = (uint8_t)b;
+        }
+    }
+    if (n < need) {
+        free(img);
+        return ESP_ERR_NO_MEM;
+    }
+    for (uint32_t i = 0; i < need && err == ESP_OK; i++) {
+        uint32_t off = i * geo.block_size;
+        uint32_t len = size - off < geo.block_size ? size - off : geo.block_size;
+        uint32_t addr = rf_block_addr(&geo, rec.blocks[i]);
+        uint32_t erase = (len + RF_SECTOR_SIZE - 1) / RF_SECTOR_SIZE * RF_SECTOR_SIZE;
+        if ((err = ext_flash_erase(addr, erase)) == ESP_OK) {
+            err = ext_flash_write(addr, img + off, len);
+        }
+        for (uint32_t o = 0; err == ESP_OK && o < len; o += sizeof(check)) {
+            uint32_t k = len - o < sizeof(check) ? len - o : sizeof(check);
+            if ((err = ext_flash_read(addr + o, check, k)) == ESP_OK &&
+                memcmp(check, img + off + o, k) != 0) {
+                err = ESP_ERR_INVALID_CRC;
+            }
+        }
+    }
+    free(img);
+    if (err != ESP_OK) {
+        return err;
+    }
+    begin_update();
+    image_record_t *w = &work->rec[idx];
+    w->storage_format = IMG_STORE_RAW;
+    w->stored_size = size;
+    w->block_count = (uint8_t)need;
+    memcpy(w->blocks, rec.blocks, sizeof(w->blocks));
+    w->format = new_format;
+    return commit_work();
+}
+
 static esp_err_t set_read_write_unlocked(uint16_t id, bool read_write)
 {
     if (state != STORE_VALID) {
@@ -832,8 +967,12 @@ static esp_err_t set_read_write_unlocked(uint16_t id, bool read_write)
     if (image_read_write(r) == read_write) {
         return ESP_OK;                  /* unchanged: no flash write */
     }
+    uint8_t format = image_format(r) | (read_write ? IMG_FLAG_READ_WRITE : 0);
+    if (read_write && r->storage_format != IMG_STORE_RAW) {
+        return unpack_unlocked(idx, format);
+    }
     begin_update();
-    work->rec[idx].format = image_format(r) | (read_write ? IMG_FLAG_READ_WRITE : 0);
+    work->rec[idx].format = format;
     return commit_work();
 }
 
@@ -855,6 +994,9 @@ static esp_err_t commit_blocks_unlocked(uint16_t id, uint32_t mask, const uint8_
         return ESP_ERR_NOT_FOUND;
     }
     image_record_t rec = cat->rec[idx];
+    if (rec.storage_format != IMG_STORE_RAW) {
+        return ESP_ERR_NOT_SUPPORTED;   /* writable disks are always stored RAW */
+    }
     if (mask == 0) {
         return ESP_OK;
     }
@@ -933,8 +1075,14 @@ esp_err_t image_store_format(void)
 esp_err_t image_store_save(uint16_t replace_id, const char *name, uint8_t format,
                            const uint8_t *data, uint32_t size, uint16_t *id_out)
 {
+    return image_store_save_ex(replace_id, name, format, data, size, false, id_out);
+}
+
+esp_err_t image_store_save_ex(uint16_t replace_id, const char *name, uint8_t format,
+                              const uint8_t *data, uint32_t size, bool compress, uint16_t *id_out)
+{
     writer_lock();
-    esp_err_t err = save_unlocked(replace_id, name, format, data, size, id_out);
+    esp_err_t err = save_unlocked(replace_id, name, format, data, size, compress, id_out);
     writer_unlock();
     return err;
 }

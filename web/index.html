@@ -168,8 +168,8 @@
     <div id="storage" class="small" style="margin-bottom:12px"></div>
     <div id="storefix" class="banner err hidden" style="margin-bottom:12px"></div>
     <p class="small muted" style="margin:0 0 12px">An image with <em>Write protection</em> off can be
-      written by the Atari (.ST only; new). Written sectors are saved about 2 seconds after the last
-      write; wait for “Saved” before switching the power off.</p>
+      written by the Atari (.ST only; new). Written sectors are saved when the drive motor has been off
+      for 2 seconds; wait for “all changes saved” before switching the power off.</p>
     <ul id="images" class="slots"><li class="free">Loading…</li></ul>
     <input type="file" id="replacefile" accept=".st,.ST" class="hidden" aria-hidden="true" tabindex="-1">
   </section>
@@ -250,6 +250,14 @@
         <span id="driveinfo" class="small muted"></span></div>
       <p class="small muted" style="margin:0">Takes effect after a restart.</p>
     </form>
+  </section>
+
+  <section aria-labelledby="h-store">
+    <h2 id="h-store">Storage</h2>
+    <label class="opt"><input type="checkbox" id="compress">
+      <span><strong>Compress new images</strong> <span class="muted small">— images added from now on are
+      stored compressed when that saves space (typically 30–60%); loading takes a moment longer. Images
+      already stored stay as they are. Disks that can be written are never compressed.</span></span></label>
   </section>
 
   <section aria-labelledby="h-fw">
@@ -503,7 +511,9 @@ function renderImages() {
       (im.active ? ' <span class="badge active">Active</span>' : "") +
       (valid && im.access === "READ_WRITE" ? ' <span class="badge temp">Read-write</span>' : "") +
       '<br><span class="small muted">' +
-      (valid ? kib(im.size) : '<span style="color:var(--err)">incomplete — replacing failed; replace or delete it</span>') +
+      (valid ? kib(im.size) + (im.storage_format === "deflate"
+                 ? " · stored compressed: " + kib(im.stored_size) + " (" + Math.round(100 * im.stored_size / im.size) + "%)" : "")
+             : '<span style="color:var(--err)">incomplete — replacing failed; replace or delete it</span>') +
       "</span></span>";
     if (valid) {
       // Write protection switch: on = READ_ONLY, off = READ_WRITE (metadata only for now).
@@ -928,6 +938,7 @@ function renderSettings(d) {
     ? "Now answering as " + (d.drive_select_active === "DS0" ? "A:" : "B:") + " until the restart."
     : "";
   $("buzzer").checked = !!d.buzzer;
+  $("compress").checked = !!d.compression;
   const sel = $("machine");
   if (!sel.options.length) {
     for (const m of d.machines) {
@@ -943,6 +954,7 @@ function renderSettings(d) {
   $("hostsave").disabled = locked;
   $("connsave").disabled = locked;
   $("buzzer").disabled = locked;
+  $("compress").disabled = locked;
   $("restart").disabled = locked;
 }
 
@@ -1002,6 +1014,24 @@ $("connform").addEventListener("submit", async (ev) => {
     showSetMsg("err", "RadioFloppy cannot be reached.");
   }
   $("connsave").disabled = false;
+});
+
+$("compress").addEventListener("change", async () => {
+  const on = $("compress").checked;
+  showSetMsg("", "");
+  try {
+    const r = await api("PUT", "/api/v1/settings", { compression: on }, 12000, true);
+    if (r.status === 200) {
+      renderSettings(r.data);
+      showSetMsg("ok", "New images are " + (on ? "stored compressed." : "stored uncompressed."));
+    } else {
+      $("compress").checked = !on;
+      showSetMsg("err", errorText(r.data, r.status).text);
+    }
+  } catch (e) {
+    $("compress").checked = !on;
+    showSetMsg("err", "RadioFloppy cannot be reached.");
+  }
 });
 
 $("buzzer").addEventListener("change", async () => {

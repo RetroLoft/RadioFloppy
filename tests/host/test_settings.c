@@ -234,6 +234,35 @@ static void test_machine(void)
     CHECK(settings_stored() && r.machine == MACHINE_ATARI && r.last_image_id == 5);
 }
 
+static void test_compress(void)
+{
+    settings_t s, r;
+
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    CHECK(s.compress == 0);                     /* default off */
+    s.compress = 1;
+    CHECK(settings_save(&s) == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(r.compress == 1);
+    s.compress = 2;
+    CHECK(settings_save(&s) == ESP_ERR_INVALID_ARG);
+
+    /* A version 4 record (same size, the byte was 0 padding): off. */
+    uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
+                                 ? RF_SETTINGS_A : RF_SETTINGS_B);
+    rec[4] = 4; rec[5] = 0;
+    rec[153] = 0;
+    memset(rec + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, rec, 156);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && r.compress == 0);
+}
+
 int main(void)
 {
     test_defaults();
@@ -243,6 +272,7 @@ int main(void)
     test_drive_select();
     test_buzzer_and_last_image();
     test_machine();
+    test_compress();
     printf(failures ? "FAILED (%d)\n" : "settings OK\n", failures);
     return failures != 0;
 }

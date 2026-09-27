@@ -140,6 +140,7 @@ static esp_err_t image_locked(uint16_t id, switch_error_t *e)
         info.cylinders = st.cylinders;
         info.heads = st.heads;
         info.sectors = st.sectors;
+        info.keep_sectors = image_read_write(&r) && image_format(&r) == IMG_FMT_ST;
         err = activate_locked(raw, &info, e);
     }
     free(raw);

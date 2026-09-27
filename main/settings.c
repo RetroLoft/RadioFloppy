@@ -36,8 +36,8 @@ static SemaphoreHandle_t mutex;
 #endif
 
 #define SET_MAGIC       0x54534652  /* "RFST" little endian */
-#define SET_VERSION     4           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
-                                       4: + machine */
+#define SET_VERSION     5           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
+                                       4: + machine, 5: + compress (was 0 padding in 4) */
 #define SET_V1_SIZE     148         /* version 1 records are still read */
 #define SET_COMMIT      0x21544d43  /* "CMT!", last word of the sector */
 #define COMMIT_OFFSET   (RF_SECTOR_SIZE - 4)
@@ -56,6 +56,7 @@ typedef struct {
     uint8_t buzzer_off;         /* since version 3 (was 0 padding in 2): 0 = on */
     uint16_t last_image_id;     /* since version 3 (was 0 padding in 2): 0 = none */
     uint8_t machine;            /* since version 4: machine_t */
+    uint8_t compress;           /* since version 5 (was 0 padding in 4) */
 } record_t;
 
 _Static_assert(sizeof(record_t) == 156, "settings record layout");
@@ -87,7 +88,8 @@ static size_t version_size(uint16_t version)
     case 1:  return SET_V1_SIZE;        /* no drive_select */
     case 2:                             /* + drive_select (+ 3 bytes 0) */
     case 3:  return 152;                /* + buzzer_off, last_image_id */
-    case 4:  return sizeof(record_t);   /* + machine */
+    case 4:                             /* + machine (+ 3 bytes 0) */
+    case 5:  return sizeof(record_t);   /* + compress */
     default: return 0;
     }
 }
@@ -115,12 +117,15 @@ static bool read_copy(int copy, record_t *r)
     if (r->version < 4) {
         r->machine = MACHINE_ATARI;
     }
+    if (r->version < 5) {
+        r->compress = 0;
+    }
     return r->magic == SET_MAGIC && commit == SET_COMMIT &&
            terminated(r->hostname, sizeof(r->hostname)) &&
            terminated(r->wifi_ssid, sizeof(r->wifi_ssid)) &&
            terminated(r->wifi_pass, sizeof(r->wifi_pass)) &&
            r->wifi_security < WIFI_SEC_COUNT && r->drive_select <= 1 && r->buzzer_off <= 1 &&
-           r->machine < MACHINE_COUNT;
+           r->machine < MACHINE_COUNT && r->compress <= 1;
 }
 
 static void defaults(settings_t *s)
@@ -136,6 +141,7 @@ static void defaults(settings_t *s)
     s->buzzer = 1;
     s->last_image_id = 0;
     s->machine = MACHINE_ATARI;
+    s->compress = 0;
 }
 
 esp_err_t settings_init(void)
@@ -169,6 +175,7 @@ esp_err_t settings_init(void)
     current.buzzer = !r[best].buzzer_off;
     current.last_image_id = r[best].last_image_id;
     current.machine = r[best].machine;
+    current.compress = r[best].compress;
     generation = r[best].generation;
     current_copy = best;
     return ESP_OK;
@@ -219,7 +226,7 @@ static esp_err_t save_locked(const settings_t *s)
         !terminated(s->wifi_ssid, sizeof(s->wifi_ssid)) ||
         !terminated(s->wifi_pass, sizeof(s->wifi_pass)) ||
         !settings_hostname_valid(s->hostname) || s->wifi_security >= WIFI_SEC_COUNT ||
-        s->drive_select > 1 || s->buzzer > 1 || s->machine >= MACHINE_COUNT ||
+        s->drive_select > 1 || s->buzzer > 1 || s->machine >= MACHINE_COUNT || s->compress > 1 ||
         (s->wifi_ssid[0] && !settings_password_valid(s->wifi_pass, s->wifi_security))) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -238,6 +245,7 @@ static esp_err_t save_locked(const settings_t *s)
     r.buzzer_off = !s->buzzer;
     r.last_image_id = s->last_image_id;
     r.machine = s->machine;
+    r.compress = s->compress;
     r.crc32 = record_crc(&r, sizeof(r));
 
     /* Never touch the copy in use. */

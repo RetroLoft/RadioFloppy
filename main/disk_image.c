@@ -320,7 +320,9 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
     printf("Image CRC: OK (%08lx, read in %lld ms)\n", (unsigned long)r.crc32,
            (esp_timer_get_time() - t0) / 1000);
     *info = (disk_info_t) { .source = DISK_SRC_FLASH, .image_id = id,
-                            .size = r.original_size, .crc32 = r.crc32 };
+                            .size = r.original_size, .crc32 = r.crc32,
+                            .keep_sectors = image_read_write(&r) &&
+                                            image_format(&r) == IMG_FMT_ST };
     memcpy(info->name, title, sizeof(info->name));
     *raw = buf;
     return ESP_OK;
@@ -387,7 +389,11 @@ esp_err_t disk_image_init(void)
 
     if (raw) {
         verify_start(raw, &info);
-        active_raw = raw;               /* kept: the start-up disk may be written */
+        if (info.keep_sectors) {
+            active_raw = raw;           /* kept: the start-up disk may be written */
+        } else {
+            free(raw);                  /* read-only: the tracks are enough */
+        }
     }
     return ESP_OK;
 }
@@ -399,7 +405,7 @@ esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info)
     xSemaphoreTake(raw_lock, portMAX_DELAY);
     free(prepared_raw);
     prepared_raw = NULL;
-    if (raw && info->source == DISK_SRC_FLASH) {
+    if (raw && info->source == DISK_SRC_FLASH && info->keep_sectors) {
         prepared_raw = heap_caps_malloc(info->size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (prepared_raw) {
             memcpy(prepared_raw, raw, info->size);
@@ -489,6 +495,35 @@ esp_err_t disk_write_sector(uint32_t gen, int cyl, int head, int sector, const u
         memcpy(track_ptr(track_buf[active_buf], cyl, head), work, layout.cells / 8);
     }
     xSemaphoreGive(raw_lock);
+    return err;
+}
+
+esp_err_t disk_keep_sectors(void)
+{
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    disk_info_t g = active_geo;
+    uint32_t gen = disk_media_gen;
+    bool have = active_raw != NULL;
+    xSemaphoreGive(raw_lock);
+    if (have) {
+        return ESP_OK;
+    }
+    if (g.source != DISK_SRC_FLASH || !g.size) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t *buf = heap_caps_malloc(g.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    /* The library image is what is playing (it has not been written yet). */
+    esp_err_t err = image_store_load(g.image_id, buf);
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    if (err == ESP_OK && gen == disk_media_gen && !active_raw) {
+        active_raw = buf;
+        buf = NULL;
+    }
+    xSemaphoreGive(raw_lock);
+    free(buf);
     return err;
 }
 

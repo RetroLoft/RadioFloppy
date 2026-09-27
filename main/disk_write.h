@@ -11,11 +11,14 @@
  * Apply: the sector goes into the kept image in PSRAM, its track is
  * encoded again (reads return the new data at once), its storage block is
  * marked changed.
- * Save: SAVE_DELAY_MS after the last write the changed blocks are stored
+ * Save: when the MOTOR line has been off for SAVE_DELAY_MS (one save per
+ * disk operation; at the latest a minute after the last write if the
+ * motor keeps running) the changed blocks are stored
  * copy-on-write and switched in with one catalog update
  * (image_store_commit_blocks): after a power cut the image on the flash is
  * the previous or the new saved version, never a mix. Changes not saved
- * yet (at most about SAVE_DELAY_MS plus the save time) are lost then.
+ * yet (those of the running disk operation, plus SAVE_DELAY_MS and the
+ * save time) are lost then.
  *
  * Write protection is released only when all of this holds: machine
  * ATARI, a library .ST image set to READ_WRITE, its sectors kept in PSRAM,
@@ -29,7 +32,7 @@
 
 #include "esp_err.h"
 
-#define SAVE_DELAY_MS   2000    /* quiet time before written sectors are saved */
+#define SAVE_DELAY_MS   2000    /* motor off this long: written sectors are saved */
 
 typedef enum {
     WRITE_READ_ONLY,            /* write-protected (see reason) */

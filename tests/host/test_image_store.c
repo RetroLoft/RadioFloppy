@@ -354,7 +354,7 @@ static void dup_block(image_record_t *r) { r->blocks[0] = 1; }
 static void bad_block(image_record_t *r) { r->blocks[0] = 0; }
 static void too_many(image_record_t *r) { r->block_count = 25; }
 static void size_mismatch(image_record_t *r) { r->stored_size += 1; }
-static void compressed(image_record_t *r) { r->storage_format = 1; }
+static void compressed(image_record_t *r) { r->storage_format = 2; }   /* unknown */
 
 static void test_validation(void)
 {
@@ -513,6 +513,101 @@ static void test_commit_blocks(void)
     free(got);
 }
 
+extern int host_codec_corrupt;
+
+/* A disk-like image: mostly empty sectors, some data (compresses well). */
+static uint8_t *sparse_image(uint32_t size, uint8_t seed)
+{
+    uint8_t *d = calloc(1, size);
+    uint8_t *r = test_image(size / 8, seed);
+    memcpy(d, r, size / 8);
+    free(r);
+    return d;
+}
+
+static void test_compression(void)
+{
+    fresh(16 * MIB);
+    const rf_geometry_t *g = image_store_geometry();
+    uint32_t size = 737280;
+    uint8_t *img = sparse_image(size, 90);
+    uint8_t *got = malloc(size);
+    image_record_t r;
+    uint16_t a = 0;
+
+    /* Compressible: stored DEFLATE, fewer blocks, loads back exactly. */
+    CHECK(image_store_save_ex(0, "Packed", IMG_FMT_ST, img, size, true, &a) == ESP_OK);
+    CHECK(image_store_get(a, &r) && r.storage_format == IMG_STORE_DEFLATE);
+    CHECK(r.original_size == size && r.stored_size < size / 2);
+    CHECK(r.block_count == rf_blocks_for(g, r.stored_size) && r.block_count < 12);
+    CHECK(image_store_load(a, got) == ESP_OK && memcmp(got, img, size) == 0);
+    CHECK(image_store_open(16 * MIB) == STORE_VALID);           /* catalog accepts it */
+    CHECK(image_store_load(a, got) == ESP_OK && memcmp(got, img, size) == 0);
+
+    /* Incompressible: stored RAW. Compression off: RAW. */
+    uint8_t *noise = test_image(size, 91);
+    uint16_t b = 0, c = 0;
+    CHECK(image_store_save_ex(0, "Noise", IMG_FMT_ST, noise, size, true, &b) == ESP_OK);
+    CHECK(image_store_get(b, &r) && r.storage_format == IMG_STORE_RAW && r.stored_size == size);
+    CHECK(image_store_save_ex(0, "Plain", IMG_FMT_ST, img, size, false, &c) == ESP_OK);
+    CHECK(image_store_get(c, &r) && r.storage_format == IMG_STORE_RAW && r.block_count == 12);
+
+    /* A compressed result that does not come back is not used. */
+    uint16_t d = 0;
+    host_codec_corrupt = 1;
+    CHECK(image_store_save_ex(0, "Checked", IMG_FMT_ST, img, size, true, &d) == ESP_OK);
+    host_codec_corrupt = 0;
+    CHECK(image_store_get(d, &r) && r.storage_format == IMG_STORE_RAW);
+    CHECK(image_store_load(d, got) == ESP_OK && memcmp(got, img, size) == 0);
+
+    /* A new writable disk is never compressed. */
+    uint16_t e = 0;
+    CHECK(image_store_save_ex(0, "Blank", IMG_FMT_ST | IMG_FLAG_READ_WRITE, img, size, true, &e) == ESP_OK);
+    CHECK(image_store_get(e, &r) && r.storage_format == IMG_STORE_RAW && image_read_write(&r));
+
+    /* Written sectors cannot go into a compressed image. */
+    CHECK(image_store_commit_blocks(a, 1, img, size, esp_rom_crc32_le(0, img, size)) == ESP_ERR_NOT_SUPPORTED);
+
+    /* READ_WRITE unpacks it to RAW, copy-on-write, in one catalog update. */
+    image_record_t before;
+    CHECK(image_store_get(a, &before));
+    uint32_t gen = image_store_generation();
+    CHECK(image_store_set_read_write(a, true) == ESP_OK);
+    CHECK(image_store_generation() == gen + 1);
+    CHECK(image_store_get(a, &r) && r.storage_format == IMG_STORE_RAW && image_read_write(&r));
+    CHECK(r.stored_size == size && r.block_count == 12 && r.crc32 == before.crc32);
+    CHECK(r.id == before.id && r.sequence == before.sequence && strncmp(r.name, "Packed", 6) == 0);
+    CHECK(image_store_load(a, got) == ESP_OK && memcmp(got, img, size) == 0);
+    CHECK(image_store_set_read_write(a, false) == ESP_OK);      /* back to read-only: stays RAW */
+    CHECK(image_store_get(a, &r) && r.storage_format == IMG_STORE_RAW);
+
+    /* Unpacking needs free blocks for the whole image: else nothing changes. */
+    uint16_t f = 0;
+    CHECK(image_store_save_ex(0, "Packed 2", IMG_FMT_ST, img, size, true, &f) == ESP_OK);
+    fill_until_free(3);
+    gen = image_store_generation();
+    CHECK(image_store_set_read_write(f, true) == ESP_ERR_NO_MEM);
+    CHECK(image_store_generation() == gen);
+    CHECK(image_store_get(f, &r) && r.storage_format == IMG_STORE_DEFLATE && !image_read_write(&r));
+    CHECK(image_store_load(f, got) == ESP_OK && memcmp(got, img, size) == 0);
+
+    /* Power cut while unpacking: the compressed version stays. */
+    fresh(16 * MIB);
+    CHECK(image_store_save_ex(0, "Packed 3", IMG_FMT_ST, img, size, true, &f) == ESP_OK);
+    gen = image_store_generation();
+    mock_fail_writes_after = 5;         /* part of the RAW blocks */
+    CHECK(image_store_set_read_write(f, true) != ESP_OK);
+    mock_fail_writes_after = -1;
+    CHECK(image_store_open(16 * MIB) == STORE_VALID && image_store_generation() == gen);
+    CHECK(image_store_get(f, &r) && r.storage_format == IMG_STORE_DEFLATE);
+    CHECK(image_store_load(f, got) == ESP_OK && memcmp(got, img, size) == 0);
+    CHECK(mock_program_violations == 0 && mock_out_of_range == 0);
+
+    free(img);
+    free(noise);
+    free(got);
+}
+
 static void test_capacity(uint32_t capacity)
 {
     fresh(capacity);
@@ -554,6 +649,7 @@ int main(void)
     printf("catalog validation, old format\n");       test_validation();
     printf("write setting\n");        test_write_setting();
     printf("copy-on-write of written blocks\n");  test_commit_blocks();
+    printf("compression\n");            test_compression();
     printf("32 MiB\n");                 test_capacity(32 * MIB);
     printf("64 MiB\n");                 test_capacity(64 * MIB);
     printf(failures ? "FAILED (%d)\n" : "image store OK\n", failures);

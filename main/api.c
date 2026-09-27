@@ -299,7 +299,8 @@ static cJSON *image_json(const image_record_t *r, const disk_info_t *cur)
         cJSON_AddStringToObject(o, "format", image_format_name(image_format(r)));
         cJSON_AddNumberToObject(o, "size", r->original_size);
         cJSON_AddNumberToObject(o, "stored_size", r->stored_size);
-        cJSON_AddStringToObject(o, "storage_format", "raw");
+        cJSON_AddStringToObject(o, "storage_format",
+                                r->storage_format == IMG_STORE_DEFLATE ? "deflate" : "raw");
         cJSON_AddStringToObject(o, "crc32", crc);
         cJSON_AddNumberToObject(o, "blocks_used", r->block_count);
         cJSON_AddStringToObject(o, "access", image_read_write(r) ? "READ_WRITE" : "READ_ONLY");
@@ -469,7 +470,12 @@ static void process_upload(uint8_t **rawp)
 
     if (up.to_flash) {
         uint16_t id = 0;
-        esp_err_t err = image_store_save(up.replace_id, up.name, IMG_FMT_ST, raw, up.size, &id);
+        settings_t cfg;
+        settings_get(&cfg);
+        int64_t t0 = esp_timer_get_time();
+        esp_err_t err = image_store_save_ex(up.replace_id, up.name, IMG_FMT_ST, raw, up.size,
+                                            cfg.compress, &id);
+        int64_t store_ms = (esp_timer_get_time() - t0) / 1000;
         if (up.replace_id) {
             disk_note_image_changed(up.replace_id);     /* old image gone, also on failure */
         }
@@ -487,9 +493,13 @@ static void process_upload(uint8_t **rawp)
         }
         up.result_id = id;
         info.image_id = id;
-        printf("API: \"%s\" %s image %u (%lu bytes, %lu block(s), CRC32 %08lx)\n", up.name,
-               up.replace_id ? "replaced" : "stored as", id, (unsigned long)up.size,
-               (unsigned long)image_store_blocks_needed(up.size), (unsigned long)up.crc32);
+        image_record_t rec;
+        image_store_get(id, &rec);
+        printf("API: \"%s\" %s image %u (%lu bytes, stored %s %lu bytes = %lu%%, %u block(s), "
+               "CRC32 %08lx, %lld ms)\n", up.name, up.replace_id ? "replaced" : "stored as", id,
+               (unsigned long)up.size, rec.storage_format == IMG_STORE_DEFLATE ? "compressed" : "raw",
+               (unsigned long)rec.stored_size, (unsigned long)(rec.stored_size * 100ull / up.size),
+               rec.block_count, (unsigned long)up.crc32, store_ms);
     }
 
     if (up.activate) {
@@ -662,6 +672,9 @@ static esp_err_t put_image(httpd_req_t *req)
     } else if (err == ESP_ERR_NOT_SUPPORTED) {
         ret = send_error(req, HTTP_422, "FORMAT_NOT_WRITABLE",
                          "this image format does not support writing");
+    } else if (err == ESP_ERR_NO_MEM) {
+        ret = send_error(req, HTTP_507, "NO_SPACE", "not enough free storage to unpack the "
+                         "compressed image for writing");
     } else if (err != ESP_OK || !image_store_get(id, &r)) {
         ret = send_error(req, HTTP_500, "FLASH_ERROR", "catalog update failed");
     } else {
@@ -965,7 +978,11 @@ static esp_err_t post_upload(httpd_req_t *req)
                              "the computer wrote to this disk and the changes are not saved yet");
             goto out;
         }
-        if (!image_store_fits(size, replace_id)) {
+        settings_t cfg;
+        settings_get(&cfg);
+        /* With compression the stored size is known only after compressing:
+         * then the final check is done when storing (507 NO_SPACE). */
+        if (!cfg.compress && !image_store_fits(size, replace_id)) {
             store_usage_t u;
             image_store_usage(&u);
             ret = send_error(req, HTTP_507, "NO_SPACE",
@@ -1130,6 +1147,7 @@ static cJSON *settings_json(void)
     cJSON_AddStringToObject(root, "drive_select", s.drive_select == 0 ? "DS0" : "DS1");
     cJSON_AddStringToObject(root, "drive_select_active", running_ds == 0 ? "DS0" : "DS1");
     cJSON_AddBoolToObject(root, "buzzer", s.buzzer);
+    cJSON_AddBoolToObject(root, "compression", s.compress);
     cJSON_AddStringToObject(root, "machine", machine_profile(s.machine)->id);
     cJSON_AddStringToObject(root, "machine_active", machine_profile(machine_active())->id);
     cJSON_AddBoolToObject(root, "machine_supported", machine_profile(s.machine)->supported);
@@ -1212,6 +1230,14 @@ static esp_err_t put_settings(httpd_req_t *req)
                               "machine: \"ATARI\", \"AMIGA\" or \"DOS\"");
         }
         s.machine = (uint8_t)m;
+    }
+    const cJSON *jc = cJSON_GetObjectItem(body, "compression");
+    if (jc) {
+        if (!cJSON_IsBool(jc)) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_400, "INVALID_REQUEST", "\"compression\" must be true or false");
+        }
+        s.compress = cJSON_IsTrue(jc);
     }
     const cJSON *bz = cJSON_GetObjectItem(body, "buzzer");
     if (bz) {

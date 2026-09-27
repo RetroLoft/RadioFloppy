@@ -38,6 +38,7 @@
 #define WRITE_OFFSET_MIN    100
 #define WRITE_OFFSET_MAX    1200
 #define RETRY_MS            30000       /* retry a failed save */
+#define SAVE_MAX_MS         60000       /* save even if the motor keeps running */
 
 static rmt_channel_handle_t rx_chan;
 static rmt_symbol_word_t *rx_buf;       /* DMA target, internal RAM */
@@ -54,6 +55,7 @@ static volatile int64_t last_write_us;
 static volatile bool save_error;
 static volatile bool saving;
 static int64_t last_try_us;
+static uint32_t keep_failed_gen = UINT32_MAX;   /* disk whose sectors could not be kept */
 
 static const rmt_receive_config_t rx_cfg = {
     .signal_range_min_ns = RX_MIN_NS,
@@ -106,7 +108,12 @@ static const char *protect_reason(void)
         return "format cannot be written";
     }
     if (!disk_writable_data()) {
-        return "not enough memory to keep the sectors";
+        /* Set to READ_WRITE after it was loaded: load its sectors, once per
+         * disk (again after disk_write_refresh()). */
+        if (keep_failed_gen == disk_media_gen || disk_keep_sectors() != ESP_OK) {
+            keep_failed_gen = disk_media_gen;
+            return "not enough memory to keep the sectors";
+        }
     }
     if (image_store_state() != STORE_VALID) {
         return "image storage not usable";
@@ -139,6 +146,7 @@ static void update_protection(void)
 
 void disk_write_refresh(void)
 {
+    keep_failed_gen = UINT32_MAX;       /* e.g. just set to READ_WRITE: try again */
     if (save_task) {
         xTaskNotify(save_task, 1, eSetBits);
     } else {
@@ -344,13 +352,25 @@ static esp_err_t save_now(void)
 
 static void save_task_fn(void *arg)
 {
+    int64_t motor_off_since = 0;        /* 0: motor on */
+
     while (true) {
-        xTaskNotifyWait(0, UINT32_MAX, NULL, pdMS_TO_TICKS(500));
+        xTaskNotifyWait(0, UINT32_MAX, NULL, pdMS_TO_TICKS(100));
         int64_t now = esp_timer_get_time();
         drive_status_t ds;
         drive_peek(&ds);
-        if (disk_dirty() && !save_error && !ds.wgate &&
-            now - last_write_us >= SAVE_DELAY_MS * 1000LL) {
+        if (ds.motor || ds.wgate) {
+            motor_off_since = 0;
+        } else if (!motor_off_since) {
+            motor_off_since = now;
+        }
+        /* One save per disk operation: when the motor has been off for
+         * SAVE_DELAY_MS (TOS switches it off about 2 s after the last
+         * access). Fallback for a drive that keeps running: SAVE_MAX_MS
+         * after the last write. */
+        bool quiet = motor_off_since && now - motor_off_since >= SAVE_DELAY_MS * 1000LL;
+        bool overdue = now - last_write_us >= SAVE_MAX_MS * 1000LL;
+        if (disk_dirty() && !save_error && !ds.wgate && (quiet || overdue)) {
             save_now();
         } else if (disk_dirty() && save_error && now - last_try_us >= RETRY_MS * 1000LL) {
             save_now();                 /* e.g. storage was freed meanwhile */

@@ -51,6 +51,7 @@ typedef struct {
     int cylinders;          /* geometry of the image */
     int heads;
     int sectors;            /* per track */
+    bool keep_sectors;      /* READ_WRITE .ST image: keep its sectors for writing */
 } disk_info_t;
 
 /* Active tracks, [cyl][head][MFM_MAX_BYTES]; read by the flux ISR. */
@@ -101,6 +102,10 @@ extern volatile uint32_t disk_media_gen;
 
 /* The active disk is a library image whose sectors are kept (can be written). */
 bool disk_writable_data(void);
+
+/* The active disk was set to READ_WRITE after it was loaded: load and keep
+ * its sectors now (ESP_ERR_NO_MEM when PSRAM is short). */
+esp_err_t disk_keep_sectors(void);
 
 /*
  * A sector written by the computer: patch the kept sectors, encode the

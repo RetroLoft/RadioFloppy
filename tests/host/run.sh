@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 CFLAGS="-std=gnu17 -O1 -Wall -Wextra -Wno-unused-parameter -I../../main -Istubs -I."
 
 gcc $CFLAGS -DIMAGE_STORE_NO_LOCK -o test_image_store test_image_store.c mock_ext_flash.c \
-    ../../main/image_store.c
+    img_codec_host.c ../../main/image_store.c
 gcc $CFLAGS -o test_st_image test_st_image.c ../../main/st_image.c
 gcc $CFLAGS -o test_mfm test_mfm.c ../../main/mfm_track.c
 gcc $CFLAGS -DSETTINGS_NO_LOCK -DSETTINGS_DEFAULT_HOSTNAME='"RadioFloppy"' -DSETTINGS_DEFAULT_SSID='"DefaultNet"' \

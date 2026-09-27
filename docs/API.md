@@ -35,7 +35,7 @@ the device itself, uses only this API and needs no internet access:
   the old image is lost) and **Delete**; above the list the storage use,
   e.g. *Storage: 61% used*.
 - **Admin access** — only shown when the device has a token; it is kept only in the open page.
-- **Settings** (gear icon, top right, `/#settings`) — connected computer, host name, floppy drive (A:/B:), buzzer on/off, WiFi status,
+- **Settings** (gear icon, top right, `/#settings`) — connected computer, host name, floppy drive (A:/B:), buzzer on/off, compression, WiFi status,
   firmware version and a *Check for updates* button (not functional yet).
 
 The page polls `GET /current` every 3 s and `GET /images` every 15 s (and
@@ -268,7 +268,7 @@ All images in `sequence` order, and the storage use.
 | `id`, `sequence`, `status` | See [My floppy images](#my-floppy-images)                 |
 | `name`           | Title (from the file name when it was uploaded)                     |
 | `size`           | Image size in bytes (only `valid`)                                  |
-| `stored_size`, `storage_format` | Bytes as stored and how: always `raw` (= `size`) for now; compression may follow |
+| `stored_size`, `storage_format` | Bytes as stored and how: `raw` (= `size`) or `deflate` (compressed) |
 | `crc32`          | CRC-32 of the image as 8 hex digits (same as `zlib.crc32`, `crc32` command) |
 | `blocks_used`    | Number of storage blocks it occupies                                |
 | `access`         | `READ_ONLY` (default for every upload) or `READ_WRITE` — see below  |
@@ -545,6 +545,7 @@ State of an upload. Only the most recent upload is kept; older ids give
   "drive_select": "DS1",
   "drive_select_active": "DS1",
   "buzzer": true,
+  "compression": false,
   "last_image_id": 6,
   "machine": "ATARI",
   "machine_active": "ATARI",
@@ -580,6 +581,15 @@ Body (`Content-Type: application/json`), every field optional:
   is the line in use until then.
 - `buzzer`: `true`/`false` — clicks for head steps and button presses.
   Takes effect at once.
+- `compression`: `true`/`false` (default `false`) — store images added from
+  now on compressed (raw deflate) when that saves space. Checked before
+  storing: the compressed data is inflated and must give the image's CRC,
+  else it is stored uncompressed. Stored images are not converted. Disks
+  that can be written (`READ_WRITE`, new disks) are always stored
+  uncompressed; setting a compressed image to `READ_WRITE` unpacks it
+  (needs free blocks for the whole image, else `507 NO_SPACE`).
+  Typical results: 18–45% for game disks with free space, 70–85% for
+  full ones; activating takes about the same time (0.5–1 s).
 - `machine`: the connected computer, `"ATARI"` (Atari 16-bit, default),
   `"AMIGA"` (Commodore Amiga) or `"DOS"` (IBM PC / DOS); else
   `422 INVALID_MACHINE`. Takes effect after a restart; `machine_active` is
@@ -631,7 +641,8 @@ example a disk made with *New disk*). What happens:
    ID field just passed.
 4. **Apply** — the sector is patched into the image kept in PSRAM and its
    track is encoded again, so the next read returns the new data.
-5. **Save** — 2 s after the last write the changed 64 KiB blocks are
+5. **Save** — when the drive motor has been off for 2 s (one save per disk
+   operation; at the latest a minute after the last write) the changed 64 KiB blocks are
    written **copy-on-write** to free blocks, read back, the whole image is
    checked against its new CRC, and **one** catalog update switches all of
    them. After a power cut the image on the flash is the previously saved
@@ -648,7 +659,7 @@ example a disk made with *New disk*). What happens:
 | ----------- | -------------------------------------------------------------------------- |
 | `read_only` | Write-protected; `reason` says why (read-only image, not enough free storage, …) |
 | `writable`  | Writes accepted, everything saved                                          |
-| `pending`   | Written sectors not saved yet (saved about 2 s after the last write)       |
+| `pending`   | Written sectors not saved yet (saved when the motor has been off for 2 s)  |
 | `saving`    | Being saved                                                                |
 | `error`     | Saving failed (`error`): the disk is write-protected, the changes stay in memory and are retried every 30 s (e.g. after storage was freed) |
 
@@ -658,8 +669,9 @@ Guarantees and limits:
   the API or the buttons (WiFi setup): those save first; if saving fails,
   they are refused with `409 UNSAVED_CHANGES`. Deleting, replacing or
   formatting while the disk has unsaved changes is refused the same way.
-- A **power cut** loses the changes not saved yet: those of the last
-  2 seconds plus the time the save takes (about 0.5–2 s). What was saved
+- A **power cut** loses the changes not saved yet: those of the disk
+  operation in progress, plus 2 seconds and the time the save takes
+  (about 1–4 s). What was saved
   before stays intact. Wait until the page shows *Writable — all changes
   saved* before switching off. Keeping the last seconds safe as well would
   need a hold-up supply (a capacitor that keeps RadioFloppy running for

@@ -54,7 +54,8 @@
 #define IMG_FMT_ADF         0x06    /* Amiga: AmigaDOS disk (reserved) */
 #define IMG_FMT_IMG         0x07    /* DOS: raw sector image .img/.ima (reserved) */
 
-#define IMG_STORE_RAW       0x00    /* storage format; compression later */
+#define IMG_STORE_RAW       0x00    /* storage format: the image as it is */
+#define IMG_STORE_DEFLATE   0x01    /* raw deflate (RFC 1951); read-only images only */
 
 typedef struct __attribute__((packed)) {
     uint16_t id;                /* 1..65535, never reused while stored */
@@ -139,6 +140,15 @@ bool image_store_fits(uint32_t size, uint16_t replace_id);
 esp_err_t image_store_save(uint16_t replace_id, const char *name, uint8_t format,
                            const uint8_t *data, uint32_t size, uint16_t *id_out);
 
+/*
+ * As image_store_save, optionally compressed: with compress the image is
+ * deflated and stored that way when that is smaller and inflates back to
+ * exactly the image (else RAW). A READ_WRITE disk is always stored RAW.
+ */
+esp_err_t image_store_save_ex(uint16_t replace_id, const char *name, uint8_t format,
+                              const uint8_t *data, uint32_t size, bool compress,
+                              uint16_t *id_out);
+
 /* Remove an image; its blocks are free at once (erased when reused). */
 esp_err_t image_store_delete(uint16_t id);
 
@@ -179,9 +189,10 @@ const char *image_format_name(uint8_t format);
 
 /*
  * Set the write setting of a valid image (catalog update only, none when
- * unchanged). ESP_ERR_NOT_SUPPORTED: READ_WRITE for a format that cannot be
- * written; ESP_ERR_NOT_FOUND: no valid image with this id. Only metadata:
- * the drive stays write-protected for the computer.
+ * unchanged). A compressed image set to READ_WRITE is first unpacked to
+ * RAW, copy-on-write into free blocks (ESP_ERR_NO_MEM: not enough free
+ * blocks; nothing changed). ESP_ERR_NOT_SUPPORTED: READ_WRITE for a format
+ * that cannot be written; ESP_ERR_NOT_FOUND: no valid image with this id.
  */
 esp_err_t image_store_set_read_write(uint16_t id, bool read_write);
 
