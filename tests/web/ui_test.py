@@ -270,8 +270,8 @@ def main():
                 ? Promise.resolve(new Response(JSON.stringify({error:{code:'DRIVE_BUSY',message:'x'}}), {status:409}))
                 : window._fetch(u, o);""")
         b.js(btn(other, "Insert") + ".click()")
-        check(b.wait("document.getElementById('msg').innerText.includes('still using drive B')"),
-              "DRIVE_BUSY: 'still using drive B:' shown")
+        check(b.wait("document.getElementById('msg').innerText.includes('still writing to drive B')"),
+              "DRIVE_BUSY: 'still writing to drive B:' shown")
         check(b.js("!!document.getElementById('retry')"), "DRIVE_BUSY: 'Try again' button")
         check(b.js(row(target) + ".className") == "active", "DRIVE_BUSY: active mark unchanged")
         b.js("window.fetch = window._fetch")

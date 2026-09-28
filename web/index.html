@@ -142,7 +142,8 @@
       <p id="fileinfo" class="small muted" style="margin:0">
         Supported: <strong>.ST</strong> images with <strong>79–84 tracks</strong>,
         <strong>9, 10 or 11 sectors</strong> per track and 1 or 2 sides (up to 924 KiB)
-        (e.g. 360, 400, 410, 440, 720, 800 or 880 KiB). .MSA and .HFE are not supported yet.
+        (e.g. 360, 400, 410, 440, 720, 800 or 880 KiB), and <strong>.HFE</strong> images (v1, v3;
+        always stored). .MSA is not supported yet.
       </p>
       <fieldset>
         <legend>Destination</legend>
@@ -371,7 +372,7 @@ const ERRORS = {
   INVALID_IMAGE: "This file is not a valid .ST disk image.",
   UNSUPPORTED_GEOMETRY: "This .ST format is not supported. Images need 79–84 tracks, 9–11 sectors per track and 1 or 2 sides.",
   IMAGE_TOO_LARGE: "The file is too large: 1.5 MiB at most (HFE: 3 MiB).",
-  DRIVE_BUSY: "The Atari is still using drive {drive}. The current floppy was not replaced.",
+  DRIVE_BUSY: "The Atari is still writing to drive {drive}. The current floppy was not replaced.",
   CHECKSUM_MISMATCH: "The file was damaged in transit. Please try again.",
   UPLOAD_INCOMPLETE: "The upload was interrupted. Please try again.",
   UPLOAD_BUSY: "Another upload is in progress. Wait a moment and try again.",
@@ -407,11 +408,16 @@ function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 
 // ---- Messages ----------------------------------------------------------------
 
+const MSG_OK_MS = 15000;              // success messages disappear after this
+let msgTimer = null;
+
 function showMsg(kind, html) {
   const m = $("msg");
   m.className = "banner " + kind;
   m.innerHTML = html;
   m.classList.remove("hidden");
+  clearTimeout(msgTimer);
+  if (kind === "ok") msgTimer = setTimeout(() => m.classList.add("hidden"), MSG_OK_MS);
 }
 function showError(data, status, prefix, ownWords) {
   const e = errorText(data, status, ownWords);
@@ -908,9 +914,13 @@ function destination() {
 }
 
 function updateUploadForm() {
+  const f = $("file").files[0];
+  // HFE images are always stored: "Load temporarily" is not possible for them.
+  const psram = document.querySelector('input[name=dest][value=psram]');
+  psram.disabled = !!f && isHfe(f.name);
+  if (psram.disabled && psram.checked) document.querySelector('input[name=dest][value=flash]').checked = true;
   const dest = destination();
   $("actrow").classList.toggle("hidden", dest === "psram");
-  const f = $("file").files[0];
   const info = $("fileinfo");
   if (!f) return;
   if (f.size > maxSizeOf(f.name)) {
@@ -918,7 +928,7 @@ function updateUploadForm() {
       ": too large (" + (isHfe(f.name) ? "3" : "1.5") + " MiB at most).</span>";
   } else if (isHfe(f.name)) {
     info.innerHTML = esc(f.name) + ": " + kib(f.size) + ", HFE image. RadioFloppy checks it " +
-      "(HFE playback is still in development).";
+      "(HFE playback is still in development). HFE images are always stored in my floppy images.";
   } else if (!geometryOf(f.size)) {
     info.innerHTML = '<span style="color:var(--warn)">' + esc(f.name) + " is " + f.size +
       " bytes: probably a format that is not supported yet (79–84 tracks, 9–11 sectors). " +
@@ -974,6 +984,10 @@ async function upload(ev) {
 // Upload file with the options in body (POST /uploads, then PUT the bytes).
 async function uploadFile(file, body) {
   if (file.size > maxSizeOf(file.name)) { showMsg("err", esc(ERRORS.IMAGE_TOO_LARGE)); return; }
+  if (isHfe(file.name) && body.destination === "psram") {
+    showMsg("err", "HFE images cannot be loaded temporarily. Choose “Add to my floppy images”.");
+    return;
+  }
   if (S.busy) return;
   setBusy(true);
   setStage("Reading file…", null);
@@ -983,6 +997,7 @@ async function uploadFile(file, body) {
     setStage("Preparing upload…", null);
     const c = await api("POST", "/api/v1/uploads", body, 15000, true);
     if (c.status !== 201 || !c.data || !c.data.upload_url) {
+      setStage("");
       showError(c.data, c.status, "Upload refused.", isHfe(file.name));
       return;
     }
@@ -1001,7 +1016,7 @@ async function uploadFile(file, body) {
     } else if (u.error && u.error.code === "DRIVE_BUSY" && u.image_id) {
       setStage("");
       showMsg("warn", "“" + esc(u.name) + "” <strong>is stored</strong>, but not loaded: the Atari is still " +
-        'using drive ' + S.drive + '. <button type="button" id="later">Load it now</button>');
+        'writing to drive ' + S.drive + '. <button type="button" id="later">Load it now</button>');
       const id = u.image_id, name = u.name;
       $("later").addEventListener("click", () => loadImage(id, name));
     } else {
