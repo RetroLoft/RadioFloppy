@@ -96,12 +96,23 @@ uint32_t drive_ignored_steps(void);
 
 #define DRIVE_MEDIA_CHANGE_MS   700
 
+typedef enum {
+    DRIVE_SWAP_REFUSED,     /* nothing done */
+    DRIVE_SWAP_IDLE,        /* done while our drive was not selected */
+    DRIVE_SWAP_SELECTED,    /* done while selected (only with allow_selected) */
+} drive_swap_t;
+
 /*
- * Swap the disk: runs swap(arg) under the drive lock, but only while our
- * drive is not selected, then signals a disk change. present: a disk is
- * inserted afterwards. Returns false (nothing done) while selected.
+ * Swap the disk: runs swap(arg) under the drive lock, then signals a disk
+ * change. present: a disk is inserted afterwards. Always done while our
+ * drive is not selected. While it is selected only with allow_selected, and
+ * then not for a writable disk that the computer is writing to or has
+ * written to since it selected the drive (a read-only disk cannot be
+ * written: the FDC refuses while WPROT is asserted). The change signal
+ * keeps INDEX/RDATA off, so a half-read sector is never mixed with the new
+ * disk; the computer just sees the door opened and closed.
  */
-bool drive_swap_media(void (*swap)(void *), void *arg, bool present);
+drive_swap_t drive_swap_media(void (*swap)(void *), void *arg, bool present, bool allow_selected);
 
 /* Armed by the start-up guard. */
 bool drive_is_armed(void);

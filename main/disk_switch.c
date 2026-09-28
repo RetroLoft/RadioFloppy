@@ -2,7 +2,7 @@
  * Changing the active disk. See disk_switch.h.
  *
  * Every switch: image in PSRAM -> validated -> encoded into the inactive
- * track buffer (disk_prepare) -> swapped in while our drive is not selected
+ * track buffer (disk_prepare) -> swapped in when no write is in the way
  * (disk_activate_prepared) -> tracks verified again in the background.
  * Runs in task context on core 1.
  *
@@ -98,8 +98,8 @@ static esp_err_t activate_locked(const uint8_t *raw, disk_info_t *info, switch_e
     if (disk_activate_prepared(info, ACTIVATE_TIMEOUT_MS) == ESP_ERR_TIMEOUT) {
         disk_write_refresh();           /* the old disk stays: writable again if it was */
         e->code = "DRIVE_BUSY";
-        snprintf(e->msg, sizeof(e->msg), "drive stayed selected for %d ms; disk not changed",
-                 ACTIVATE_TIMEOUT_MS);
+        snprintf(e->msg, sizeof(e->msg), "the computer kept writing to the drive for %d ms; "
+                 "disk not changed", ACTIVATE_TIMEOUT_MS);
         return ESP_ERR_TIMEOUT;
     }
     int64_t t2 = esp_timer_get_time();

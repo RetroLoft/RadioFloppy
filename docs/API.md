@@ -178,9 +178,10 @@ door is opened and closed: for 0.7 s it shows no disk. The Atari (TOS)
 notices this and reads the new disk's directory the next time you open
 drive B:.
 
-The drive never changes disks in the middle of an access: a switch only
-happens while the Atari is not using drive B:. See
-[DRIVE_BUSY](#drive_busy).
+A disk can be changed while the Atari uses drive B:, as with a real drive
+(many games keep the drive selected all the time). The device first waits
+up to 0.3 s for the Atari to finish its access. It never changes a disk the
+Atari is writing to: see [DRIVE_BUSY](#drive_busy).
 
 ## Authentication
 
@@ -470,7 +471,7 @@ tracks prepared).
 | ---------------------- | ------------------------------------------------ |
 | `400 INVALID_REQUEST`  | `image_id` missing or not a number 1–65535       |
 | `404 IMAGE_NOT_FOUND`  | No valid image with this id                      |
-| `409 DRIVE_BUSY`       | The Atari kept using drive B:; nothing changed   |
+| `409 DRIVE_BUSY`       | The Atari kept writing to drive B:; nothing changed |
 | `500 FLASH_ERROR`      | The stored image could not be read or its CRC is wrong |
 
 ---
@@ -766,10 +767,13 @@ once.
 
 ### DRIVE_BUSY
 
-A new active disk is switched in only while the Atari is not using drive
-B:. The device waits up to 3 seconds for such a moment. If the Atari keeps
-the drive busy longer (for example while loading a game), the request ends
-with `409 DRIVE_BUSY` and the old disk stays in the drive:
+A new active disk is switched in right away while the Atari is not using
+drive B:, and after 0.3 s also while it is (reading only). A disk the Atari
+writes to is never changed under it: once the Atari has written to a
+writable disk since it selected drive B:, the disk only changes after the
+Atari releases the drive. The device waits up to 3 seconds for that. If
+the Atari keeps the drive busy longer, the request ends with
+`409 DRIVE_BUSY` and the old disk stays in the drive:
 
 - `flash` upload: the image *is* stored (`image_id`) — activate it later
   with `PUT /api/v1/current`.
@@ -899,7 +903,7 @@ A complete test suite that exercises every endpoint and error is in
 | Uploads at the same time      | 1                                                 |
 | Upload without data expires   | after 60 s                                        |
 | Network timeout while sending | 10 s without data → `UPLOAD_INCOMPLETE`           |
-| Wait for drive to be idle     | up to 3 s → else `DRIVE_BUSY`                     |
+| Wait for drive to be idle     | 0.3 s, then changed anyway unless the Atari writes to it; up to 3 s → else `DRIVE_BUSY` |
 | Disk change signal to the Atari | 0.7 s "no disk"                                 |
 | Typical duration              | Activate an image: 360 KB ≈ 0.4 s, 880 KB ≈ 0.9 s; store 880 KB ≈ 7 s; PSRAM upload 720 KB ≈ 3 s |
 | Disk name                     | title from `filename` (TOSEC tags removed, `(Disk n/m)` kept), max. 52 characters |
@@ -1007,8 +1011,9 @@ For firmware developers; clients do not need this.
   before the flux stream, so no internal-flash write stalls the caches while
   the drive runs.
 - New disks are encoded into the inactive of two PSRAM track buffers,
-  switched under the drive lock only while our drive is not selected (the
-  switch releases WPROT and gates INDEX/RDATA for 0.7 s), and then verified
+  switched under the drive lock, never while the computer writes to a
+  writable disk (the switch inverts WPROT and gates INDEX/RDATA for 0.7 s,
+  so a selected drive sees an opened and closed door), and then verified
   again in the background (`DISK_BACKGROUND_VERIFY`).
 - API, buttons and web page change disks through one module,
   `main/disk_switch.c`, serialised by one mutex.

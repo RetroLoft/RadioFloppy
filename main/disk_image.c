@@ -461,7 +461,7 @@ esp_err_t disk_image_init(void)
     if (hfe) {
         int idx = 0;
         set_active_buffer(&idx);
-        drive_swap_media(set_active_buffer, &idx, true);   /* not armed yet: always done */
+        drive_swap_media(set_active_buffer, &idx, true, false);    /* not armed yet: always done */
         active_geo = info;
         disk_media_gen++;
         set_current(&info);
@@ -489,7 +489,7 @@ esp_err_t disk_image_init(void)
 
     int idx = 0;
     set_active_buffer(&idx);
-    drive_swap_media(set_active_buffer, &idx, raw != NULL);   /* not armed yet: always done */
+    drive_swap_media(set_active_buffer, &idx, raw != NULL, false);    /* not armed yet: always done */
     active_geo = info;
     disk_media_gen++;
     set_current(&info);
@@ -547,9 +547,13 @@ void disk_verify_active(const uint8_t *raw, const disk_info_t *info)
 esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
 {
     int idx = active_buf ^ 1;
-    int64_t deadline = esp_timer_get_time() + timeout_ms * 1000LL;
+    int64_t now = esp_timer_get_time();
+    int64_t selected_from = now + DISK_SWAP_SELECTED_AFTER_MS * 1000LL;
+    int64_t deadline = now + timeout_ms * 1000LL;
+    drive_swap_t how;
 
-    while (!drive_swap_media(set_active_buffer, &idx, true)) {
+    while ((how = drive_swap_media(set_active_buffer, &idx, true,
+                                   esp_timer_get_time() >= selected_from)) == DRIVE_SWAP_REFUSED) {
         if (esp_timer_get_time() > deadline) {
             return ESP_ERR_TIMEOUT;
         }
@@ -571,8 +575,9 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
     /* Let a flux-encoder refill that started on the old buffer finish
      * before anybody may overwrite that buffer. */
     vTaskDelay(pdMS_TO_TICKS(20));
-    printf("Active disk: %s (%s%s)\n", info->name,
-           info->source == DISK_SRC_PSRAM ? "PSRAM" : "image library", info->hfe ? ", HFE" : "");
+    printf("Active disk: %s (%s%s)%s\n", info->name,
+           info->source == DISK_SRC_PSRAM ? "PSRAM" : "image library", info->hfe ? ", HFE" : "",
+           how == DRIVE_SWAP_SELECTED ? " - changed while the drive was selected" : "");
     return ESP_OK;
 }
 

@@ -36,6 +36,7 @@ static int64_t media_change_until_us;
 static volatile bool writable;          /* WPROT released: see drive_set_writable() */
 static volatile int64_t last_index_us;  /* start of the last INDEX pulse */
 static drive_write_start_t write_start; /* last WGATE assertion */
+static bool wrote_while_selected;       /* WGATE since our drive was selected */
 
 int IRAM_ATTR drive_cylinder(void)
 {
@@ -108,6 +109,10 @@ static void IRAM_ATTR drive_isr(void *arg)
             .gen = disk_media_gen,
             .seq = write_start.seq + 1,
         };
+        wrote_while_selected = true;
+    }
+    if (ev.type == DRV_EV_SELECT && !ev.st.selected) {
+        wrote_while_selected = false;
     }
     portEXIT_CRITICAL_ISR(&drive_lock);
 
@@ -212,18 +217,24 @@ uint32_t drive_select_edges(void)
     return select_edges;
 }
 
-bool drive_swap_media(void (*swap)(void *), void *arg, bool present)
+drive_swap_t drive_swap_media(void (*swap)(void *), void *arg, bool present, bool allow_selected)
 {
     drive_status_t st;
-    bool done = false;
+    drive_swap_t done = DRIVE_SWAP_REFUSED;
 
     portENTER_CRITICAL(&drive_lock);
     if (!(armed && emulator_is_selected())) {
+        done = DRIVE_SWAP_IDLE;
+    } else if (allow_selected && (!writable || (!wrote_while_selected &&
+                                                gpio_ll_get_level(&GPIO, PIN_FDD_WGATE) != 0))) {
+        done = DRIVE_SWAP_SELECTED;
+    }
+    if (done != DRIVE_SWAP_REFUSED) {
         swap(arg);
         disk_present = present;
         media_change_until_us = esp_timer_get_time() + DRIVE_MEDIA_CHANGE_MS * 1000LL;
+        wrote_while_selected = false;   /* that was the old disk */
         update_outputs_locked(&st);
-        done = true;
     }
     portEXIT_CRITICAL(&drive_lock);
     return done;

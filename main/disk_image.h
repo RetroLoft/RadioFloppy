@@ -4,8 +4,8 @@
  *
  * Two track buffers (A/B, 2 MB each) live in PSRAM. A new image is always
  * encoded and verified into the inactive buffer; only then is the active
- * pointer swapped, under the drive lock and only while our drive is not
- * selected (drive_swap_media). The flux stream reads the tracks through
+ * pointer swapped, under the drive lock and never while the computer writes
+ * to the disk (drive_swap_media). The flux stream reads the tracks through
  * disk_track_raw() and never waits for any of this.
  *
  * At start-up the image that was active at power-off (settings), else the
@@ -100,10 +100,17 @@ void disk_verify_active(const uint8_t *raw, const disk_info_t *info);
  * needs the PSRAM more. */
 void disk_verify_cancel(void);
 
+/* A disk change first waits this long for our drive to be deselected, so an
+ * access in progress can finish; after that it also swaps while the drive
+ * stays selected (see drive_swap_media). */
+#define DISK_SWAP_SELECTED_AFTER_MS 300
+
 /*
- * Make the prepared buffer the active disk. Waits up to timeout_ms for our
- * drive to be deselected; ESP_ERR_TIMEOUT (= drive busy) leaves the
- * current disk untouched.
+ * Make the prepared buffer the active disk. Waits up to timeout_ms for a
+ * moment it may swap (drive_swap_media): deselected, or after
+ * DISK_SWAP_SELECTED_AFTER_MS also selected unless the computer writes to a
+ * writable disk. ESP_ERR_TIMEOUT (= drive busy) leaves the current disk
+ * untouched.
  */
 esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms);
 
