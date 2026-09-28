@@ -68,7 +68,7 @@ class Browser:
     def __init__(self):
         self.dir = tempfile.mkdtemp()
         self.proc = subprocess.Popen(
-            ["google-chrome", "--headless=new", "--disable-gpu", "--no-sandbox",
+            [os.environ.get("CHROME", "google-chrome"), "--headless=new", "--disable-gpu", "--no-sandbox",
              "--remote-debugging-port=%d" % PORT, "--user-data-dir=" + self.dir, "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(50):

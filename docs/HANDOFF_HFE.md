@@ -1,4 +1,4 @@
-# Handoff: HFE support (state at 2026-09-27)
+# Handoff: HFE support (state at 2026-09-28)
 
 For whoever continues this work (a new Claude session or a person). Read
 this first; it replaces the chat history of the previous session.
@@ -8,9 +8,42 @@ this first; it replaces the chat history of the previous session.
 | Branch | Commit | State |
 | --- | --- | --- |
 | `main` | f46bc3d | Tested. HFE uploads are fully checked and stored as a stream, then **discarded** (`HFE_PLAYBACK 0` in `main/api.c`): no HFE image is kept until playback works. |
-| `wip/hfe-player` | 47a1119 + this file | **Phase 2 (the HFE player), builds without warnings, never flashed or tested.** |
+| `wip/hfe-player` | this commit | **Phase 2 (the HFE player) with `HFE_PLAYBACK 1`: flashed, ST regression passes, first HFE games load on the Atari.** Timing not yet measured. |
 
-The board currently runs firmware built from `main`.
+The board currently runs firmware built from `wip/hfe-player` (`HFE_PLAYBACK 1`).
+
+## First device test of phase 2 (2026-09-28)
+
+- ST regression on the new firmware: `api_test.py` 68 ok / 0 FAIL,
+  `ui_test.py` 49 ok / 0 FAIL. Stored images unchanged.
+- Start-up with an HFE disk inserted works: `HFE tracks: HFEv1, 80
+  cylinders, 2 side(s), 250 kbit/s, 1958 KiB of track buffer, 2106 ms`.
+- HFE uploads with `activate: true` take ~12 s for 2 MB (stored ~390 KB
+  deflated). An upload while the Atari reads the drive gives
+  `409 DRIVE_BUSY` (stored, not inserted), as designed.
+- Test files: 75 HFEv1 files converted from STX (`..._stx.hfe`, the "P"
+  set of the TOSEC Atari ST collection), in the user's OneDrive folder
+  `retro/P` next to this repo.
+
+| Image (id on the board) | Disk layout | Result on the Atari |
+| --- | --- | --- |
+| Pang [cr Bad Brew Crew] (185) | own loader, no BPB (boot sector filled with E5) | **works** |
+| Pink Panther (187) | normal, 10 sectors, side 0 only, 82 cylinders | **works** |
+| P-47 (184) | copy-protected: tracks 2–38 have no standard sectors (1–2 syncs + one long block, 100192–100208 cells); root directory is random bytes | boots to the intro screen, **hangs** after it |
+| Pac-land (186) | normal GEMDOS, 11 sectors, side 0 only | not tested yet (check file names in GEM) |
+
+P-47 is the test case for the measurement tool: the image itself looks
+complete (valid MFM on all tracks), so either the STX→HFEv1 conversion
+lost something (e.g. weak bits) or the player's timing / track-change
+position is off on these long custom tracks.
+
+Cosmetic issues seen:
+- Titles keep the converter suffix: "P-47 _stx" (TOSEC tags are removed,
+  `_stx` and the space before it are not).
+- The boot log prints the ST lines (`Geometry: 80/2/0/512`, `MFM: ...
+  100000 bitcells/track, GAP3 84`, `RPM: 300 (200 ms, INDEX 3 ms)`) also
+  for an HFE disk; `/current` reports `"sectors": 0` and no format.
+- `flux_hfe_stats` (`late_pulses`) is not printed or exposed anywhere yet.
 
 ## HFE plan (phases, approved by the user)
 
@@ -75,10 +108,9 @@ the Atari: HFEv1 first, then HFEv3, then copy-protected images.
 
 ## Next steps
 
-1. Flash `wip/hfe-player` with `HFE_PLAYBACK 1` in `main/api.c`. Check that
-   an ST disk still works (ST regression tests), then upload and insert an
-   HFE file.
-2. **Measurement tool (not built yet):** capture INDEX and RDATA on the
+1. ~~Flash `wip/hfe-player` with `HFE_PLAYBACK 1`, ST regression, upload
+   and insert an HFE file.~~ Done 2026-09-28, see above.
+2. **Measurement tool (not built yet)**, with P-47 as the failing case: capture INDEX and RDATA on the
    device itself and verify:
    - the INDEX period equals the track duration;
    - the first flux pulse after INDEX is at the same offset every revolution
@@ -123,4 +155,16 @@ the Atari: HFEv1 first, then HFEv3, then copy-protected images.
 - Tests:
   - host: `tests/host/run.sh`;
   - device: `RADIOFLOPPY_HOST=<ip> python3 tests/api/api_test.py` and
-    `tests/web/ui_test.py` (needs websocket-client and Chrome).
+    `tests/web/ui_test.py` (needs websocket-client and Chrome; set
+    `CHROME` to the Chrome executable where it isn't `google-chrome`).
+  - `api_test.py` needs `images/CRYSTAL_CASTLES.ST` (git-ignored); it can be
+    downloaded from the board (`GET /api/v1/images/1/data`, CRC 42ce7eed).
+  - The tests leave the first original image active, not the one that was
+    active before.
+- Second machine: Windows laptop, same network. ESP-IDF 5.5.5 in
+  `C:\Users\frank\esp\esp-idf` (`. C:\Users\frank\esp\esp-idf\export.ps1`),
+  build dir outside OneDrive: `idf.py -B C:\Users\frank\esp\build-radiofloppy
+  -p COM3 build flash`. Serial port COM3 (CH343). Its `sdkconfig` has no WiFi
+  credentials; the board uses the ones saved on its external flash. Turn
+  off the WireGuard `retroloft` tunnel there: it also routes
+  192.168.178.0/24 and hides the board.

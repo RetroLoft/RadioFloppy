@@ -58,7 +58,7 @@
  * image) only once the HFE player exists, so no image is listed that
  * cannot be inserted. 0: everything runs, then the result is discarded. */
 #ifndef HFE_PLAYBACK
-#define HFE_PLAYBACK        0
+#define HFE_PLAYBACK        1
 #endif
 
 typedef enum {
