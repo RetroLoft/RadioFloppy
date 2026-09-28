@@ -280,9 +280,13 @@ static void draw_track(int cyl, int side, int wifi)
  * One task owns the display. It redraws on events (disk change, network
  * info request) and polls the drive state every POLL_MS: the track view
  * starts when our drive is selected with the motor on and ends when the
- * motor goes off. Only changes are sent over I2C.
+ * motor goes off or our drive has been deselected for TRACK_HOLD_MS (the
+ * MOTOR line alone can stay on: the FDC only switches it off after index
+ * pulses, which a deselected drive does not give, and on board revision 1
+ * it floats while the computer is off). Only changes are sent over I2C.
  */
 #define POLL_MS         100
+#define TRACK_HOLD_MS   1000    /* no flicker between accesses */
 
 /* Boot screen: product name and firmware version, centred on two lines. */
 #define SPLASH_MS       2000
@@ -312,6 +316,7 @@ static void title_task_fn(void *arg)
     vTaskDelay(pdMS_TO_TICKS(SPLASH_MS));
 
     bool track_view = false;
+    TickType_t last_active = 0;     /* last poll with our drive selected */
     int shown_cyl = -1, shown_side = -1;
     TickType_t network_until = 0;
     bool network = false;
@@ -354,10 +359,15 @@ static void title_task_fn(void *arg)
 
         drive_status_t st;
         drive_peek(&st);
-        if (!track_view && st.armed && st.selected && st.motor) {
+        bool active = st.armed && st.selected && st.motor;
+        if (active) {
+            last_active = now;
+        }
+        if (!track_view && active) {
             track_view = true;
             redraw = true;
-        } else if (track_view && !st.motor) {
+        } else if (track_view && (!st.motor ||
+                                  (TickType_t)(now - last_active) >= pdMS_TO_TICKS(TRACK_HOLD_MS))) {
             track_view = false;
             redraw = true;
         }
