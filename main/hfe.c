@@ -56,22 +56,45 @@ static inline uint8_t side_byte(const uint8_t *track, int side, uint32_t i)
     return track[(i / HALF) * BLOCK + side * HALF + (i % HALF)];
 }
 
+/* Too many segments in exact timing: walk() must smooth (see hfe.h). */
+#define WALK_SMOOTH     (-1)
+
+/* Close the zone of `cells` cells that took `*time` (1/16 ns): its average
+ * cell time becomes a segment from `start`. The remainder of the division
+ * is carried into the next zone, so the zones add up to the exact time. */
+static void close_zone(hfe_track_t *trk, uint32_t start, uint32_t cells, uint64_t *time)
+{
+    uint32_t ns = (uint32_t)(*time / cells);
+    *time -= (uint64_t)ns * cells;
+    if (trk->nseg && trk->seg[trk->nseg - 1].ns_x16 == ns) {
+        return;                                 /* same as the zone before */
+    }
+    trk->seg[trk->nseg++] = (hfe_segment_t) { .start = start, .ns_x16 = ns };
+}
+
 /*
  * Walk one side of a track: emit cells (out may be NULL: count only),
- * collect opcode effects in trk. Returns HFE_OK or HFE_BAD_OPCODE /
- * HFE_TOO_LARGE (more cells than cap_cells).
+ * collect opcode effects in trk. zone_cells 0: every bitrate change is a
+ * segment (more than HFE_MAX_SEGMENTS: returns WALK_SMOOTH); otherwise the
+ * timing is smoothed into zones of zone_cells cells. Returns HFE_OK or
+ * HFE_BAD_OPCODE / HFE_TOO_LARGE (more cells than cap_cells).
  */
-static hfe_result_t walk(const uint8_t *track, int side, uint32_t len, bool v3,
-                         uint32_t default_ns_x16, uint8_t *out, uint32_t cap_cells,
-                         hfe_track_t *trk, uint16_t *ops)
+static int walk(const uint8_t *track, int side, uint32_t len, bool v3,
+                uint32_t default_ns_x16, uint8_t *out, uint32_t cap_cells,
+                uint32_t zone_cells, hfe_track_t *trk, uint32_t *ops)
 {
     uint32_t n = 0;
     uint32_t cur_ns = default_ns_x16;
+    int64_t late_index = -1;        /* a repeated INDEX (must be at the track end) */
+    uint32_t zone_start = 0;
+    uint64_t zone_time = 0;
 
     memset(trk, 0, sizeof(*trk));
     trk->index_cell = -1;
-    trk->nseg = 1;
-    trk->seg[0] = (hfe_segment_t) { .start = 0, .ns_x16 = default_ns_x16 };
+    if (!zone_cells) {
+        trk->nseg = 1;
+        trk->seg[0] = (hfe_segment_t) { .start = 0, .ns_x16 = default_ns_x16 };
+    }
 
     for (uint32_t i = 0; i < len;) {
         uint8_t b = side_byte(track, side, i);
@@ -85,10 +108,11 @@ static hfe_result_t walk(const uint8_t *track, int side, uint32_t len, bool v3,
                 continue;
             }
             if (b == OP_INDEX) {
-                if (trk->index_cell >= 0) {
-                    return HFE_BAD_OPCODE;      /* more than one INDEX per revolution */
+                if (trk->index_cell < 0) {
+                    trk->index_cell = (int32_t)n;
+                } else if (late_index < 0) {
+                    late_index = n;             /* the earliest repeat: checked at the end */
                 }
-                trk->index_cell = (int32_t)n;
                 i++;
                 continue;
             }
@@ -103,12 +127,14 @@ static hfe_result_t walk(const uint8_t *track, int side, uint32_t len, bool v3,
                 }
                 uint32_t ns = (uint32_t)x * 16000u * 2 / 72;    /* 1/16 ns */
                 if (ns != cur_ns) {
-                    if (trk->seg[trk->nseg - 1].start == n) {
+                    if (zone_cells) {
+                        /* smoothing: the zones take care of it */
+                    } else if (trk->seg[trk->nseg - 1].start == n) {
                         trk->seg[trk->nseg - 1].ns_x16 = ns;    /* no cells in between */
                     } else if (trk->nseg < HFE_MAX_SEGMENTS) {
                         trk->seg[trk->nseg++] = (hfe_segment_t) { .start = n, .ns_x16 = ns };
                     } else {
-                        return HFE_BAD_OPCODE;  /* too many bitrate changes */
+                        return WALK_SMOOTH;     /* too many bitrate changes */
                     }
                     cur_ns = ns;
                 }
@@ -133,10 +159,10 @@ static hfe_result_t walk(const uint8_t *track, int side, uint32_t len, bool v3,
             hfe_weak_t *w = trk->nweak ? &trk->weak[trk->nweak - 1] : NULL;
             if (w && w->start + w->count == n) {
                 w->count += 8;                  /* adjacent: one area */
-            } else if (trk->nweak < HFE_MAX_WEAK) {
+            } else if (trk->nweak < HFE_MAX_WEAK - 1) {  /* room for a split at the index */
                 trk->weak[trk->nweak++] = (hfe_weak_t) { .start = n, .count = 8 };
             } else {
-                return HFE_BAD_OPCODE;
+                w->count = n + 8 - w->start;    /* full: join, the cells between become weak */
             }
             b = 0x44;                           /* placeholder: replaced per revolution */
         }
@@ -153,8 +179,21 @@ static hfe_result_t walk(const uint8_t *track, int side, uint32_t len, bool v3,
                 }
             }
             n++;
+            if (zone_cells) {
+                zone_time += cur_ns;
+                if (n - zone_start == zone_cells) {
+                    close_zone(trk, zone_start, zone_cells, &zone_time);
+                    zone_start = n;
+                }
+            }
         }
         i++;
+    }
+    if (zone_cells && n > zone_start) {
+        close_zone(trk, zone_start, n - zone_start, &zone_time);
+    }
+    if (late_index >= 0 && (n - (uint32_t)late_index) > n / 64) {
+        return HFE_BAD_OPCODE;                  /* a second INDEX within the revolution */
     }
     trk->cells = n;
     return HFE_OK;
@@ -363,7 +402,7 @@ void hfe_packed_track(const uint8_t *buf, int cyl, int side, hfe_packed_track_t 
  */
 static hfe_result_t pack_side(hfe_pack_t *p, int cyl, int side, const uint8_t *region,
                               uint32_t len, bool v3, uint32_t ns, hfe_track_t *trk,
-                              uint16_t *ops)
+                              uint32_t *ops, bool *smoothed)
 {
     uint32_t at = p->used;
     uint8_t *out = p->buf ? p->buf + at : NULL;
@@ -374,7 +413,17 @@ static hfe_result_t pack_side(hfe_pack_t *p, int cyl, int side, const uint8_t *r
             cap_cells = room / 4 * 32;
         }
     }
-    hfe_result_t r = walk(region, side, len, v3, ns, out, cap_cells, trk, ops);
+    uint32_t ops_before = *ops;
+    int w = walk(region, side, len, v3, ns, out, cap_cells, 0, trk, ops);
+    *smoothed = w == WALK_SMOOTH;
+    if (*smoothed) {
+        /* Zones of equal length: len * 8 cells at most, and one zone to
+         * spare for the split at the index. */
+        uint32_t zone = (len * 8 + HFE_MAX_SEGMENTS - 2) / (HFE_MAX_SEGMENTS - 1);
+        *ops = ops_before;
+        w = walk(region, side, len, v3, ns, out, cap_cells, zone, trk, ops);
+    }
+    hfe_result_t r = (hfe_result_t)w;
     if (r != HFE_OK) {
         return r;
     }
@@ -478,8 +527,9 @@ static hfe_result_t do_cylinder(hfe_stream_t *s)
 
     table_entry(s, s->cyl, &off, &len, &region);
     for (int side = 0; side < info->sides; side++) {
+        bool smoothed;
         hfe_result_t r = pack_side(s->pack, s->cyl, side, s->region, len, info->version == 3,
-                                   s->ns_x16, trk, &info->opcodes);
+                                   s->ns_x16, trk, &info->opcodes, &smoothed);
         if (r != HFE_OK) {
             if (r == HFE_TOO_LARGE) {
                 snprintf(info->detail, sizeof(info->detail),
@@ -501,6 +551,7 @@ static hfe_result_t do_cylinder(hfe_stream_t *s)
         }
         info->weak_areas += trk->nweak;
         info->bitrate_changes += trk->nseg - 1;
+        info->smoothed_tracks += smoothed;
     }
     return HFE_OK;
 }
@@ -624,9 +675,13 @@ hfe_result_t hfe_stream_end(hfe_stream_t *s)
                  (unsigned long)(info->bytes_needed / 1024), (unsigned long)(s->pack->cap / 1024));
         return fail(s, HFE_TOO_LARGE);
     }
-    snprintf(info->detail, sizeof(info->detail), "HFEv%u, %u cylinders, %u side(s), %u kbit/s%s",
-             info->version, info->cylinders, info->sides, info->bitrate,
-             info->opcodes ? ", with opcodes" : "");
+    int n = snprintf(info->detail, sizeof(info->detail), "HFEv%u, %u cylinders, %u side(s), %u kbit/s%s",
+                     info->version, info->cylinders, info->sides, info->bitrate,
+                     info->opcodes ? ", with opcodes" : "");
+    if (info->smoothed_tracks) {
+        snprintf(info->detail + n, sizeof(info->detail) - n, ", timing smoothed on %u tracks",
+                 info->smoothed_tracks);
+    }
     return HFE_OK;
 }
 

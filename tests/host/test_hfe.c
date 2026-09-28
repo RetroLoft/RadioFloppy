@@ -201,6 +201,71 @@ static void test_v3(void)
     for (int c = 0; c < 2; c++) { free(t[c].side[0]); free(t[c].side[1]); }
 }
 
+/* A track as HxC writes it from a flux dump: a BITRATE opcode every few
+ * bytes (drive jitter), the INDEX repeated just before the end, more weak
+ * areas than fit. Smoothed into zones that keep the exact total time. */
+static void test_flux_v3(void)
+{
+    static uint8_t f[BUF];
+    build_track_t t[2];
+    uint32_t len = 18000;
+    uint8_t *s0 = filler(len, 0);
+    uint64_t exact = 0;                     /* 1/16 ns, as played without smoothing */
+    uint32_t ns = 32000, cells = 0, changes = 0, index_at = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        if (i == 30) { s0[i] = 0x8f; index_at = cells; continue; }            /* INDEX */
+        if (i == len - 3) { s0[i] = 0x8f; continue; }                         /* INDEX again */
+        if (i % 7 == 0 && i + 1 < len - 3) {
+            uint8_t x = 70 + (i / 7) % 6;                                     /* 70..75 */
+            s0[i] = 0x4f; s0[i + 1] = rev8(x);
+            ns = (uint32_t)x * 32000 / 72;
+            changes++;
+            i++;
+            continue;
+        }
+        if (i % 400 == 200) s0[i] = 0x2f;                                     /* RAND */
+        exact += 8ull * ns;
+        cells += 8;
+    }
+    t[0].len = len; t[0].side[0] = s0; t[0].side[1] = filler(len, 4);
+    t[1].len = len; t[1].side[0] = filler(len, 1); t[1].side[1] = filler(len, 2);
+    uint32_t size = build(f, "HXCHFEV3", 0, 2, 2, t);
+
+    hfe_info_t info;
+    CHECK(hfe_check(f, size, BUF, &info) == HFE_OK);
+    CHECK(info.smoothed_tracks == 1 && strstr(info.detail, "smoothed on 1 track"));
+    CHECK(changes > 1000 && info.opcodes > changes);
+    CHECK(stream(f, size, RANDOM, sizeof(packbuf), &info) == HFE_OK);
+    hfe_packed_track_t pt;
+    packed(0, 0, &pt);
+    CHECK(pt.cells && pt.count == cells);
+    CHECK(pt.nseg >= 2 && pt.nseg <= HFE_MAX_SEGMENTS);
+    CHECK(pt.nweak >= HFE_MAX_WEAK - 2 && pt.nweak <= HFE_MAX_WEAK);   /* 45 areas, joined */
+    uint64_t played = 0;
+    int sorted = 1;
+    for (int i = 0; i < pt.nseg; i++) {
+        uint32_t end = i + 1 < pt.nseg ? pt.seg[i + 1].start : pt.count;
+        sorted &= end > pt.seg[i].start;
+        played += (uint64_t)(end - pt.seg[i].start) * pt.seg[i].ns_x16;
+        /* Every zone plays near 2 us: the jitter is averaged away. */
+        CHECK(pt.seg[i].ns_x16 >= 70u * 32000 / 72 && pt.seg[i].ns_x16 <= 75u * 32000 / 72);
+    }
+    CHECK(pt.seg[0].start == 0 && sorted);
+    /* The revolution keeps its duration: off by less than 1/16 ns per cell
+     * of one zone (the last division remainder), here under 0.1 us. */
+    CHECK(played <= exact && exact - played <= len * 8 / (HFE_MAX_SEGMENTS - 1) + 1);
+    /* Rotated to the first INDEX; the one at the end was ignored. */
+    CHECK(cell(pt.cells, 0) == file_bit(&s0[31], 0));
+    (void)index_at;
+    same_packing(f, size);
+
+    /* A repeated INDEX in the middle of the revolution is still refused. */
+    s0[len / 2] = 0x8f;
+    size = build(f, "HXCHFEV3", 0, 2, 2, t);
+    CHECK(hfe_check(f, size, BUF, &info) == HFE_BAD_OPCODE);
+    for (int c = 0; c < 2; c++) { free(t[c].side[0]); free(t[c].side[1]); }
+}
+
 static void test_refused(void)
 {
     static uint8_t f[BUF];
@@ -332,6 +397,7 @@ int main(int argc, char **argv)
 {
     printf("HFEv1\n");          test_v1();
     printf("HFEv3 opcodes\n");  test_v3();
+    printf("HFEv3 from a flux dump\n"); test_flux_v3();
     printf("refused files\n");  test_refused();
     printf("track layout\n");   test_layout();
     printf("real files\n");

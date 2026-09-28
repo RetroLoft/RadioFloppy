@@ -8,7 +8,7 @@ this first; it replaces the chat history of the previous session.
 | Branch | Commit | State |
 | --- | --- | --- |
 | `main` | f46bc3d | Tested. HFE uploads are fully checked and stored as a stream, then **discarded** (`HFE_PLAYBACK 0` in `main/api.c`): no HFE image is kept until playback works. |
-| `wip/hfe-player` | this commit | **Phase 2 (the HFE player) with `HFE_PLAYBACK 1`: flashed, ST regression passes, first HFE games load on the Atari.** Timing not yet measured. |
+| `wip/hfe-player` | latest | **Phase 2 (the HFE player) with `HFE_PLAYBACK 1`: flashed, ST regression passes, HFEv1 and HFEv3 games load on the Atari.** Timing not yet measured. |
 
 The board currently runs firmware built from `wip/hfe-player` (`HFE_PLAYBACK 1`).
 
@@ -30,12 +30,55 @@ The board currently runs firmware built from `wip/hfe-player` (`HFE_PLAYBACK 1`)
 | Pang [cr Bad Brew Crew] (185) | own loader, no BPB (boot sector filled with E5) | **works** |
 | Pink Panther (187) | normal, 10 sectors, side 0 only, 82 cylinders | **works** |
 | P-47 (184) | copy-protected: tracks 2–38 have no standard sectors (1–2 syncs + one long block, 100192–100208 cells); root directory is random bytes | boots to the intro screen, **hangs** after it |
-| Pac-land (186) | normal GEMDOS, 11 sectors, side 0 only | not tested yet (check file names in GEM) |
+| Pac-land (186) | normal GEMDOS, 11 sectors, side 0 only | **works** (file names correct in GEM) |
+| Pang, later in the game | track 36 of this file lacks sector 2 (only 720 bytes of room where a 1024-byte sector belongs): the image is damaged | hangs at track 36, as any emulator would |
+| **Klax (HFEv3)** (217) | flux dump (Greaseweazle SCP → HxC HFEv3), see below | **works** |
 
 P-47 is the test case for the measurement tool: the image itself looks
 complete (valid MFM on all tracks), so either the STX→HFEv1 conversion
 lost something (e.g. weak bits) or the player's timing / track-change
 position is off on these long custom tracks.
+
+### HFEv3 from flux dumps (Klax)
+
+Source: the Internet Archive item `Klax_Domark_AtariST_DiskImage`; the
+7z holds SCP dumps, two STX conversions,
+an HxC HFEv3 and an Aufit protection report. Local copy in OneDrive
+`retro/HFEv3`. Protection report: tracks 0–4 have fuzzy sectors 11/12,
+sector-within-sector, data over the index and no-flux areas.
+
+What the HFEv3 contains, and how it is handled now (`main/hfe.c`):
+- 2200–3600 `BITRATE` opcodes per track, values 70–75 around 72: the
+  speed jitter of the dumping drive. A track with more changes than
+  `HFE_MAX_SEGMENTS` (now 32) is **smoothed**: equal zones, each at the
+  average cell time of its cells, the division remainder carried to the
+  next zone, so the revolution keeps its duration (< 0.1 us off).
+- `INDEX` repeated 16–24 cells before the track end (same pulse at the
+  end of the revolution): ignored in the last 1/64 of the track; a repeat
+  elsewhere is still refused.
+- Tracks 80–82 are unformatted noise (thousands of `RAND`): weak areas
+  beyond the limit are joined.
+- The fuzzy sectors are **not** encoded as `RAND` in this file, so it
+  does not test weak bits. A weak-bit test file must still be made (e.g.
+  from the Aufit STX in the same archive, with HxC).
+- Needs 2067 KiB of track buffer (2132 KiB available); stored 657 KB.
+- Decision for later (SD card board): keep smoothing; stream tracks per
+  cylinder from the card and raise `HFE_MAX_SEGMENTS` instead of playing
+  every jitter step.
+
+### Other changes in this round
+
+- **Disk change while the drive is selected** (`drive_swap_media`): after
+  0.3 s a disk is also changed while the Atari keeps drive B: selected
+  (many games do; with the Atari off the select line floats low on board
+  revision 1, which lacks the DS0/DS1 pull-ups). Refused only for a
+  writable disk while WGATE is active or after a write since the drive
+  was selected; then `DRIVE_BUSY` after 3 s. The 0.7 s disk change signal
+  keeps INDEX/RDATA off, so no half sector of the new disk is read.
+  Needs testing on the Atari (game holding the drive, Atari off,
+  multi-disk game).
+- Web UI: success messages disappear after 15 s; an upload refused by the
+  device stops the progress bar; "Load temporarily" is disabled for HFE.
 
 Cosmetic issues seen:
 - Titles keep the converter suffix: "P-47 _stx" (TOSEC tags are removed,
@@ -48,9 +91,11 @@ Cosmetic issues seen:
 ## HFE plan (phases, approved by the user)
 
 1. **Parser / validator + streaming upload**: done (on `main`).
-2. **Native timing player**: code written on `wip/hfe-player`, untested.
-3. **HFEv3 opcodes in the player**: weak bits (RAND) still to do. Timing
-   segments (BITRATE) are already handled by the phase 2 encoder.
+2. **Native timing player**: on `wip/hfe-player`; HFEv1 and HFEv3 games
+   load on the Atari. Timing not yet measured.
+3. **HFEv3 opcodes in the player**: weak bits (RAND) still to do (stored in
+   the packed track, not yet played). Timing segments (BITRATE) work,
+   including smoothed flux dumps.
 
 After every phase: host tests plus the ST regression on the device
 (`tests/api/api_test.py`, `tests/web/ui_test.py`). Then the user tests on
@@ -153,7 +198,9 @@ the Atari: HFEv1 first, then HFEv3, then copy-protected images.
   ESP-IDF 5.5.5 (`. ~/esp/esp-idf/export.sh`; `idf.py -p /dev/ttyACM0
   build flash`).
 - Tests:
-  - host: `tests/host/run.sh`;
+  - host: `tests/host/run.sh` (extra real HFE files via `HFE_TEST_FILES`;
+    on the Windows laptop run it from Git Bash with
+    `PATH=/c/msys64/ucrt64/bin:$PATH`);
   - device: `RADIOFLOPPY_HOST=<ip> python3 tests/api/api_test.py` and
     `tests/web/ui_test.py` (needs websocket-client and Chrome; set
     `CHROME` to the Chrome executable where it isn't `google-chrome`).

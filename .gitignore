@@ -28,6 +28,7 @@ tests/host/test_st_format
 tests/host/test_mfm_write
 tests/host/test_hfe
 tests/host/test_hfe_import
+tests/host/*.exe
 
 # KiCad local files (backups, locks, autosave, caches, per-user view settings)
 hardware/**/*-backups/

@@ -17,6 +17,19 @@
  * stored bit-reversed. Opcodes are not cells (except RAND, which stands
  * for 8 cells). HFEv2 ("HXCPICFE" revision 1, 4-byte opcodes) is refused.
  *
+ * HFEv3 files made from flux dumps (SCP via HxC) carry thousands of
+ * BITRATE opcodes per track: the speed jitter of the drive that read the
+ * disk (a few percent around 250 kbit/s every few bytes). A track with
+ * more changes than HFE_MAX_SEGMENTS is smoothed: its cells are cut into
+ * equal zones and each zone plays at the average cell time of its cells,
+ * so every zone, the whole revolution and the index keep their exact
+ * duration; only the jitter inside a zone is lost (the FDC's PLL follows
+ * that anyway). Such files also repeat the INDEX opcode just before the
+ * end of the track (the same pulse, seen again at the end of the
+ * revolution): an INDEX in the last 1/64 of the track is ignored. A track
+ * with more weak areas than fit is kept by joining the last ones (the
+ * cells between them become weak too: noise on unformatted tracks).
+ *
  * Supported for the Atari profile: ISO MFM, 250 kbit/s nominal, 1 or 2
  * sides, at most 84 cylinders, single step.
  *
@@ -38,7 +51,7 @@
 #include <stdint.h>
 
 #define HFE_MAX_CYLS        84
-#define HFE_MAX_SEGMENTS    16      /* bitrate changes per track */
+#define HFE_MAX_SEGMENTS    32      /* timing segments per track (more: smoothed) */
 #define HFE_MAX_WEAK        32      /* weak (RAND) areas per track */
 #define HFE_MAX_TRACK_CELLS (32767u * 8)   /* one side: 16-bit length / 2 * 8 */
 #define HFE_REGION_MAX      65536u  /* track data of one cylinder, both sides */
@@ -65,9 +78,10 @@ typedef struct {
     uint32_t cells_total;   /* all tracks, both sides, as played */
     uint32_t bytes_needed;  /* packed track buffer bytes (with the slot table) */
     uint32_t max_cells;     /* longest track */
-    uint16_t opcodes;       /* v3 opcodes seen (all tracks) */
+    uint32_t opcodes;       /* v3 opcodes seen (all tracks) */
     uint16_t weak_areas;
     uint16_t bitrate_changes;
+    uint16_t smoothed_tracks;   /* tracks whose timing was smoothed into zones */
     char detail[160];       /* human readable reason / remark */
 } hfe_info_t;
 

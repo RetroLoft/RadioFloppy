@@ -26,5 +26,5 @@ echo "== titles and OLED wrap =="; ./test_title
 echo "== settings =="; ./test_settings
 echo "== blank disk =="; ./test_st_format
 echo "== MFM write decoding =="; ./test_mfm_write
-echo "== HFE =="; ./test_hfe ~/Downloads/road_runner_us_gold/*.hfe
+echo "== HFE =="; ./test_hfe ~/Downloads/road_runner_us_gold/*.hfe ${HFE_TEST_FILES:-}
 echo "== HFE import =="; ./test_hfe_import
