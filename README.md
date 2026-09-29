@@ -1,7 +1,8 @@
 # RadioFloppy
 
 WiFi-floppy-emulator voor de Atari ST op basis van een ESP32-S3 (Otronic DevKitC-clone,
-16 MB flash, 8 MB PSRAM). Framework: ESP-IDF v5.5.5 (C).
+16 MB flash, 8 MB PSRAM) op de RadioFloppy-PCB revisie 2 (`hardware/v1.1`).
+Framework: ESP-IDF v5.5.5 (C).
 
 ## Hardwaretests
 
@@ -10,12 +11,10 @@ WiFi-floppy-emulator voor de Atari ST op basis van een ESP32-S3 (Otronic DevKitC
 | Test | Bestand | Wat |
 | ---- | ------- | --- |
 | `floppy_emu_run()` (actief) | `main/floppy_app.c`, `ext_flash.c`, `image_store.c`, `drive_emu.c`, `flux_stream.c`, `mfm_track.c`, `disk_image.c` | **Read-only** floppy-emulatie als drive B: (`EMU_SELECT_LINE`). De image komt uit de imagebibliotheek op de externe SPI-flash U2 (S25FL128L, blokgebaseerd, zie `docs/FLASH_LAYOUT.md`) of uit een tijdelijke PSRAM-upload. Alle 168 sporen worden bij het opstarten naar MFM gecodeerd in PSRAM (FlashFloppy-layout voor .ST: geen IAM, GAP4a 80, GAP2 22, GAP3 84). RMT+DMA speelt de fluxstroom op GPIO41 (0,8 us pulsen, 10 MHz), een tweede RMT-kanaal de INDEX-puls op GPIO1 (3 ms per 200 ms, synchroon gestart). WPROT actief zodra geselecteerd; schrijven is uitgeschakeld. |
-| `led_test_run()` | `main/led_test.c` | Laat een RGB-LED op GPIO38 blauw en op GPIO48 rood knipperen (om de on-board LED te vinden; op dit board: GPIO48). |
 | (oud) `legacy/input_monitor.c` | niet gebouwd | Selectiebewuste monitor met TRACK0 uit de vorige fase, ter referentie. |
 | `loopback_test_run()` | `main/loopback_test.c` | Zoekt continu welke Shugart-uitgang (ULN2003A) via een jumper op J1 met welke ingang (SN74LVC245A) verbonden is. |
-| `button_test_run()` | `main/button_test.c` | Knoppen: GPIO19 = links (SW_NEXT), GPIO8 = rechts (SW_PREV); piept 0,5 s bij opstarten. |
 
-**Loopbacktest:** de Shugart-lijnen hebben op de PCB geen pull-ups. Plaats op de jumper een
+**Loopbacktest:** de Shugart-lijnen hebben op de PCB geen pull-ups (behalve DS0/DS1). Plaats op de jumper een
 pull-up van 4,7–10 kΩ naar +3V3 (bijv. J3 pin 3, displayconnector), anders komt de lijn na het
 vrijgeven van de uitgang niet betrouwbaar HIGH en wordt er niets gemeld.
 
@@ -35,7 +34,7 @@ standaardwaarden en het optionele API-token, en staat alleen in `sdkconfig` (git
 API open op het thuisnetwerk. Tests:
 `tests/host/run.sh` (op de PC), `tests/api/api_test.py` en `tests/web/ui_test.py` (tegen het board).
 
-**STEP-geluid en status-LED:** bij iedere verwerkte STEP-puls van drive B: geeft de buzzer een tik van 3 ms (`main/step_sound.h`); de on-board RGB-LED (GPIO48) brandt rood-oranje zolang MOTOR actief is (`main/status_led.h`).
+**STEP-geluid en LED's:** bij iedere verwerkte STEP-puls van drive B: geeft de buzzer (GPIO46) een tik van 3 ms (`main/step_sound.h`). De LED's op J4 (`main/leds.h`): LED_ACTIVITY (GPIO48) brandt zolang drive B: geselecteerd is en MOTOR actief is; LED_STATUS (GPIO20) toont WiFi: uit = verbonden, knippert = verbinding zoeken, brandt = na 60 s nog geen verbinding (of geen netwerk ingesteld), snel knipperen = WiFi-setupmodus.
 
 **Buzzer:** hangt aan het +5V-net van de PCB, dat alleen via J2 (floppyvoeding / Atari) gevoed
 wordt: de 5V-pin van de Otronic-clone is alleen een ingang. Bij voeding via USB alleen is de
@@ -59,7 +58,7 @@ Volledige pinmapping: `main/board_pins.h`.
 Gebruik **uitsluitend de USB-poort van de USB-naar-UART-brug** (op het board meestal
 gemarkeerd als `COM` of `UART`). De andere poort (`USB`) is de native USB van de ESP32-S3 en
 zit direct op GPIO19/GPIO20. Die poort mag **niet** worden aangesloten: de host trekt D-/D+
-via 15 kΩ naar GND, waardoor de rechterknop (GPIO19) permanent "ingedrukt" leest.
+via 15 kΩ naar GND, waardoor de knop SW_NEXT (GPIO19) permanent "ingedrukt" leest.
 
 Controle onder Linux na het insteken:
 
@@ -87,11 +86,5 @@ idf.py -p /dev/ttyUSB0 flash monitor
 Vervang `/dev/ttyUSB0` door de poort die hierboven is gevonden. Stoppen van de monitor:
 `Ctrl+]`.
 
-Verwachte uitvoer:
-
-```
-Floppy Emulator - Button Test
-Ready. Press a button.
-Left Button
-Right Button
-```
+Verwachte uitvoer: de opstartmelding van RadioFloppy met de imagebibliotheek, de actieve disk
+en het IP-adres.

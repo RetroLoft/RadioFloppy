@@ -30,6 +30,7 @@
 #include "buttons.h"
 #include "oled.h"
 #include "settings.h"
+#include "leds.h"
 #include "setup_mode.h"
 #include "step_sound.h"
 #include "wifi_net.h"
@@ -452,6 +453,7 @@ void setup_mode_run(void)
 
     settings_get(&s);
     step_sound_init();                  /* buzzer pin in a defined, silent state */
+    leds_init();                        /* status LED: fast blinking in setup mode */
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     /* At most 21 characters: fits one line of the display. */
     snprintf(ap_ssid, sizeof(ap_ssid), "%.16s-%02X%02X", s.hostname, mac[4], mac[5]);

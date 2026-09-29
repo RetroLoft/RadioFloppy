@@ -1,8 +1,8 @@
 /*
  * Floppy stepper-motor sound. See step_sound.h.
  *
- * Buzzer: active 5 V buzzer on GPIO20 via a BC817 low-side switch, GPIO
- * HIGH = sound (as in button_test.c; needs +5V on J2).
+ * Buzzer: active 5 V buzzer on PIN_BUZZER (GPIO46) via a BC817 low-side
+ * switch, GPIO HIGH = sound (needs +5V on J2).
  *
  * The drive ISR only switches the buzzer on and starts a one-shot
  * esp_timer (both IRAM, no waiting). The timer callback, in the esp_timer

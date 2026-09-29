@@ -10,6 +10,7 @@ void app_main(void)
 {
     /* First: keep every Shugart output released (a real Atari may be on). */
     shugart_outputs_release();
+    spi_cs_release();
     usb_phy_release_pins();
 
     floppy_emu_run();

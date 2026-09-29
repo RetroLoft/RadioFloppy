@@ -32,10 +32,10 @@
 #include "drive_emu.h"
 #include "flux_stream.h"
 #include "oled.h"
-#include "status_led.h"
 #include "machine.h"
 #include "settings.h"
 #include "setup_mode.h"
+#include "leds.h"
 #include "step_sound.h"
 #include "tests.h"
 #include "wifi_net.h"
@@ -303,6 +303,7 @@ static void run_without_emulation(const machine_profile_t *mp)
     if (disk_image_init() != ESP_OK) {      /* image library for the API */
         printf("Disk buffers not available.\n");
     }
+    leds_init();
     bool wifi = wifi_net_start(setup_mode_verify_pending() ? SETUP_VERIFY_MS : 0) == ESP_OK;
     step_sound_init();                      /* buzzer pin defined, silent */
     if (oled_init()) {
@@ -360,6 +361,7 @@ void floppy_emu_run(void)
     printf("RPM: 300 (200 ms, INDEX %d ms)\n", INDEX_PULSE_MS);
     printf("Read-only: YES\n");
 
+    leds_init();                    /* indication only: failure is not fatal */
     /* Before the flux stream: the one-time PHY calibration write to the
      * internal flash must not happen while RMT is streaming. */
     bool wifi = wifi_net_start(setup_mode_verify_pending() ? SETUP_VERIFY_MS : 0) == ESP_OK;
@@ -374,7 +376,6 @@ void floppy_emu_run(void)
     }
     printf("RMT ready (%d MHz, RDATA pulse %d.%d us, stream running, outputs gated).\n",
            FLUX_RESOLUTION_HZ / 1000000, FLUX_PULSE_TICKS / 10, FLUX_PULSE_TICKS % 10);
-    status_led_init();              /* indication only: failure is not fatal */
     if (oled_init()) {              /* optional display: absence is not fatal */
         oled_start_disk_title();    /* title of the active disk, kept up to date */
     }
