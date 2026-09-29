@@ -927,8 +927,8 @@ function updateUploadForm() {
     info.innerHTML = '<span style="color:var(--err)">' + esc(f.name) + " is " + kib(f.size) +
       ": too large (" + (isHfe(f.name) ? "3" : "1.5") + " MiB at most).</span>";
   } else if (isHfe(f.name)) {
-    info.innerHTML = esc(f.name) + ": " + kib(f.size) + ", HFE image. RadioFloppy checks it " +
-      "(HFE playback is still in development). HFE images are always stored in my floppy images.";
+    info.innerHTML = esc(f.name) + ": " + kib(f.size) + ", HFE image. RadioFloppy checks it; " +
+      "HFE images are always stored in my floppy images.";
   } else if (!geometryOf(f.size)) {
     info.innerHTML = '<span style="color:var(--warn)">' + esc(f.name) + " is " + f.size +
       " bytes: probably a format that is not supported yet (79–84 tracks, 9–11 sectors). " +

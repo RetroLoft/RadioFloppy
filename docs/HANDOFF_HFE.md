@@ -7,10 +7,12 @@ this first; it replaces the chat history of the previous session.
 
 | Branch | Commit | State |
 | --- | --- | --- |
-| `main` | f46bc3d | Tested. HFE uploads are fully checked and stored as a stream, then **discarded** (`HFE_PLAYBACK 0` in `main/api.c`): no HFE image is kept until playback works. |
-| `wip/hfe-player` | latest | **Phase 2 (the HFE player) with `HFE_PLAYBACK 1`: flashed, ST regression passes, HFEv1 and HFEv3 games load on the Atari.** Timing not yet measured. |
+| `main` | latest | **`wip/hfe-player` merged (2026-09-29).** Phase 2 (the HFE player) with `HFE_PLAYBACK 1`: ST regression passes, HFEv1 and HFEv3 games load on the Atari. Timing not yet measured. |
+| `wip/hfe-player` | same as `main` | Kept for reference; new work starts from `main`. |
 
-The board currently runs firmware built from `wip/hfe-player` (`HFE_PLAYBACK 1`).
+The board runs firmware built from `main`. Work on board revision 1 is
+paused; the next steps below still apply, next to the preparation for
+board revision 2 (DS0/DS1 pull-ups; being manufactured).
 
 ## First device test of phase 2 (2026-09-28)
 

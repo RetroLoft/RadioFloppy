@@ -163,8 +163,12 @@ ignored. An HFE file may be up to 3 MiB; compressed it must fit in the
 blocks of one image (1.5 MiB), else `IMAGE_TOO_LARGE`. HFE images are
 always READ_ONLY.
 
-While HFE playback is in development, a completely checked and stored HFE
-upload is still refused with `UNSUPPORTED_FORMAT` and not kept.
+HFE images are played in their own timing: every track at its own cell
+times, with the index pulse on the real start of the revolution. HFEv3
+timing changes (`BITRATE`) are played; files made from flux dumps, with
+thousands of tiny speed changes per track, are smoothed into zones that
+keep the exact duration of every revolution. Weak bits (`RAND`) are
+stored but not yet played as random data.
 
 The track layout follows FlashFloppy: GAP3 84 (9 sectors), 30 (10
 sectors) or 3 with interleave 2 (11 sectors). An 11-sector track is
@@ -551,7 +555,7 @@ On failure the HTTP status matches the error, and the upload object has
 | `409 DRIVE_BUSY`           | Stored (if `flash`) but not activated — see below           |
 | `422 INVALID_IMAGE` / `UNSUPPORTED_GEOMETRY` | The content is not a supported `.ST` image |
 | `422 CHECKSUM_MISMATCH`    | Data does not match the given `crc32`                       |
-| `422 UNSUPPORTED_FORMAT`   | A recognised but unplayable format (HFE for now, HFEv2)     |
+| `422 UNSUPPORTED_FORMAT`   | A recognised but unplayable format (e.g. HFEv2)             |
 | `500 FLASH_ERROR`          | Writing or verifying failed (nothing stored; when replacing, the old image is lost) |
 | `500 PREPARE_FAILED`       | The disk could not be prepared for the drive                |
 | `507 NO_SPACE`             | Not enough free blocks any more                             |
@@ -806,7 +810,7 @@ change. A failed upload carries the same `error` inside its upload object.
 | 422  | `INVALID_IMAGE`        | The file is not a floppy image                         |
 | 422  | `UNSUPPORTED_GEOMETRY` | Use an image with 79–84 tracks and 9–11 sectors        |
 | 422  | `CHECKSUM_MISMATCH`    | The file was damaged in transit — send it again        |
-| 422  | `UNSUPPORTED_FORMAT`   | A recognised format that cannot be played (yet), e.g. HFE, HFEv2 |
+| 422  | `UNSUPPORTED_FORMAT`   | A recognised format that cannot be played (yet), e.g. HFEv2 |
 | 422  | `INVALID_HOSTNAME`     | Use 1–32 letters, digits or `-`                        |
 | 422  | `INVALID_DRIVE_SELECT` | Use `"DS0"` or `"DS1"`                                 |
 | 400  | `INVALID_NAME`         | Use 1–52 printable characters                          |
