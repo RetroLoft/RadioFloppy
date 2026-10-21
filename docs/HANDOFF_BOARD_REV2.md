@@ -42,6 +42,12 @@ SW_NEXT 19), UART0.
   (`bootloader_components/early_pins`) and again with NOR_CS in
   `spi_cs_release()` (`main/board.c`, called from `app_main`), so a card in
   J5 can never answer NOR flash traffic, even before there is SD code.
+- **Changed 2026-10-21 (user request):** setting `leds` (1 or 2 LEDs on
+  J4, web Settings / API, settings record v6). J4 pin 3 (GPIO20) is now
+  always disk activity; the WiFi status goes to J4 pin 1 (GPIO48) with 2
+  LEDs, and with 1 LED to the DevKitC RGB LED (WS2812 on GPIO48, RMT
+  channel without DMA, dim blue). The description below is the original
+  rev 2 design, kept for history.
 - `main/leds.c` (replaces the RMT/WS2812 `status_led.c`), plain GPIOs:
   - LED_ACTIVITY: on while drive B: is selected and MOTOR is active (armed).
   - LED_STATUS (WiFi): off = connected; 1 Hz blink = starting or joining;

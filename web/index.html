@@ -247,6 +247,18 @@
       like a real drive. Takes effect at once.</span></span></label>
   </section>
 
+  <section aria-labelledby="h-leds">
+    <h2 id="h-leds">Front panel LEDs</h2>
+    <label class="opt"><input type="radio" name="leds" value="1">
+      <span><strong>One LED</strong> on J4 pin 3 <span class="muted small">— disk activity. The WiFi status is
+      shown in blue on the LED of the ESP32 board itself.</span></span></label>
+    <label class="opt"><input type="radio" name="leds" value="2">
+      <span><strong>Two LEDs</strong> <span class="muted small">— disk activity on J4 pin 3, WiFi status on
+      J4 pin 1.</span></span></label>
+    <p class="small muted" style="margin:0">WiFi status: blinking while connecting, on when no connection
+      can be made, off when connected. Takes effect at once.</p>
+  </section>
+
   <section aria-labelledby="h-conn">
     <h2 id="h-conn">Connected computer</h2>
     <form id="connform" class="current" autocomplete="off">
@@ -1065,6 +1077,10 @@ function renderSettings(d) {
     : "";
   $("buzzer").checked = !!d.buzzer;
   $("compress").checked = !!d.compression;
+  document.querySelectorAll("input[name=leds]").forEach((r) => {
+    r.checked = Number(r.value) === d.leds;
+    r.disabled = S.authRequired && !S.token;
+  });
   const sel = $("machine");
   if (!sel.options.length) {
     for (const m of d.machines) {
@@ -1159,6 +1175,24 @@ $("compress").addEventListener("change", async () => {
     showSetMsg("err", "RadioFloppy cannot be reached.");
   }
 });
+
+document.querySelectorAll("input[name=leds]").forEach((radio) => radio.addEventListener("change", async () => {
+  const n = Number(radio.value);
+  showSetMsg("", "");
+  try {
+    const r = await api("PUT", "/api/v1/settings", { leds: n }, 12000, true);
+    if (r.status === 200) {
+      renderSettings(r.data);
+      showSetMsg("ok", n === 2 ? "Two LEDs: WiFi status on J4 pin 1." : "One LED: WiFi status on the board's own LED.");
+    } else {
+      showSetMsg("err", errorText(r.data, r.status).text);
+      refreshSettings();
+    }
+  } catch (e) {
+    showSetMsg("err", "RadioFloppy cannot be reached.");
+    refreshSettings();
+  }
+}));
 
 $("buzzer").addEventListener("change", async () => {
   const on = $("buzzer").checked;

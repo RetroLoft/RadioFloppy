@@ -1434,6 +1434,7 @@ static cJSON *settings_json(void)
     cJSON_AddStringToObject(root, "drive_select_active", running_ds == 0 ? "DS0" : "DS1");
     cJSON_AddBoolToObject(root, "buzzer", s.buzzer);
     cJSON_AddBoolToObject(root, "compression", s.compress);
+    cJSON_AddNumberToObject(root, "leds", s.leds);
     cJSON_AddStringToObject(root, "machine", machine_profile(s.machine)->id);
     cJSON_AddStringToObject(root, "machine_active", machine_profile(machine_active())->id);
     cJSON_AddBoolToObject(root, "machine_supported", machine_profile(s.machine)->supported);
@@ -1525,6 +1526,14 @@ static esp_err_t put_settings(httpd_req_t *req)
         }
         s.compress = cJSON_IsTrue(jc);
     }
+    const cJSON *jl = cJSON_GetObjectItem(body, "leds");
+    if (jl) {
+        if (!cJSON_IsNumber(jl) || (jl->valuedouble != 1 && jl->valuedouble != 2)) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_400, "INVALID_REQUEST", "\"leds\" must be 1 or 2");
+        }
+        s.leds = (uint8_t)jl->valuedouble;
+    }
     const cJSON *bz = cJSON_GetObjectItem(body, "buzzer");
     if (bz) {
         if (!cJSON_IsBool(bz)) {
@@ -1543,9 +1552,9 @@ static esp_err_t put_settings(httpd_req_t *req)
             return send_error(req, HTTP_500, "FLASH_ERROR", "settings could not be saved (%s)",
                               esp_err_to_name(err));
         }
-        printf("API: settings saved (host name %s, drive %s, buzzer %s, machine %s)\n",
+        printf("API: settings saved (host name %s, drive %s, buzzer %s, machine %s, %u LED(s))\n",
                s.hostname, s.drive_select == 0 ? "A: / DS0" : "B: / DS1",
-               s.buzzer ? "on" : "off", machine_profile(s.machine)->id);
+               s.buzzer ? "on" : "off", machine_profile(s.machine)->id, s.leds);
     }
     step_sound_set_enabled(s.buzzer);   /* takes effect at once */
     return send_json(req, "200 OK", settings_json());

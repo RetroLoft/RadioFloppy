@@ -34,7 +34,7 @@ standaardwaarden en het optionele API-token, en staat alleen in `sdkconfig` (git
 API open op het thuisnetwerk. Tests:
 `tests/host/run.sh` (op de PC), `tests/api/api_test.py` en `tests/web/ui_test.py` (tegen het board).
 
-**STEP-geluid en LED's:** bij iedere verwerkte STEP-puls van drive B: geeft de buzzer (GPIO46) een tik van 3 ms (`main/step_sound.h`). De LED's op J4 (`main/leds.h`): LED_ACTIVITY (GPIO48) brandt zolang drive B: geselecteerd is en MOTOR actief is; LED_STATUS (GPIO20) toont WiFi: uit = verbonden, knippert = verbinding zoeken, brandt = na 60 s nog geen verbinding (of geen netwerk ingesteld), snel knipperen = WiFi-setupmodus.
+**STEP-geluid en LED's:** bij iedere verwerkte STEP-puls van drive B: geeft de buzzer (GPIO46) een tik van 3 ms (`main/step_sound.h`). De LED's (`main/leds.h`, instelling *Front panel LEDs*: 1 of 2): de LED op J4 pin 3 (GPIO20) brandt zolang drive B: geselecteerd is en MOTOR actief is. De WiFi-status staat met 2 LED's op J4 pin 1 (GPIO48), met 1 LED op de RGB-LED van het ESP32-bord (blauw): uit = verbonden, knippert = verbinding zoeken, brandt = na 60 s nog geen verbinding (of geen netwerk ingesteld), snel knipperen = WiFi-setupmodus.
 
 **Buzzer:** hangt aan het +5V-net van de PCB, dat alleen via J2 (floppyvoeding / Atari) gevoed
 wordt: de 5V-pin van de Otronic-clone is alleen een ingang. Bij voeding via USB alleen is de

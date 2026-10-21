@@ -68,8 +68,9 @@
  * pin: pulled low at reset, so the buzzer is silent while booting. */
 #define PIN_BUZZER          GPIO_NUM_46
 
-/* LEDs on J4, each through 470R, active high. GPIO48 also drives the
- * DevKitC's on-board RGB LED data input; it is used as a plain GPIO, so
- * that LED stays dark. GPIO20 is the native USB D+ pad (see board.c). */
-#define PIN_LED_ACTIVITY    GPIO_NUM_48
-#define PIN_LED_STATUS      GPIO_NUM_20
+/* LEDs on J4, each through 470R, active high (PCB nets LED_ACTIVITY and
+ * LED_STATUS; what they show depends on the "leds" setting, see leds.h).
+ * GPIO48 also drives the DevKitC's on-board RGB LED data input.
+ * GPIO20 is the native USB D+ pad (see board.c). */
+#define PIN_LED_J4_PIN1     GPIO_NUM_48
+#define PIN_LED_J4_PIN3     GPIO_NUM_20

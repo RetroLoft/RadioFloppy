@@ -34,6 +34,7 @@ typedef struct {
     uint16_t last_image_id;     /* library image active at power-off, 0 = none */
     uint8_t machine;            /* machine_t: connected computer, default ATARI */
     uint8_t compress;           /* 1 = store new read-only images compressed */
+    uint8_t leds;               /* LEDs fitted on J4: 1 (pin 3) or 2 (pins 1 and 3), default 1 */
 } settings_t;
 
 /* Read the settings (initialises the external flash if needed). */

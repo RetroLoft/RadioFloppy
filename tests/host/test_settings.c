@@ -263,6 +263,37 @@ static void test_compress(void)
     CHECK(settings_stored() && r.compress == 0);
 }
 
+static void test_leds(void)
+{
+    settings_t s, r;
+
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    CHECK(s.leds == 1);                         /* default: one LED */
+    s.leds = 2;
+    CHECK(settings_save(&s) == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(r.leds == 2);
+    s.leds = 0;
+    CHECK(settings_save(&s) == ESP_ERR_INVALID_ARG);
+    s.leds = 3;
+    CHECK(settings_save(&s) == ESP_ERR_INVALID_ARG);
+
+    /* A version 5 record (same size, the byte was 0 padding): one LED. */
+    uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
+                                 ? RF_SETTINGS_A : RF_SETTINGS_B);
+    rec[4] = 5; rec[5] = 0;
+    rec[154] = 0;
+    memset(rec + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, rec, 156);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && r.leds == 1);
+}
+
 int main(void)
 {
     test_defaults();
@@ -273,6 +304,7 @@ int main(void)
     test_buzzer_and_last_image();
     test_machine();
     test_compress();
+    test_leds();
     printf(failures ? "FAILED (%d)\n" : "settings OK\n", failures);
     return failures != 0;
 }
