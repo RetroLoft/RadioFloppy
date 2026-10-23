@@ -15,6 +15,7 @@ idf_component_register(SRCS "main.c"
                             "st_format.c"
                             "hfe.c"
                             "hfe_import.c"
+                            "sd_card.c"
                             "disk_title.c"
                             "wifi_net.c"
                             "api.c"
@@ -29,6 +30,7 @@ idf_component_register(SRCS "main.c"
                        INCLUDE_DIRS "."
                        EMBED_TXTFILES "../web/index.html" "../web/setup.html"
                        PRIV_REQUIRES esp_driver_gpio esp_driver_rmt esp_driver_spi esp_driver_i2c esp_rom
+                                     fatfs sdmmc esp_driver_sdspi
                                      esp_timer esp_psram heap spi_flash
                                      esp_wifi esp_netif esp_event nvs_flash esp_http_server json esp_app_format
                                      bootloader_support lwip)

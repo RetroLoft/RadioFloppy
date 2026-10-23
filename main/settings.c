@@ -36,9 +36,10 @@ static SemaphoreHandle_t mutex;
 #endif
 
 #define SET_MAGIC       0x54534652  /* "RFST" little endian */
-#define SET_VERSION     6           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
+#define SET_VERSION     7           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
                                        4: + machine, 5: + compress (was 0 padding in 4),
-                                       6: + leds (was 0 padding in 5) */
+                                       6: + leds (was 0 padding in 5),
+                                       7: + root_dir (record grows) */
 #define SET_V1_SIZE     148         /* version 1 records are still read */
 #define SET_COMMIT      0x21544d43  /* "CMT!", last word of the sector */
 #define COMMIT_OFFSET   (RF_SECTOR_SIZE - 4)
@@ -59,9 +60,13 @@ typedef struct {
     uint8_t machine;            /* since version 4: machine_t */
     uint8_t compress;           /* since version 5 (was 0 padding in 4) */
     uint8_t leds;               /* since version 6 (was 0 padding in 5): 1 or 2 */
+    uint8_t reserved;           /* 0 (padding up to version 6) */
+    char root_dir[SETTINGS_ROOT_MAX + 1];   /* since version 7 */
 } record_t;
 
-_Static_assert(sizeof(record_t) == 156, "settings record layout");
+#define SET_V6_SIZE     156         /* versions 4-6 */
+_Static_assert(offsetof(record_t, root_dir) == SET_V6_SIZE, "settings record layout");
+_Static_assert(sizeof(record_t) == 260, "settings record layout");
 _Static_assert(offsetof(record_t, machine) == 152, "settings record layout");
 
 static settings_t current;
@@ -92,7 +97,8 @@ static size_t version_size(uint16_t version)
     case 3:  return 152;                /* + buzzer_off, last_image_id */
     case 4:                             /* + machine (+ 3 bytes 0) */
     case 5:                             /* + compress */
-    case 6:  return sizeof(record_t);   /* + leds */
+    case 6:  return SET_V6_SIZE;        /* + leds */
+    case 7:  return sizeof(record_t);   /* + root_dir */
     default: return 0;
     }
 }
@@ -126,12 +132,16 @@ static bool read_copy(int copy, record_t *r)
     if (r->version < 6) {
         r->leds = 1;
     }
+    if (r->version < 7) {
+        memset(r->root_dir, 0, sizeof(r->root_dir));
+    }
     return r->magic == SET_MAGIC && commit == SET_COMMIT &&
            terminated(r->hostname, sizeof(r->hostname)) &&
            terminated(r->wifi_ssid, sizeof(r->wifi_ssid)) &&
            terminated(r->wifi_pass, sizeof(r->wifi_pass)) &&
            r->wifi_security < WIFI_SEC_COUNT && r->drive_select <= 1 && r->buzzer_off <= 1 &&
-           r->machine < MACHINE_COUNT && r->compress <= 1 && r->leds >= 1 && r->leds <= 2;
+           r->machine < MACHINE_COUNT && r->compress <= 1 && r->leds >= 1 && r->leds <= 2 &&
+           terminated(r->root_dir, sizeof(r->root_dir)) && settings_root_valid(r->root_dir);
 }
 
 static void defaults(settings_t *s)
@@ -184,6 +194,7 @@ esp_err_t settings_init(void)
     current.machine = r[best].machine;
     current.compress = r[best].compress;
     current.leds = r[best].leds;
+    memcpy(current.root_dir, r[best].root_dir, sizeof(current.root_dir));
     generation = r[best].generation;
     current_copy = best;
     return ESP_OK;
@@ -236,6 +247,7 @@ static esp_err_t save_locked(const settings_t *s)
         !settings_hostname_valid(s->hostname) || s->wifi_security >= WIFI_SEC_COUNT ||
         s->drive_select > 1 || s->buzzer > 1 || s->machine >= MACHINE_COUNT || s->compress > 1 ||
         s->leds < 1 || s->leds > 2 ||
+        !terminated(s->root_dir, sizeof(s->root_dir)) || !settings_root_valid(s->root_dir) ||
         (s->wifi_ssid[0] && !settings_password_valid(s->wifi_pass, s->wifi_security))) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -256,6 +268,7 @@ static esp_err_t save_locked(const settings_t *s)
     r.machine = s->machine;
     r.compress = s->compress;
     r.leds = s->leds;
+    memcpy(r.root_dir, s->root_dir, sizeof(r.root_dir));
     r.crc32 = record_crc(&r, sizeof(r));
 
     /* Never touch the copy in use. */
@@ -278,6 +291,37 @@ static esp_err_t save_locked(const settings_t *s)
     generation = r.generation;
     current_copy = target;
     return ESP_OK;
+}
+
+bool settings_root_valid(const char *root)
+{
+    size_t n = strnlen(root, SETTINGS_ROOT_MAX + 1);
+
+    if (n > SETTINGS_ROOT_MAX) {
+        return false;
+    }
+    for (const char *p = root; *p;) {           /* one folder name per round */
+        const char *end = strchr(p, '/');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == 0 || p[0] == '.' || p[0] == ' ' || p[len - 1] == '.' || p[len - 1] == ' ') {
+            return false;                       /* also "", ".", "..", "//", leading/trailing '/' */
+        }
+        for (size_t i = 0; i < len; i++) {
+            char c = p[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                  strchr(" -_.()&+,!", c))) {
+                return false;
+            }
+        }
+        if (!end) {
+            break;
+        }
+        if (!end[1]) {
+            return false;                       /* ends with '/' */
+        }
+        p = end + 1;
+    }
+    return true;
 }
 
 bool settings_hostname_valid(const char *h)

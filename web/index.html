@@ -278,6 +278,24 @@
     </form>
   </section>
 
+  <section aria-labelledby="h-sd">
+    <h2 id="h-sd">SD card</h2>
+    <p id="sdstate" class="small muted" style="margin-top:0">–</p>
+    <form id="rootform" autocomplete="off">
+      <label for="rootdir"><strong>Root directory</strong></label>
+      <div class="row">
+        <span class="code">sd:/</span>
+        <input id="rootdir" type="text" class="grow" maxlength="100" spellcheck="false" autocapitalize="off"
+               placeholder="(the root of the card)">
+        <button id="rootsave" type="submit">Save</button>
+      </div>
+      <p class="small muted" style="margin:0">The folder on the SD card where RadioFloppy keeps its
+        floppies, e.g. <span class="code">My Floppies</span> or <span class="code">Retro/My Floppies</span>.
+        It is created if it does not exist. Letters, digits, spaces and <span class="code">- _ . ( ) &amp; + , !</span>;
+        folders separated by <span class="code">/</span>. Empty: the root of the card.</p>
+    </form>
+  </section>
+
   <section aria-labelledby="h-store">
     <h2 id="h-store">Storage</h2>
     <label class="opt"><input type="checkbox" id="compress">
@@ -393,6 +411,8 @@ const ERRORS = {
   STORAGE_NOT_READY: "The image storage is not ready. See the message under My floppy images.",
   CONFIRMATION_REQUIRED: "Confirmation missing.",
   FORMAT_NOT_WRITABLE: "This image format does not support writing.",
+  INVALID_ROOT_DIR: "This root directory is not allowed. Use folder names with letters, digits, spaces and - _ . ( ) & + , ! separated by /, without .. and not starting or ending with a dot or space.",
+  SD_ERROR: "The folder could not be created on the SD card. The setting was not changed.",
   UNSAVED_CHANGES: "The Atari wrote to the current disk and those changes are not saved yet. Wait a moment and try again.",
   INVALID_NAME: "Enter a name of 1 to 52 characters (letters, digits, spaces and punctuation).",
   INVALID_REQUEST: "The request was not accepted.",
@@ -1062,6 +1082,13 @@ function signalText(rssi) {
 function renderSettings(d) {
   S.machines = d.machines;
   if (document.activeElement !== $("hostname")) $("hostname").value = d.hostname;
+  if (document.activeElement !== $("rootdir")) $("rootdir").value = d.root_dir || "";
+  const sd = d.sd || {};
+  const where = "sd:/" + (d.root_dir || "");
+  $("sdstate").textContent = !sd.present ? "No SD card found."
+    : "Card of " + (sd.size_mb >= 1024 ? (sd.size_mb / 1024).toFixed(1) + " GB" : sd.size_mb + " MB") + ". " +
+      (sd.root_exists ? "Root directory " + where + " is there." : "Root directory " + where + " not found.");
+  $("rootsave").disabled = S.authRequired && !S.token;
   $("w-ssid").textContent = d.wifi.ssid || "–";
   $("w-ip").textContent = d.wifi.connected ? d.wifi.ip : "not connected";
   $("w-rssi").textContent = d.wifi.connected ? signalText(d.wifi.rssi) : "–";
@@ -1109,6 +1136,29 @@ async function refreshSettings() {
     setOnline(false);
   }
 }
+
+$("rootform").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  showSetMsg("", "");
+  // Spaces around the name and '/' at the start or end are not part of it.
+  const root = $("rootdir").value.trim().replace(/^\/+|\/+$/g, "").trim();
+  $("rootsave").disabled = true;
+  try {
+    const r = await api("PUT", "/api/v1/settings", { root_dir: root }, 15000, true);
+    if (r.status === 200) {
+      $("rootdir").blur();
+      renderSettings(r.data);
+      const sd = r.data.sd || {};
+      showSetMsg("ok", "Root directory saved: sd:/" + root + (sd.present
+        ? "" : " (no SD card: the folder is created once a card is in)."));
+    } else {
+      showSetMsg("err", errorText(r.data, r.status).text);
+    }
+  } catch (e) {
+    showSetMsg("err", "RadioFloppy cannot be reached.");
+  }
+  $("rootsave").disabled = false;
+});
 
 $("hostform").addEventListener("submit", async (ev) => {
   ev.preventDefault();
