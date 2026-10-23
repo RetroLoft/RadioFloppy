@@ -3,11 +3,13 @@
 WiFi floppy emulator for the Atari ST: ESP32-S3 (Otronic DevKitC, N16R8)
 on a carrier board, ESP-IDF 5.5.5, C. It plays .ST and HFE (v1/v3) images
 as drive B: over the Shugart interface; images live in an image library on
-an external SPI NOR flash; HTTP API + web UI (`docs/API.md`).
+an external SPI NOR flash; an SD card (J5) is mounted and the move of the
+library to the card has started; HTTP API + web UI (`docs/API.md`).
 
 ## Read first
 
-- `docs/HANDOFF_BOARD_REV2.md` – current work: firmware for PCB revision 2.
+- `docs/HANDOFF_BOARD_REV2.md` – PCB revision 2: what changed, test results,
+  hardware notes for a next revision, the SD card plan (current work).
 - `docs/HANDOFF_HFE.md` – the HFE player: design, test results, open steps.
 - `README.md`, `docs/API.md`, `docs/FLASH_LAYOUT.md` for the rest.
 
@@ -15,22 +17,25 @@ These handoff files replace the chat history of earlier sessions. Keep
 them up to date: when the user asks for "aantekeningen" (notes), update or
 add a handoff file before committing.
 
-## State (2026-10-12)
+## State (2026-10-23)
 
 | Branch | State |
 | --- | --- |
-| `main` | Firmware for PCB revision 1 with the HFE player (HFEv1 and HFEv3 games run on the Atari). |
-| `wip/board-rev2` | `main` + firmware for PCB revision 2 (new pin map, shared SPI bus with SD card, LEDs on J4). Builds; **not flashed or tested yet** – the rev 2 board is being manufactured. |
-| `wip/hfe-player` | Old, equal to `main`; can be deleted. |
+| `main` | Firmware for **PCB revision 2**, tested on the board: HFE player, LEDs on J4 with the 1/2 LED setting, SD card mounted at start-up with the root directory setting. |
+| `wip/board-rev2` | Merged into `main`; can be deleted. |
+| `wip/hfe-player` | Old, contained in `main`; can be deleted. |
 
-PCB revision 1 is retired: no need to keep supporting it. **Never flash
-`wip/board-rev2` on a rev 1 board** (GPIO20 is the buzzer there).
+**PCB revision 1 is history**: not supported any more, no need to keep it
+working. Never flash current firmware on a rev 1 board (GPIO20 is the
+buzzer there).
 
-Open work, in order: test rev 2 when it arrives (checklist in
-`docs/HANDOFF_BOARD_REV2.md`) and merge it into `main`; SD card support;
-HFE weak bits (phase 3, needs a test file with real RAND areas); a timing
-measurement tool (P-47 hangs after its intro); cosmetic items listed in
-`docs/HANDOFF_HFE.md`.
+Open work, in order: the image library on the SD card (images as files
+in the root directory; see the plan in `docs/HANDOFF_BOARD_REV2.md`);
+`tests/web/ui_test.py` (the "full flash: NO_SPACE" check fails while
+compression is on, and the arrow-key reorder step can fire while the page
+is still busy); HFE weak bits (phase 3, needs a test file with real RAND
+areas); a timing measurement tool (P-47 hangs after its intro); cosmetic
+items listed in `docs/HANDOFF_HFE.md`.
 
 ## How the user wants to work
 
@@ -54,7 +59,7 @@ measurement tool (P-47 hangs after its intro); cosmetic items listed in
 Linux PC (attic):
 ```sh
 . ~/esp/esp-idf/export.sh
-idf.py -p /dev/ttyACM0 build flash      # opening the port resets the board
+idf.py -p /dev/ttyACM0 build flash      # the DevKitC's UART port (CH343)
 tests/host/run.sh                        # host tests (gcc)
 RADIOFLOPPY_HOST=<ip> python3 tests/api/api_test.py
 RADIOFLOPPY_HOST=<ip> python3 tests/web/ui_test.py   # websocket-client + Chrome
@@ -63,12 +68,17 @@ RADIOFLOPPY_HOST=<ip> python3 tests/web/ui_test.py   # websocket-client + Chrome
 Windows laptop: ESP-IDF in `C:\Users\frank\esp\esp-idf`
 (`. C:\Users\frank\esp\esp-idf\export.ps1`, Python 3.12 and Git on PATH
 first), build dirs outside OneDrive (`-B C:\Users\frank\esp\build-radiofloppy`,
-`...-rev2` for the rev 2 branch), serial COM3. Host tests from Git Bash
+`...-rev2` was used for the rev 2 branch), serial COM3. Host tests from Git Bash
 with `PATH=/c/msys64/ucrt64/bin:$PATH`. UI test: set `CHROME` to the
 Chrome executable. Turn off the WireGuard `retroloft` tunnel there: it also
 routes 192.168.178.0/24 and hides the board.
 
-Device: API `http://192.168.178.62/api/v1/status` (DHCP, may change).
+Device: API `http://192.168.178.35/api/v1/status` (rev 2 board; DHCP, may
+change). Use the DevKitC's **UART** USB port for flashing and logs: opening
+it does not reset the board (reset through RTS/EN, as `idf.py flash` and
+`idf.py monitor` do). The native USB port disappears once the firmware runs
+(GPIO20 is the LED on J4 pin 3); it only works for flashing in download
+mode (hold BOOT, press RESET).
 After any firmware change run both device tests (ST regression) before
 reporting success. `tests/api/api_test.py` needs
 `images/CRYSTAL_CASTLES.ST` (git-ignored; download it from the board:
@@ -81,12 +91,14 @@ HFEv3 from a Greaseweazle flux dump). Commercial images are never committed.
 
 ## Code map (main/)
 
-- `board_pins.h` – pin map (rev 2 on `wip/board-rev2`).
+- `board_pins.h` – pin map of PCB revision 2.
 - `drive_emu.c` – Shugart drive state in ISRs; `drive_swap_media` (disk
   change, also while selected unless the computer writes).
 - `flux_stream.c` – RMT flux (RDATA) and INDEX; ST mode and HFE mode.
 - `disk_image.c`, `disk_switch.c` – track buffers in PSRAM, disk changes.
 - `hfe.c` / `hfe_import.c` – HFE parser, packing, streaming upload.
 - `image_store.c`, `ext_flash.c`, `img_codec.c` – image library on the NOR flash.
+- `sd_card.c` – SD card in J5 (shared SPI bus, own lock, FAT with long
+  names), root directory; `settings.c` – settings record (v7).
 - `api.c`, `web/index.html` – HTTP API and web UI. `oled.c`, `leds.c`,
   `buttons.c`, `step_sound.c` – front panel. `wifi_net.c`, `setup_mode.c` – WiFi.

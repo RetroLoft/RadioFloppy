@@ -1,21 +1,14 @@
-# Handoff: board revision 2 (state at 2026-09-29)
+# Handoff: board revision 2 (state at 2026-10-23)
 
 For whoever continues this work (a new Claude session or a person). Read
-this first, next to `docs/HANDOFF_HFE.md` (the HFE work, now on `main`).
+this first, next to `docs/HANDOFF_HFE.md` (the HFE player, on `main`).
 
 ## Where things stand
 
-| Branch | State |
-| --- | --- |
-| `main` | Firmware for board revision 1, HFE player merged. Runs on the rev 1 board. |
-| `wip/board-rev2` | **Firmware prepared for board revision 2 (`hardware/v1.1`). Builds without warnings; never flashed or tested:** the rev 2 board is being manufactured. |
-
-Board revision 1 is finished and will not be supported any more: the
-rev 2 firmware drops everything that only existed for rev 1.
-
-**Do not flash `wip/board-rev2` on a rev 1 board**: GPIO20 is the buzzer
-there and the status LED on rev 2, so the buzzer would sound with the
-WiFi blink pattern.
+The rev 2 firmware is **merged into `main`** and runs on the rev 2 board.
+**Revision 1 is history**: not supported any more. Do not flash current
+firmware on a rev 1 board (GPIO20 is the buzzer there and the LED on J4
+pin 3 on rev 2).
 
 ## What changed from revision 1 to 2
 
@@ -64,24 +57,46 @@ SW_NEXT 19), UART0.
 - Build on the Windows laptop into a separate directory:
   `idf.py -B C:\Users\frank\esp\build-radiofloppy-rev2 -p COMx build flash`.
 
-## Checklist when the rev 2 board arrives
+## Test results on the rev 2 board (2026-10-21 .. 10-23)
 
-1. Flash `wip/board-rev2` (app only; no chip erase without permission).
-2. Buttons: left/right still as on rev 1? (On rev 1 SW_PREV was physically
-   the RIGHT button, the opposite of the schematic.) Adjust
-   `main/buttons.c` if not.
-3. LEDs: ACTIVITY while the Atari reads B:; STATUS blinks at start-up, goes
-   off once connected, on after 60 s with WiFi off; fast blink in setup
-   mode (both buttons 10 s).
-4. Buzzer on GPIO46: STEP clicks (needs +5 V on J2).
-5. DS0/DS1 pull-ups: with the Atari off `/api/v1/status` should show
-   `"selected": false` (on rev 1 the line floated). MOTOR may still float.
-6. ST regression (`tests/api/api_test.py`, `tests/web/ui_test.py`) and one
-   HFE image (e.g. Pink Panther, Klax) on the Atari.
-7. Disk change while a game holds the drive (from the HFE round, not yet
-   tested on the Atari).
+| Item | Result |
+| --- | --- |
+| Flash (app only), boot, image library on the NOR flash | OK (21 images, catalog intact) |
+| DS0/DS1 pull-ups | OK with +5 V on J2 (Atari on): `"selected": false` when idle. Without +5 V on J2 (Atari off, board on USB) the pull-ups have no supply, all lines read active and the activity LED lights; the user accepts this, normal use has +5 V. |
+| Atari reads a game through the emulator | OK |
+| LEDs | Activity on J4 pin 3 OK. 1/2 LED setting (see below) switches at once. With 470R a standard green 3 mm LED is dim (about 2.5 mA). |
+| SD card in J5 | OK: 32 GB SDHC mounted (SPI, 20 MHz), long file names, root directory created; the NOR flash keeps working next to it. |
+| ST regression | `api_test.py` passes; `ui_test.py` only the known "full flash: NO_SPACE" failure (compression is on). |
+| Not checked explicitly yet | Buttons left/right orientation; buzzer clicks on GPIO46; disk change while a game holds the drive. |
 
-Then merge `wip/board-rev2` into `main`.
+## Firmware changes after the first rev 2 version
+
+- **Front panel LEDs** (setting `leds`, 1 or 2; web Settings, API): J4 pin 3
+  (GPIO20) always shows disk activity. WiFi status (blinking while
+  connecting, on when no connection can be made, off when connected, fast
+  in setup mode): with 2 LEDs on J4 pin 1 (GPIO48), with 1 LED on the
+  DevKitC RGB LED in dim blue (WS2812 on GPIO48 via an RMT channel without
+  DMA). Default 1.
+- **SD card** (`main/sd_card.c`): mounted at start-up on the shared SPI bus
+  (own CS GPIO38, own lock), FAT with long file names, never formatted; a
+  removed card is noticed, an inserted one mounted within about 10 s.
+- **Root directory** (setting `root_dir`, settings record v7): the folder on
+  the card where RadioFloppy works ("" = the card's root), strictly
+  validated and only used below `/sd`; created when missing. The user's
+  card has `My Floppies` set.
+
+## Hardware notes for a next revision
+
+- LED resistors R2/R3: 150R (about 7-8 mA) instead of 470R; a standard
+  green LED is dim at 470R. (A modern "pure green" LED needs about 3 V and
+  would need a transistor to 5 V.)
+- Pull-ups on all Shugart inputs (about 1k to +5 V, jumper-selectable):
+  some PC floppy controllers expect the termination at the drive end (a
+  Gotek board has them).
+- A +5 V sense from J2 to a free GPIO (e.g. GPIO3 or GPIO35-37, unused)
+  so the firmware knows whether the computer is powered.
+- Optionally read pin 2 as an input too (PC density select, Falcon HD
+  signalling).
 
 ## Next: the SD card (J5)
 
