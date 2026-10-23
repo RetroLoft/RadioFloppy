@@ -456,6 +456,7 @@ The active disk.
 | `inserted`            | `false`: no disk in the drive (then only `source: "none"`)       |
 | `source`              | `flash` (my floppy images), `psram`, `sd` (a file on the SD card) or `none` |
 | `sd_path`             | Only for `sd`: the file, relative to the root directory           |
+| `sd_copy`             | Only for `sd`: `true` when it was read from its copy in the flash (the card was not available at start-up) |
 | `image_id`            | Only for `flash`: the image it was loaded from                   |
 | `image_changed_since` | For `flash` and `sd`: that image (file) was replaced or deleted since; the drive still plays the disk as it was when activated |
 | `name`, `size`, `crc32` | The disk image                                                 |
@@ -481,8 +482,13 @@ or a file on the SD card (relative to the root directory, see
 
 From the SD card only `.ST` images for now, and always write-protected.
 The disk is remembered like a library image: after a restart it is read
-from the card again (when the card or the file is missing, the start-up
-falls back to the library).
+from the card again. A few seconds after inserting it, RadioFloppy also
+keeps a **copy in the flash** (hidden: not listed or counted as an
+image; its blocks do count in the storage use; only one such copy,
+replaced by the next disk from the card; none when there is no room).
+When the card is missing or cannot be read at start-up, the disk is
+played from that copy (`sd_copy: true`); when the card is there but the
+file is gone, the start-up falls back to the library instead.
 
 Response `200`: the new [`current`](#get-apiv1current) object. Takes about
 0.4–0.9 s (the image is read through its blocks, its CRC checked, the

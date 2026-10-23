@@ -40,6 +40,7 @@ typedef struct {
     char root_dir[SETTINGS_ROOT_MAX + 1];   /* folder on the SD card, "" = the card's root */
     char last_sd[SETTINGS_SD_PATH_MAX + 1]; /* disk active at power-off when it came from the
                                                SD card (below root_dir), else "" */
+    uint32_t last_sd_crc;       /* CRC-32 of that disk (finds its copy in the flash) */
 } settings_t;
 
 /* Read the settings (initialises the external flash if needed). */
@@ -59,8 +60,8 @@ esp_err_t settings_save(const settings_t *s);
 esp_err_t settings_set_last_image(uint16_t image_id);
 
 /* The same for a disk from the SD card (a path below root_dir, sd_path.h
- * rules): stored, and last_image_id cleared. "" clears it. */
-esp_err_t settings_set_last_sd(const char *path);
+ * rules) with its CRC-32: stored, and last_image_id cleared. "" clears it. */
+esp_err_t settings_set_last_sd(const char *path, uint32_t crc);
 
 /* RFC 1123 label: 1..32 letters, digits and '-', not starting/ending with '-'. */
 bool settings_hostname_valid(const char *h);

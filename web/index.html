@@ -519,6 +519,8 @@ function renderCurrent() {
     origin = '<span class="badge temp">Temporary</span> in working memory (PSRAM), not stored — gone after a restart.';
   } else if (c.source === "sd") {
     origin = 'From the SD card: <span class="code">' + esc(c.sd_path) + "</span>";
+    if (c.sd_copy) origin += '<div class="small muted">Played from its copy in RadioFloppy: the SD card ' +
+      "was not available at start-up.</div>";
     if (c.image_changed_since) {
       origin += '<div class="banner warn small" style="margin-top:6px">Note: this file has been ' +
         "replaced or deleted since it was loaded. The Atari still reads the version loaded earlier.</div>";

@@ -37,10 +37,57 @@ static uint8_t *psram_raw;          /* the kept PSRAM image */
 static disk_info_t psram_info;
 
 static TaskHandle_t remember_task;
-#define REMEMBER_SD     0x10000     /* notification value: the SD path in remember_sd */
-static char remember_sd[SD_REL_MAX + 1];
+#define REMEMBER_SD     0x10000     /* notification value: the SD disk in remember_sd */
+static struct {
+    char path[SD_REL_MAX + 1];
+    uint32_t crc;
+} remember_sd;
 static portMUX_TYPE remember_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool enabled = true;         /* false: unsupported machine profile */
+
+/*
+ * Keep a copy of the SD card's disk in the flash (a hidden library record,
+ * IMG_FLAG_SD_COPY), so the disk also comes back at start-up without the
+ * card. Only when the file still is the active disk (same CRC) and the
+ * flash does not hold that copy yet; no room is not an error.
+ */
+static void copy_to_flash(const char *path, uint32_t crc)
+{
+    image_record_t old;
+    bool have = image_store_sd_copy(&old);
+
+    if (have && old.crc32 == crc) {
+        return;                         /* already there */
+    }
+    uint8_t *data;
+    uint32_t size;
+    sd_result_t r = sd_card_load(path, ST_MAX_SIZE, &data, &size);
+    if (r != SD_OK) {
+        printf("SD copy: %s not read (%s)\n", path, sd_result_name(r));
+        return;
+    }
+    if (image_store_crc32(0, data, size) != crc) {
+        printf("SD copy: %s changed since it was inserted - no copy\n", path);
+        free(data);
+        return;
+    }
+    settings_t cfg;
+    settings_get(&cfg);
+    char title[DISK_TITLE_SIZE];
+    const char *name = strrchr(path, '/');
+    disk_title_from_filename(name ? name + 1 : path, title);
+    int64_t t0 = esp_timer_get_time();
+    uint16_t id = 0;
+    esp_err_t err = image_store_save_ex(have ? old.id : 0, title, IMG_FMT_ST | IMG_FLAG_SD_COPY,
+                                        data, size, cfg.compress, &id);
+    free(data);
+    if (err == ESP_OK) {
+        printf("SD copy: %s kept in the flash (%lld ms)\n", path, (esp_timer_get_time() - t0) / 1000);
+    } else {
+        printf("SD copy: no copy in the flash (%s)%s\n", esp_err_to_name(err),
+               err == ESP_ERR_NO_MEM ? ": not enough free storage" : "");
+    }
+}
 
 /* Waits for a change, then until REMEMBER_MS passed without another one. */
 static void remember_task_fn(void *arg)
@@ -58,12 +105,14 @@ static void remember_task_fn(void *arg)
         if (id == REMEMBER_SD) {
             char path[SD_REL_MAX + 1];
             portENTER_CRITICAL(&remember_lock);
-            memcpy(path, remember_sd, sizeof(path));
+            memcpy(path, remember_sd.path, sizeof(path));
+            uint32_t crc = remember_sd.crc;
             portEXIT_CRITICAL(&remember_lock);
-            if (strcmp(s.last_sd, path) != 0 || s.last_image_id) {
-                esp_err_t err = settings_set_last_sd(path);
+            if (strcmp(s.last_sd, path) != 0 || s.last_sd_crc != crc || s.last_image_id) {
+                esp_err_t err = settings_set_last_sd(path, crc);
                 printf("Last disk: %s (SD card) remembered%s\n", path, err == ESP_OK ? "" : " - FAILED");
             }
+            copy_to_flash(path, crc);
         } else if (s.last_image_id != id || s.last_sd[0]) {
             esp_err_t err = settings_set_last_image((uint16_t)id);
             printf("Last disk: image %lu remembered%s\n", (unsigned long)id,
@@ -72,14 +121,15 @@ static void remember_task_fn(void *arg)
     }
 }
 
-/* A library image became active: remember it (later, see REMEMBER_MS). */
+/* A disk became active: remember it (later, see REMEMBER_MS). */
 static void remember(const disk_info_t *info)
 {
     if (remember_task && info->source == DISK_SRC_FLASH && info->image_id) {
         xTaskNotify(remember_task, info->image_id, eSetValueWithOverwrite);
-    } else if (remember_task && info->source == DISK_SRC_SD) {
+    } else if (remember_task && info->source == DISK_SRC_SD && !info->sd_copy) {
         portENTER_CRITICAL(&remember_lock);
-        memcpy(remember_sd, info->sd_path, sizeof(remember_sd));
+        memcpy(remember_sd.path, info->sd_path, sizeof(remember_sd.path));
+        remember_sd.crc = info->crc32;
         portEXIT_CRITICAL(&remember_lock);
         xTaskNotify(remember_task, REMEMBER_SD, eSetValueWithOverwrite);
     }
@@ -191,7 +241,11 @@ void disk_switch_set_enabled(bool on)
 void disk_switch_init(void)
 {
     lock = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(remember_task_fn, "remember", 4096, NULL, 1, &remember_task, 1);
+    xTaskCreatePinnedToCore(remember_task_fn, "remember", 6144, NULL, 1, &remember_task, 1);
+    /* Started with a disk from the SD card: make sure its copy is in the flash. */
+    disk_info_t cur;
+    disk_get_current(&cur);
+    remember(&cur);
 }
 
 esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e)

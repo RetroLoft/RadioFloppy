@@ -56,6 +56,7 @@ typedef struct {
     bool keep_sectors;      /* READ_WRITE .ST image: keep its sectors for writing */
     bool hfe;               /* HFE image: packed tracks (hfe.h), played in native timing */
     char sd_path[SD_REL_MAX + 1];   /* DISK_SRC_SD: the file, below the root directory */
+    bool sd_copy;           /* DISK_SRC_SD read from its copy in the flash (card not there) */
 } disk_info_t;
 
 /* Active tracks, [cyl][head][MFM_MAX_BYTES]; read by the flux ISR. */

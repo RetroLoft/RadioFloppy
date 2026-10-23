@@ -375,8 +375,8 @@ static int sorted_indexes(const catalog_t *c, int idx[IMG_MAX_RECORDS])
     int n = 0;
 
     for (int i = 0; i < IMG_MAX_RECORDS; i++) {
-        if (c->rec[i].status == IMG_FREE) {
-            continue;
+        if (c->rec[i].status == IMG_FREE || image_is_sd_copy(&c->rec[i])) {
+            continue;                   /* the SD copy is not part of the library */
         }
         int j = n++;
         while (j > 0 && before(&c->rec[i], &c->rec[idx[j - 1]])) {
@@ -417,6 +417,24 @@ bool image_store_get(uint16_t id, image_record_t *out)
     }
     store_unlock();
     return i >= 0;
+}
+
+bool image_store_sd_copy(image_record_t *out)
+{
+    bool found = false;
+
+    if (state != STORE_VALID) {
+        return false;
+    }
+    store_lock();
+    for (int i = 0; i < IMG_MAX_RECORDS && !found; i++) {
+        if (cat->rec[i].status == IMG_VALID && image_is_sd_copy(&cat->rec[i])) {
+            *out = cat->rec[i];
+            found = true;
+        }
+    }
+    store_unlock();
+    return found;
 }
 
 bool image_store_is_valid(const image_record_t *r)
@@ -488,7 +506,7 @@ void image_store_usage(store_usage_t *u)
     store_lock();
     used_map(cat, -1, used);
     for (int i = 0; i < IMG_MAX_RECORDS; i++) {
-        u->images += cat->rec[i].status == IMG_VALID;
+        u->images += cat->rec[i].status == IMG_VALID && !image_is_sd_copy(&cat->rec[i]);
     }
     store_unlock();
     u->blocks_total = geo.data_blocks;
@@ -759,7 +777,7 @@ static esp_err_t store_unlocked(uint16_t replace_id, const char *name, uint8_t f
     rec.status = IMG_VALID;
     /* New uploads and replacements are READ_ONLY; READ_WRITE only when the
      * caller asks for it (later: a new blank disk) and the format allows it. */
-    rec.format = (format & IMG_FMT_MASK) |
+    rec.format = (format & (IMG_FMT_MASK | IMG_FLAG_SD_COPY)) |
                  ((format & IMG_FLAG_READ_WRITE) && image_format_writable(format & IMG_FMT_MASK)
                   ? IMG_FLAG_READ_WRITE : 0);
     rec.storage_format = sfmt;

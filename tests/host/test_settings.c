@@ -339,7 +339,7 @@ static void test_root_dir(void)
                                  ? RF_SETTINGS_A : RF_SETTINGS_B);
     rec[4] = 6; rec[5] = 0;
     rec[6] = 156; rec[7] = 0;                   /* size */
-    memset(rec + 156, 0xff, 308);               /* as never written */
+    memset(rec + 156, 0xff, 312);               /* as never written */
     memset(rec + 12, 0, 4);
     uint32_t crc = esp_rom_crc32_le(0, rec, 156);
     memcpy(rec + 12, &crc, 4);
@@ -357,17 +357,18 @@ static void test_last_sd(void)
     settings_get(&s);
     CHECK(s.last_sd[0] == 0);
     CHECK(settings_set_last_image(7) == ESP_OK);
-    CHECK(settings_set_last_sd("L/Larry (1987)[a].st") == ESP_OK);
+    CHECK(settings_set_last_sd("L/Larry (1987)[a].st", 0x1234abcd) == ESP_OK);
     settings_init();
     settings_get(&r);
-    CHECK(strcmp(r.last_sd, "L/Larry (1987)[a].st") == 0 && r.last_image_id == 0);   /* one or the other */
+    CHECK(strcmp(r.last_sd, "L/Larry (1987)[a].st") == 0 && r.last_image_id == 0 &&
+          r.last_sd_crc == 0x1234abcd);       /* one or the other */
     CHECK(settings_set_last_image(9) == ESP_OK);
     settings_init();
     settings_get(&r);
-    CHECK(r.last_sd[0] == 0 && r.last_image_id == 9);
-    CHECK(settings_set_last_sd("../x.st") == ESP_ERR_INVALID_ARG);
-    CHECK(settings_set_last_sd("/x.st") == ESP_ERR_INVALID_ARG);
-    CHECK(settings_set_last_sd("") == ESP_OK);
+    CHECK(r.last_sd[0] == 0 && r.last_sd_crc == 0 && r.last_image_id == 9);
+    CHECK(settings_set_last_sd("../x.st", 1) == ESP_ERR_INVALID_ARG);
+    CHECK(settings_set_last_sd("/x.st", 1) == ESP_ERR_INVALID_ARG);
+    CHECK(settings_set_last_sd("", 0) == ESP_OK);
 
     /* A version 7 record (260 bytes): last_sd "". */
     CHECK(settings_set_last_image(3) == ESP_OK);
@@ -375,13 +376,27 @@ static void test_last_sd(void)
                                  ? RF_SETTINGS_A : RF_SETTINGS_B);
     rec[4] = 7; rec[5] = 0;
     rec[6] = 260 & 0xff; rec[7] = 260 >> 8;
-    memset(rec + 260, 0xff, 204);
+    memset(rec + 260, 0xff, 208);
     memset(rec + 12, 0, 4);
     uint32_t crc = esp_rom_crc32_le(0, rec, 260);
     memcpy(rec + 12, &crc, 4);
     settings_init();
     settings_get(&r);
-    CHECK(settings_stored() && r.last_sd[0] == 0 && r.last_image_id == 3);
+    CHECK(settings_stored() && r.last_sd[0] == 0 && r.last_sd_crc == 0 && r.last_image_id == 3);
+
+    /* A version 8 record (464 bytes): last_sd_crc 0. */
+    CHECK(settings_set_last_sd("x.st", 77) == ESP_OK);
+    rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
+                        ? RF_SETTINGS_A : RF_SETTINGS_B);
+    rec[4] = 8; rec[5] = 0;
+    rec[6] = 464 & 0xff; rec[7] = 464 >> 8;
+    memset(rec + 464, 0xff, 4);
+    memset(rec + 12, 0, 4);
+    crc = esp_rom_crc32_le(0, rec, 464);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && strcmp(r.last_sd, "x.st") == 0 && r.last_sd_crc == 0);
 }
 
 int main(void)

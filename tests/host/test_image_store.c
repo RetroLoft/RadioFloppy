@@ -859,6 +859,43 @@ static void test_writer(uint32_t capacity)
     free(back);
 }
 
+static void test_sd_copy(void)
+{
+    fresh(16 * MIB);
+    uint16_t a = save_new(368640, 1, "First");
+    uint16_t b = save_new(368640, 2, "Second");
+    store_usage_t u0, u;
+    image_store_usage(&u0);
+    image_record_t r;
+    CHECK(!image_store_sd_copy(&r));
+
+    uint8_t *d = test_image(737280, 3);
+    uint16_t c = 0;
+    CHECK(image_store_save(0, "Bolo", IMG_FMT_ST | IMG_FLAG_SD_COPY, d, 737280, &c) == ESP_OK && c);
+    CHECK(image_store_sd_copy(&r) && r.id == c && image_is_sd_copy(&r) && image_format(&r) == IMG_FMT_ST);
+    static image_record_t list[IMG_MAX_RECORDS];
+    int n = image_store_list(list, IMG_MAX_RECORDS);
+    CHECK(n == 2 && list[0].id == a && list[1].id == b);        /* not listed */
+    CHECK(image_store_find_name("Bolo") == 0);                  /* not found by name */
+    image_store_usage(&u);
+    CHECK(u.images == u0.images && u.blocks_used > u0.blocks_used);   /* blocks counted, image not */
+    /* Ordering the library ignores it. */
+    CHECK(image_store_set_position(b, 1) == ESP_OK);
+    n = image_store_list(list, IMG_MAX_RECORDS);
+    CHECK(n == 2 && list[0].id == b && list[0].sequence == 1 && list[1].id == a && list[1].sequence == 2);
+    /* Replacing keeps it hidden; it survives a restart. */
+    CHECK(image_store_save(c, "Out Run", IMG_FMT_ST | IMG_FLAG_SD_COPY, d, 419840, NULL) == ESP_OK);
+    CHECK(image_store_open(16 * MIB) == STORE_VALID);
+    CHECK(image_store_sd_copy(&r) && r.id == c && r.original_size == 419840);
+    CHECK(image_store_list(list, IMG_MAX_RECORDS) == 2);
+    /* A new library image after it still goes to the end of the list. */
+    uint16_t e = save_new(368640, 4, "Third");
+    n = image_store_list(list, IMG_MAX_RECORDS);
+    CHECK(n == 3 && list[2].id == e);
+    CHECK(image_store_delete(c) == ESP_OK && !image_store_sd_copy(&r));
+    free(d);
+}
+
 int main(void)
 {
     printf("geometry\n");               test_geometry();
@@ -874,6 +911,7 @@ int main(void)
     printf("copy-on-write of written blocks\n");  test_commit_blocks();
     printf("compression\n");            test_compression();
     printf("catalog version 2 -> 3, logical size\n");  test_catalog_v2();
+    printf("hidden copy of the SD card's disk\n");  test_sd_copy();
     printf("streaming writer 16/32/64 MiB\n");
     test_writer(16 * MIB); test_writer(32 * MIB); test_writer(64 * MIB);
     printf("32 MiB\n");                 test_capacity(32 * MIB);

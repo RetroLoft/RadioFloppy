@@ -385,6 +385,7 @@ static cJSON *current_json(void)
     }
     if (d.source == DISK_SRC_SD) {
         cJSON_AddStringToObject(c, "sd_path", d.sd_path);
+        cJSON_AddBoolToObject(c, "sd_copy", d.sd_copy);
         cJSON_AddBoolToObject(c, "image_changed_since", d.image_changed);
     }
     if (d.source != DISK_SRC_NONE) {

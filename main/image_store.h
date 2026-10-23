@@ -43,6 +43,7 @@
  */
 #define IMG_FMT_MASK        0x3f
 #define IMG_FLAG_READ_WRITE 0x80    /* write protection off (metadata only for now) */
+#define IMG_FLAG_SD_COPY    0x40    /* hidden: copy of the disk from the SD card (one at most) */
 
 /* Image formats. Only ST is supported by this firmware; the other ids are
  * reserved so the catalog never has to change for them. */
@@ -228,6 +229,16 @@ static inline uint8_t image_format(const image_record_t *r)
 {
     return r->format & IMG_FMT_MASK;
 }
+
+/* The hidden copy of the SD card's disk: not part of the library (never
+ * listed, counted, ordered or found by name). */
+static inline bool image_is_sd_copy(const image_record_t *r)
+{
+    return (r->format & IMG_FLAG_SD_COPY) != 0;
+}
+
+/* That copy, if there is a valid one. */
+bool image_store_sd_copy(image_record_t *out);
 
 static inline bool image_read_write(const image_record_t *r)
 {

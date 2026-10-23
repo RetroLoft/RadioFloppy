@@ -369,7 +369,9 @@ static esp_err_t load_boot_sd(const char *path, uint8_t **raw, disk_info_t *info
     sd_result_t r = sd_card_load(path, ST_MAX_SIZE, &buf, &size);
     if (r != SD_OK) {
         printf("Last disk: %s on the SD card: %s\n", path, sd_result_name(r));
-        return ESP_FAIL;
+        /* No card, or it cannot be read: its copy in the flash may help. A
+         * card without the file means it was deleted: then not. */
+        return r == SD_NO_CARD || r == SD_IO ? ESP_ERR_NOT_FOUND : ESP_FAIL;
     }
     if (st_check_image(buf, size, &st) != ST_OK) {
         printf("Last disk: %s on the SD card: %s\n", path, st.detail);
@@ -383,6 +385,34 @@ static esp_err_t load_boot_sd(const char *path, uint8_t **raw, disk_info_t *info
     snprintf(info->sd_path, sizeof(info->sd_path), "%s", path);
     printf("Last disk: %s (SD card, %lu bytes, CRC32 %08lx, read in %lld ms)\n", path,
            (unsigned long)size, (unsigned long)info->crc32, (esp_timer_get_time() - t0) / 1000);
+    *raw = buf;
+    return ESP_OK;
+}
+
+/* The start-up disk from the SD card, read from its copy in the flash. */
+static esp_err_t load_boot_sd_copy(const settings_t *cfg, uint8_t **raw, disk_info_t *info)
+{
+    image_record_t r;
+
+    if (!image_store_sd_copy(&r) || r.crc32 != cfg->last_sd_crc) {
+        printf("Last disk: no copy of it in the flash\n");
+        return ESP_FAIL;
+    }
+    uint8_t *buf = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (image_store_load(r.id, buf) != ESP_OK) {            /* checks the CRC */
+        printf("Last disk: its copy in the flash cannot be read\n");
+        free(buf);
+        return ESP_FAIL;
+    }
+    *info = (disk_info_t) { .source = DISK_SRC_SD, .size = r.original_size, .crc32 = r.crc32,
+                            .sd_copy = true };
+    const char *name = strrchr(cfg->last_sd, '/');
+    disk_title_from_filename(name ? name + 1 : cfg->last_sd, info->name);
+    snprintf(info->sd_path, sizeof(info->sd_path), "%s", cfg->last_sd);
+    printf("Last disk: %s from its copy in the flash (SD card not available)\n", cfg->last_sd);
     *raw = buf;
     return ESP_OK;
 }
@@ -402,8 +432,14 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
     settings_t cfg;
     image_record_t last;
     settings_get(&cfg);
-    if (cfg.last_sd[0] && load_boot_sd(cfg.last_sd, raw, info) == ESP_OK) {
-        return ESP_OK;
+    if (cfg.last_sd[0]) {
+        esp_err_t err = load_boot_sd(cfg.last_sd, raw, info);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        if (err == ESP_ERR_NOT_FOUND && load_boot_sd_copy(&cfg, raw, info) == ESP_OK) {
+            return ESP_OK;
+        }
     }
     uint16_t id = 0;
     if (cfg.last_image_id && image_store_get(cfg.last_image_id, &last) &&

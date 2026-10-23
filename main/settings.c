@@ -37,11 +37,12 @@ static SemaphoreHandle_t mutex;
 #endif
 
 #define SET_MAGIC       0x54534652  /* "RFST" little endian */
-#define SET_VERSION     8           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
+#define SET_VERSION     9           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
                                        4: + machine, 5: + compress (was 0 padding in 4),
                                        6: + leds (was 0 padding in 5),
                                        7: + root_dir (record grows),
-                                       8: + last_sd (record grows) */
+                                       8: + last_sd (record grows),
+                                       9: + last_sd_crc (record grows) */
 #define SET_V1_SIZE     148         /* version 1 records are still read */
 #define SET_COMMIT      0x21544d43  /* "CMT!", last word of the sector */
 #define COMMIT_OFFSET   (RF_SECTOR_SIZE - 4)
@@ -66,13 +67,17 @@ typedef struct {
     char root_dir[SETTINGS_ROOT_MAX + 1];   /* since version 7 */
     uint8_t reserved2[3];       /* 0 (padding in version 7) */
     char last_sd[SETTINGS_SD_PATH_MAX + 1]; /* since version 8 */
+    uint8_t reserved3[3];       /* 0 (padding in version 8) */
+    uint32_t last_sd_crc;       /* since version 9 */
 } record_t;
 
 #define SET_V6_SIZE     156         /* versions 4-6 */
 _Static_assert(offsetof(record_t, root_dir) == SET_V6_SIZE, "settings record layout");
 #define SET_V7_SIZE     260
 _Static_assert(offsetof(record_t, last_sd) == SET_V7_SIZE, "settings record layout");
-_Static_assert(sizeof(record_t) == 464, "settings record layout");
+#define SET_V8_SIZE     464
+_Static_assert(offsetof(record_t, last_sd_crc) == SET_V8_SIZE, "settings record layout");
+_Static_assert(sizeof(record_t) == 468, "settings record layout");
 _Static_assert(SETTINGS_SD_PATH_MAX == SD_REL_MAX, "a last_sd path is an SD path");
 _Static_assert(offsetof(record_t, machine) == 152, "settings record layout");
 
@@ -106,7 +111,8 @@ static size_t version_size(uint16_t version)
     case 5:                             /* + compress */
     case 6:  return SET_V6_SIZE;        /* + leds */
     case 7:  return SET_V7_SIZE;        /* + root_dir */
-    case 8:  return sizeof(record_t);   /* + last_sd */
+    case 8:  return SET_V8_SIZE;        /* + last_sd */
+    case 9:  return sizeof(record_t);   /* + last_sd_crc */
     default: return 0;
     }
 }
@@ -145,6 +151,9 @@ static bool read_copy(int copy, record_t *r)
     }
     if (r->version < 8) {
         memset(r->last_sd, 0, sizeof(r->last_sd));
+    }
+    if (r->version < 9) {
+        r->last_sd_crc = 0;
     }
     return r->magic == SET_MAGIC && commit == SET_COMMIT &&
            terminated(r->hostname, sizeof(r->hostname)) &&
@@ -208,6 +217,7 @@ esp_err_t settings_init(void)
     current.leds = r[best].leds;
     memcpy(current.root_dir, r[best].root_dir, sizeof(current.root_dir));
     memcpy(current.last_sd, r[best].last_sd, sizeof(current.last_sd));
+    current.last_sd_crc = r[best].last_sd_crc;
     generation = r[best].generation;
     current_copy = best;
     return ESP_OK;
@@ -251,13 +261,14 @@ esp_err_t settings_set_last_image(uint16_t image_id)
         settings_t s = current;
         s.last_image_id = image_id;
         s.last_sd[0] = 0;
+        s.last_sd_crc = 0;
         err = save_locked(&s);
     }
     settings_unlock();
     return err;
 }
 
-esp_err_t settings_set_last_sd(const char *path)
+esp_err_t settings_set_last_sd(const char *path, uint32_t crc)
 {
     esp_err_t err = ESP_OK;
 
@@ -265,10 +276,11 @@ esp_err_t settings_set_last_sd(const char *path)
         return ESP_ERR_INVALID_ARG;
     }
     settings_lock();
-    if (strcmp(current.last_sd, path) != 0 || current.last_image_id) {
+    if (strcmp(current.last_sd, path) != 0 || current.last_sd_crc != crc || current.last_image_id) {
         settings_t s = current;
         s.last_image_id = 0;
         snprintf(s.last_sd, sizeof(s.last_sd), "%s", path);
+        s.last_sd_crc = path[0] ? crc : 0;
         err = save_locked(&s);
     }
     settings_unlock();
@@ -310,6 +322,7 @@ static esp_err_t save_locked(const settings_t *s)
     r.leds = s->leds;
     memcpy(r.root_dir, s->root_dir, sizeof(r.root_dir));
     memcpy(r.last_sd, s->last_sd, sizeof(r.last_sd));
+    r.last_sd_crc = s->last_sd_crc;
     r.crc32 = record_crc(&r, sizeof(r));
 
     /* Never touch the copy in use. */
