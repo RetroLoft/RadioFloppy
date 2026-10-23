@@ -34,4 +34,12 @@ void bootloader_before_init(void)
         gpio_ll_pullup_dis(&GPIO, pin);
         gpio_ll_output_enable(&GPIO, pin);
     }
+
+    /* SD_CS (GPIO38) HIGH: the SD card module shares the SPI bus with the
+     * NOR flash and must never answer while the flash is used. */
+    const uint32_t sd_cs = 38;
+    gpio_ll_set_level(&GPIO, sd_cs, 1);
+    esp_rom_gpio_pad_select_gpio(sd_cs);
+    esp_rom_gpio_connect_out_signal(sd_cs, SIG_GPIO_OUT_IDX, false, false);
+    gpio_ll_output_enable(&GPIO, sd_cs);
 }

@@ -20,6 +20,8 @@ typedef struct {
     bool configured;        /* a network is set */
     bool connected;         /* has an IP address (station) */
     bool ap_mode;           /* setup mode: own access point */
+    bool started;           /* the station was started (joining or joined) */
+    uint32_t down_ms;       /* started, not connected: since start-up or the last connection */
     char ssid[33];          /* network joined, or own AP in setup mode */
     char ip[16];
     char hostname[33];      /* in use since start-up */

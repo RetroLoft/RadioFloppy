@@ -10,14 +10,11 @@ void usb_phy_release_pins(void);
 /* Drive the six Shugart outputs LOW = all ULN2003A outputs released. */
 void shugart_outputs_release(void);
 
-/* Push buttons (GPIO19 left, GPIO8 right) + 0.5 s start-up beep. */
-void button_test_run(void);
+/* Keep the SPI chip selects (NOR flash, SD card) HIGH = deselected. */
+void spi_cs_release(void);
 
 /* Shugart output -> input loopback scanner (jumper on J1). */
 void loopback_test_run(void);
 
-/* Read-only floppy emulation of a .ST image from the external flash (drive B:). */
+/* The floppy emulator (drive B:), or WiFi setup mode. */
 void floppy_emu_run(void);
-
-/* Blink an RGB LED on GPIO38 (blue) and GPIO48 (red) to locate it. */
-void led_test_run(void);

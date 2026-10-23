@@ -14,6 +14,7 @@
 #define SETTINGS_HOSTNAME_MAX   32
 #define SETTINGS_SSID_MAX       32
 #define SETTINGS_PASS_MAX       64
+#define SETTINGS_ROOT_MAX       100     /* SD card folder, see settings_root_valid */
 
 /* Lowest security accepted when joining the network. */
 typedef enum {
@@ -34,6 +35,8 @@ typedef struct {
     uint16_t last_image_id;     /* library image active at power-off, 0 = none */
     uint8_t machine;            /* machine_t: connected computer, default ATARI */
     uint8_t compress;           /* 1 = store new read-only images compressed */
+    uint8_t leds;               /* LEDs fitted on J4: 1 (pin 3) or 2 (pins 1 and 3), default 1 */
+    char root_dir[SETTINGS_ROOT_MAX + 1];   /* folder on the SD card, "" = the card's root */
 } settings_t;
 
 /* Read the settings (initialises the external flash if needed). */
@@ -54,6 +57,16 @@ esp_err_t settings_set_last_image(uint16_t image_id);
 
 /* RFC 1123 label: 1..32 letters, digits and '-', not starting/ending with '-'. */
 bool settings_hostname_valid(const char *h);
+
+/*
+ * A root directory for the SD card: "" (the card's root) or one or more
+ * folder names separated by '/', at most SETTINGS_ROOT_MAX characters.
+ * Names: letters, digits, space and - _ . ( ) & + , ! only; not "." or
+ * "..", not starting with '.' or ' ', not ending with '.' or ' '. No '/'
+ * at the start or end, no empty names. It is only ever used below the
+ * card's mount point, never as a path of its own.
+ */
+bool settings_root_valid(const char *root);
 
 /* WPA passphrase: 8..63 printable ASCII or 64 hex digits; "" for open. */
 bool settings_password_valid(const char *pass, wifi_security_t sec);

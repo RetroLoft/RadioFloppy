@@ -38,3 +38,7 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # WiFi, lwIP and the HTTP server on core 1; floppy ISRs and flux stream on core 0.
 CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_1=y
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU1=y
+
+# SD card (board revision 2): long file names, kept on the heap.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

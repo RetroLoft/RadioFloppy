@@ -40,6 +40,7 @@
 #include "drive_emu.h"
 #include "ext_flash.h"
 #include "machine.h"
+#include "sd_card.h"
 #include "settings.h"
 #include "step_sound.h"
 #include "hfe.h"
@@ -1434,6 +1435,16 @@ static cJSON *settings_json(void)
     cJSON_AddStringToObject(root, "drive_select_active", running_ds == 0 ? "DS0" : "DS1");
     cJSON_AddBoolToObject(root, "buzzer", s.buzzer);
     cJSON_AddBoolToObject(root, "compression", s.compress);
+    cJSON_AddNumberToObject(root, "leds", s.leds);
+    cJSON_AddStringToObject(root, "root_dir", s.root_dir);
+    sd_status_t sd;
+    sd_card_status(&sd);
+    cJSON *jsd = cJSON_AddObjectToObject(root, "sd");
+    cJSON_AddBoolToObject(jsd, "present", sd.present);
+    if (sd.present) {
+        cJSON_AddNumberToObject(jsd, "size_mb", sd.size_mb);
+        cJSON_AddBoolToObject(jsd, "root_exists", sd.root_exists);
+    }
     cJSON_AddStringToObject(root, "machine", machine_profile(s.machine)->id);
     cJSON_AddStringToObject(root, "machine_active", machine_profile(machine_active())->id);
     cJSON_AddBoolToObject(root, "machine_supported", machine_profile(s.machine)->supported);
@@ -1525,6 +1536,33 @@ static esp_err_t put_settings(httpd_req_t *req)
         }
         s.compress = cJSON_IsTrue(jc);
     }
+    const cJSON *jr = cJSON_GetObjectItem(body, "root_dir");
+    if (jr) {
+        if (!cJSON_IsString(jr) || !settings_root_valid(jr->valuestring)) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_422, "INVALID_ROOT_DIR",
+                              "root_dir: folder names separated by '/', at most %d characters; "
+                              "letters, digits, space and - _ . ( ) & + , ! only; no \"..\", no '/' "
+                              "at the start or end, no name starting with '.' or ' ' or ending "
+                              "with '.' or ' '", SETTINGS_ROOT_MAX);
+        }
+        /* Create it on the card now; without a card it is created once one is in. */
+        esp_err_t err = sd_card_make_root(jr->valuestring);
+        if (err == ESP_FAIL) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_500, "SD_ERROR", "the folder could not be created on the "
+                              "SD card; the setting was not changed");
+        }
+        snprintf(s.root_dir, sizeof(s.root_dir), "%s", jr->valuestring);
+    }
+    const cJSON *jl = cJSON_GetObjectItem(body, "leds");
+    if (jl) {
+        if (!cJSON_IsNumber(jl) || (jl->valuedouble != 1 && jl->valuedouble != 2)) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_400, "INVALID_REQUEST", "\"leds\" must be 1 or 2");
+        }
+        s.leds = (uint8_t)jl->valuedouble;
+    }
     const cJSON *bz = cJSON_GetObjectItem(body, "buzzer");
     if (bz) {
         if (!cJSON_IsBool(bz)) {
@@ -1543,9 +1581,9 @@ static esp_err_t put_settings(httpd_req_t *req)
             return send_error(req, HTTP_500, "FLASH_ERROR", "settings could not be saved (%s)",
                               esp_err_to_name(err));
         }
-        printf("API: settings saved (host name %s, drive %s, buzzer %s, machine %s)\n",
-               s.hostname, s.drive_select == 0 ? "A: / DS0" : "B: / DS1",
-               s.buzzer ? "on" : "off", machine_profile(s.machine)->id);
+        printf("API: settings saved (host name %s, drive %s, buzzer %s, machine %s, %u LED(s), "
+               "root \"%s\")\n", s.hostname, s.drive_select == 0 ? "A: / DS0" : "B: / DS1",
+               s.buzzer ? "on" : "off", machine_profile(s.machine)->id, s.leds, s.root_dir);
     }
     step_sound_set_enabled(s.buzzer);   /* takes effect at once */
     return send_json(req, "200 OK", settings_json());

@@ -38,6 +38,7 @@ static esp_timer_handle_t verify_timer;
 static esp_err_t start_result;
 static volatile uint8_t last_reason;
 static settings_t cfg_now;              /* settings used for this boot */
+static volatile int64_t down_since_us;  /* station started / last lost; 0: not started */
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -50,6 +51,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         last_reason = ev->reason;
         if (connected) {
             printf("WiFi: disconnected, retrying\n");
+            down_since_us = esp_timer_get_time();
         }
         connected = false;
         if (!ap_mode) {
@@ -194,6 +196,7 @@ esp_err_t wifi_net_start(uint32_t verify_ms)
         printf("WiFi: no network configured - API off\n");
         return ESP_ERR_NOT_FOUND;
     }
+    down_since_us = esp_timer_get_time();
     esp_err_t err = run_init();
     printf("WiFi: %s, joining \"%s\" (host name %s)\n",
            err == ESP_OK ? "started" : esp_err_to_name(err), cfg_now.wifi_ssid,
@@ -245,6 +248,9 @@ void wifi_net_get_status(wifi_net_status_t *st)
     st->ap_mode = ap_mode;
     st->configured = cfg_now.wifi_ssid[0] != 0 || s.wifi_ssid[0] != 0;
     st->connected = connected;
+    int64_t since = down_since_us;
+    st->started = since != 0 && !ap_mode;
+    st->down_ms = st->started && !connected ? (uint32_t)((esp_timer_get_time() - since) / 1000) : 0;
     /* The name in use since start-up (a newly saved one needs a restart). */
     snprintf(st->hostname, sizeof(st->hostname), "%s",
              cfg_now.hostname[0] ? cfg_now.hostname : s.hostname);

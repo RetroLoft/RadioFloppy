@@ -592,6 +592,9 @@ State of an upload. Only the most recent upload is kept; older ids give
   "drive_select_active": "DS1",
   "buzzer": true,
   "compression": false,
+  "leds": 1,
+  "root_dir": "My Floppies",
+  "sd": { "present": true, "size_mb": 29818, "root_exists": true },
   "last_image_id": 6,
   "machine": "ATARI",
   "machine_active": "ATARI",
@@ -637,6 +640,24 @@ Body (`Content-Type: application/json`), every field optional:
   about the same time (0.5–1 s). A compressed writable disk is saved as a
   whole (compress, write all its blocks, one catalog update): a save takes
   a few seconds instead of about one.
+- `leds`: `1` or `2` (default `1`) — how many LEDs are fitted on J4.
+  The LED on J4 pin 3 always shows disk activity (on while the drive is
+  selected and its motor runs). The WiFi status (blinking while
+  connecting, on when no connection can be made, off when connected, fast
+  blinking in setup mode) goes to J4 pin 1 with `2`, and with `1` to the
+  ESP32 board's own RGB LED (blue). Takes effect at once.
+- `root_dir`: the folder on the SD card where RadioFloppy works, e.g.
+  `"My Floppies"` or `"Retro/My Floppies"`; `""` (default) is the root of
+  the card. Folder names separated by `/`, at most 100 characters;
+  letters, digits, space and `- _ . ( ) & + , !` only; no `.`/`..`, no `/`
+  at the start or end, no name starting with `.` or a space or ending with
+  `.` or a space; else `422 INVALID_ROOT_DIR`. It is always used below the
+  card's mount point. The folder is created at once when a card is in
+  (`500 SD_ERROR` if that fails: the setting is then not changed), else
+  as soon as a card is inserted.
+- `sd` (read only): `present` (a card is mounted), and with a card
+  `size_mb` and `root_exists`. A card inserted later is found within
+  about 10 s.
 - `machine`: the connected computer, `"ATARI"` (Atari 16-bit, default),
   `"AMIGA"` (Commodore Amiga) or `"DOS"` (IBM PC / DOS); else
   `422 INVALID_MACHINE`. Takes effect after a restart; `machine_active` is

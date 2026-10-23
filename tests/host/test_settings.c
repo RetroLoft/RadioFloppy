@@ -254,6 +254,7 @@ static void test_compress(void)
     uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
                                  ? RF_SETTINGS_A : RF_SETTINGS_B);
     rec[4] = 4; rec[5] = 0;
+    rec[6] = 156; rec[7] = 0;                   /* size of versions 4-6 */
     rec[153] = 0;
     memset(rec + 12, 0, 4);
     uint32_t crc = esp_rom_crc32_le(0, rec, 156);
@@ -261,6 +262,90 @@ static void test_compress(void)
     settings_init();
     settings_get(&r);
     CHECK(settings_stored() && r.compress == 0);
+}
+
+static void test_leds(void)
+{
+    settings_t s, r;
+
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    CHECK(s.leds == 1);                         /* default: one LED */
+    s.leds = 2;
+    CHECK(settings_save(&s) == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(r.leds == 2);
+    s.leds = 0;
+    CHECK(settings_save(&s) == ESP_ERR_INVALID_ARG);
+    s.leds = 3;
+    CHECK(settings_save(&s) == ESP_ERR_INVALID_ARG);
+
+    /* A version 5 record (same size, the byte was 0 padding): one LED. */
+    uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
+                                 ? RF_SETTINGS_A : RF_SETTINGS_B);
+    rec[4] = 5; rec[5] = 0;
+    rec[6] = 156; rec[7] = 0;                   /* size of versions 4-6 */
+    rec[154] = 0;
+    memset(rec + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, rec, 156);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && r.leds == 1);
+}
+
+static void test_root_dir(void)
+{
+    static const char *good[] = {
+        "", "My Floppies", "Retro/My Floppies", "a", "ST games (2026)", "A&B+C,D!_-x.y",
+        "x/y/z", "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789",
+    };
+    static const char *bad[] = {
+        "/My Floppies", "My Floppies/", "a//b", ".", "..", "a/../b", "../x", ".hidden", "name.",
+        " lead", "trail ", "a/ b", "tab\there", "back\\slash", "colon:", "star*", "q?", "<x>", "pipe|",
+        "quote\"", "\xc3\xa9t\xc3\xa9", "/",
+        "01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890",
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        if (!settings_root_valid(good[i])) { printf("  root wrongly refused: '%s'\n", good[i]); failures++; }
+    }
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (settings_root_valid(bad[i])) { printf("  root wrongly accepted: '%s'\n", bad[i]); failures++; }
+    }
+
+    settings_t s, r;
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    CHECK(s.root_dir[0] == 0);                  /* default: the card's root */
+    strcpy(s.root_dir, "Retro/My Floppies");
+    CHECK(settings_save(&s) == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(strcmp(r.root_dir, "Retro/My Floppies") == 0 && r.leds == s.leds);
+    strcpy(s.root_dir, "../etc");
+    CHECK(settings_save(&s) == ESP_ERR_INVALID_ARG);
+    settings_init();
+    settings_get(&r);
+    CHECK(strcmp(r.root_dir, "Retro/My Floppies") == 0);   /* unchanged */
+
+    /* A version 6 record (156 bytes): read, root = "". */
+    strcpy(s.root_dir, "");
+    s.leds = 2;
+    CHECK(settings_save(&s) == ESP_OK);
+    uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
+                                 ? RF_SETTINGS_A : RF_SETTINGS_B);
+    rec[4] = 6; rec[5] = 0;
+    rec[6] = 156; rec[7] = 0;                   /* size */
+    memset(rec + 156, 0xff, 104);               /* as never written */
+    memset(rec + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, rec, 156);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && r.root_dir[0] == 0 && r.leds == 2);
 }
 
 int main(void)
@@ -273,6 +358,8 @@ int main(void)
     test_buzzer_and_last_image();
     test_machine();
     test_compress();
+    test_leds();
+    test_root_dir();
     printf(failures ? "FAILED (%d)\n" : "settings OK\n", failures);
     return failures != 0;
 }
