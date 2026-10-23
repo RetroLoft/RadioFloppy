@@ -55,6 +55,12 @@
   ul.slots li { display: grid; grid-template-columns: 2.4em minmax(0, 1fr) auto; gap: 10px; align-items: center;
                 padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
   ul.slots li.free { padding: 4px 10px; color: var(--muted); }
+  #sdlist li { grid-template-columns: 1.6em minmax(0, 1fr) auto; }
+  #sdlist .sdname { font-weight: 600; word-break: break-word; }
+  #sdlist a.sdname { text-decoration: none; }
+  #sdlist a.sdname:hover { text-decoration: underline; }
+  #sdcrumbs a { text-decoration: none; }
+  #sdcrumbs a:hover { text-decoration: underline; }
   ul.slots li.active { border: 2px solid var(--active); background: var(--active-bg); }
   #images li { position: relative; padding-left: 30px; }
   .grip { position: absolute; left: 0; top: 0; bottom: 0; width: 20px; border-radius: 7px 0 0 7px;
@@ -186,6 +192,21 @@
       for 2 seconds; wait for “all changes saved” before switching the power off.</p>
     <ul id="images" class="slots"><li class="free">Loading…</li></ul>
     <input type="file" id="replacefile" accept=".st,.ST,.hfe,.HFE" class="hidden" aria-hidden="true" tabindex="-1">
+  </section>
+
+  <section aria-labelledby="h-sdcard" id="sdsec">
+    <h2 id="h-sdcard">SD card <span id="sdcount" class="muted small"></span></h2>
+    <p class="small muted" style="margin:0 0 10px">Images on the SD card. Inserting them into the drive
+      comes in a next version; for now the drive plays <em>My floppy images</em>.</p>
+    <div id="sdcrumbs" class="small" style="margin-bottom:10px"></div>
+    <div class="row" style="margin-bottom:10px">
+      <button id="sdup" type="button">Upload here…</button>
+      <button id="sdnewdir" type="button" class="secondary">New folder</button>
+      <span id="sdstage" class="small muted"></span>
+    </div>
+    <progress id="sdprog" class="hidden" max="100" value="0"></progress>
+    <ul id="sdlist" class="slots"><li class="free">Loading…</li></ul>
+    <input type="file" id="sdfile" accept=".st,.ST,.hfe,.HFE" multiple class="hidden" aria-hidden="true" tabindex="-1">
   </section>
 
   <section aria-labelledby="h-auth" id="authsec" class="hidden">
@@ -412,7 +433,14 @@ const ERRORS = {
   CONFIRMATION_REQUIRED: "Confirmation missing.",
   FORMAT_NOT_WRITABLE: "This image format does not support writing.",
   INVALID_ROOT_DIR: "This root directory is not allowed. Use folder names with letters, digits, spaces and - _ . ( ) & + , ! separated by /, without .. and not starting or ending with a dot or space.",
-  SD_ERROR: "The folder could not be created on the SD card. The setting was not changed.",
+  SD_ERROR: "The SD card reported an error.",
+  SD_NOT_PRESENT: "There is no SD card in RadioFloppy.",
+  INVALID_PATH: "This folder name is not allowed. Avoid \\ / : * ? \" < > | and names starting or ending with a dot or space.",
+  FOLDER_NOT_FOUND: "This folder does not exist (any more).",
+  FILE_NOT_FOUND: "This file does not exist (any more).",
+  FOLDER_EXISTS: "A folder or file with this name already exists.",
+  FILE_EXISTS: "A file with this name already exists.",
+  FOLDER_NOT_EMPTY: "The folder is not empty.",
   UNSAVED_CHANGES: "The Atari wrote to the current disk and those changes are not saved yet. Wait a moment and try again.",
   INVALID_NAME: "Enter a name of 1 to 52 characters (letters, digits, spaces and punctuation).",
   INVALID_REQUEST: "The request was not accepted.",
@@ -543,6 +571,8 @@ const ICON_PATHS = {
   refresh: '<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/>',
   trash: '<path d="M4 7l16 0"/><path d="M10 11l0 6"/><path d="M14 11l0 6"/>' +
          '<path d="M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12"/><path d="M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3"/>',
+  folder: '<path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2"/>',
+  file: '<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/>',
   download: '<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/>' +
             '<path d="M12 17v-6"/><path d="M9.5 14.5l2.5 2.5l2.5 -2.5"/>',
   zip: '<path d="M6 20.735a2 2 0 0 1 -1 -1.735v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2h-1"/>' +
@@ -718,6 +748,7 @@ function renderAuth() {
 function setBusy(b) {
   S.busy = b;
   renderAuth();
+  renderSd();
   if (!b) {
     refreshAll();                   // resume and confirm the real state
   }
@@ -775,6 +806,7 @@ async function refreshAll() {
   try {
     await refreshCurrent();
     await refreshImages();
+    await refreshSd();
     setOnline(true);
   } catch (e) {
     setOnline(false);
@@ -982,7 +1014,7 @@ function setStage(text, progress) {
 }
 
 // PUT the file with XMLHttpRequest (upload progress); resolves {status, data}.
-function putFile(url, file) {
+function putFile(url, file, stage = setStage) {
   return queued(() => new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open("PUT", url);
@@ -990,9 +1022,9 @@ function putFile(url, file) {
     x.setRequestHeader("Content-Type", "application/octet-stream");
     x.timeout = 120000;
     x.upload.onprogress = (e) => {
-      if (e.lengthComputable) setStage("Sending file… " + Math.round(e.loaded * 100 / e.total) + "%", e.loaded * 100 / e.total);
+      if (e.lengthComputable) stage("Sending file… " + Math.round(e.loaded * 100 / e.total) + "%", e.loaded * 100 / e.total);
     };
-    x.upload.onload = () => setStage("Processing image / programming flash…", null);
+    x.upload.onload = () => stage("Checking and storing…", null);
     x.onload = () => {
       let data = null;
       try { data = JSON.parse(x.responseText); } catch (e) { data = null; }
@@ -1063,6 +1095,222 @@ async function uploadFile(file, body) {
     if (S.busy) setBusy(false);
   }
 }
+
+// ---- SD card: browse, upload, folders --------------------------------------------
+
+S.sdPath = "";              // folder below the root directory ("" = the root directory)
+S.sdData = null;            // last GET /sd/files answer, or null
+S.sdState = "loading";      // "ok", "nocard", "absent" (firmware without SD), "error"
+
+const sdJoin = (a, b) => (a ? a + "/" : "") + b;
+const sdQuery = (path) => "?path=" + encodeURIComponent(path);
+
+function sdStage(text, progress) {
+  $("sdstage").textContent = text;
+  const p = $("sdprog");
+  if (progress === undefined) {
+    p.classList.add("hidden");
+  } else {
+    p.classList.remove("hidden");
+    if (progress === null) p.removeAttribute("value"); else p.value = progress;
+  }
+}
+
+async function refreshSd() {
+  if (S.busy) return;                 // setBusy(false) refreshes it afterwards
+  const path = S.sdPath;
+  let r;
+  try {
+    r = await api("GET", "/api/v1/sd/files" + sdQuery(path));
+  } catch (e) {
+    return;                 // connection state is handled by the other refreshes
+  }
+  if (path !== S.sdPath) return;     // answer for a folder we have left meanwhile
+  if (r.status === 200) {
+    S.sdState = "ok";
+    S.sdData = r.data;
+  } else if (r.status === 404 && r.data && r.data.error && r.data.error.code === "FOLDER_NOT_FOUND" && S.sdPath) {
+    S.sdPath = "";          // the folder went away: back to the root directory
+    return refreshSd();
+  } else {
+    S.sdData = null;
+    S.sdState = r.status === 503 ? "nocard" : r.status === 404 ? "absent" : "error";
+  }
+  renderSd();
+}
+
+function renderSd() {
+  $("sdsec").classList.toggle("hidden", S.sdState === "absent");
+  const list = $("sdlist");
+  const canChange = (!S.authRequired || !!S.token) && !S.busy && S.online !== false && S.sdState === "ok";
+  $("sdup").disabled = !canChange;
+  $("sdnewdir").disabled = !canChange;
+  const crumbs = $("sdcrumbs");
+  crumbs.innerHTML = "";
+  if (S.sdState !== "ok") {
+    $("sdcount").textContent = "";
+    list.innerHTML = '<li class="free">' + (S.sdState === "nocard" ? "No SD card in RadioFloppy."
+      : S.sdState === "loading" ? "Loading…" : "The SD card cannot be read right now.") + "</li>";
+    return;
+  }
+  // Breadcrumbs: root directory › folder › folder (the last one is where we are).
+  const parts = S.sdPath ? S.sdPath.split("/") : [];
+  const rootName = S.sdData.root_dir || "SD card";
+  [rootName].concat(parts).forEach((name, i) => {
+    if (i) crumbs.append(" › ");
+    if (i === parts.length) {
+      const b = document.createElement("strong");
+      b.textContent = name;
+      crumbs.append(b);
+    } else {
+      const a = document.createElement("a");
+      a.href = "#";
+      a.textContent = name;
+      a.addEventListener("click", (ev) => { ev.preventDefault(); sdOpen(parts.slice(0, i).join("/")); });
+      crumbs.append(a);
+    }
+  });
+  const entries = S.sdData.entries.slice().sort((a, b) =>
+    (a.type === b.type ? 0 : a.type === "folder" ? -1 : 1) ||
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
+  const nf = entries.filter((e) => e.type === "file").length, nd = entries.length - nf;
+  $("sdcount").textContent = "(" + [nd ? nd + (nd === 1 ? " folder" : " folders") : "",
+    nf + (nf === 1 ? " file" : " files")].filter(Boolean).join(", ") + (S.sdData.truncated ? ", more not shown" : "") + ")";
+  list.innerHTML = "";
+  if (!entries.length) {
+    list.innerHTML = '<li class="free">This folder is empty.</li>';
+  }
+  const lock = S.authRequired && !S.token ? "Enter the API token first" : "";
+  for (const e of entries) {
+    const li = document.createElement("li");
+    const path = sdJoin(S.sdPath, e.name);
+    const ic = document.createElement("span");
+    ic.className = "muted";
+    ic.innerHTML = icon(e.type === "folder" ? "folder" : "file");
+    const main = document.createElement("span");
+    if (e.type === "folder") {
+      const a = document.createElement("a");
+      a.href = "#";
+      a.className = "sdname";
+      a.textContent = e.name;
+      a.title = "Open this folder";
+      a.addEventListener("click", (ev) => { ev.preventDefault(); sdOpen(path); });
+      main.append(a);
+    } else {
+      main.innerHTML = '<span class="sdname">' + esc(e.name) + '</span><br><span class="small muted">' +
+        kib(e.size) + "</span>";
+    }
+    const act = document.createElement("div");
+    act.className = "actions";
+    act.append(button(icon("trash"), "danger icon", lock || (e.type === "folder" ? "Delete folder" : "Delete file"),
+      !canChange, () => (e.type === "folder" ? sdDeleteFolder(path, e.name) : sdDeleteFile(path, e.name))));
+    li.append(ic, main, act);
+    list.append(li);
+  }
+}
+
+async function sdOpen(path) {
+  S.sdPath = path;
+  S.sdData = null;
+  S.sdState = "loading";
+  renderSd();
+  await refreshSd();
+}
+
+async function sdDeleteFile(path, name) {
+  if (S.busy || !confirm("Delete “" + name + "” from the SD card?")) return;
+  setBusy(true);
+  try {
+    const r = await api("DELETE", "/api/v1/sd/files" + sdQuery(path), undefined, 15000, true);
+    if (r.status === 200) showMsg("ok", "“" + esc(name) + "” deleted from the SD card.");
+    else showError(r.data, r.status, "Deleting “" + name + "” failed.");
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);                   // also refreshes the SD card list
+}
+
+async function sdDeleteFolder(path, name) {
+  if (S.busy || !confirm("Delete the folder “" + name + "” from the SD card?")) return;
+  setBusy(true);
+  try {
+    let r = await api("DELETE", "/api/v1/sd/folders" + sdQuery(path), undefined, 15000, true);
+    if (r.status === 409 && r.data && r.data.error && r.data.error.code === "FOLDER_NOT_EMPTY" &&
+        confirm("The folder “" + name + "” is not empty.\n\nDelete it with everything in it? " +
+                "The files in it are lost.")) {
+      r = await api("DELETE", "/api/v1/sd/folders" + sdQuery(path) + "&recursive=true&confirm=" +
+                    encodeURIComponent(path), undefined, 120000, true);
+    }
+    if (r.status === 200) showMsg("ok", "Folder “" + esc(name) + "” deleted from the SD card.");
+    else if (!(r.status === 409 && r.data && r.data.error && r.data.error.code === "FOLDER_NOT_EMPTY"))
+      showError(r.data, r.status, "Deleting the folder “" + name + "” failed.");
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);                   // also refreshes the SD card list
+}
+
+async function sdNewFolder() {
+  if (S.busy) return;
+  const name = (prompt("Name of the new folder:") || "").trim();
+  if (!name) return;
+  setBusy(true);
+  try {
+    const r = await api("POST", "/api/v1/sd/folders", { path: sdJoin(S.sdPath, name) }, 15000, true);
+    if (r.status === 201) showMsg("ok", "Folder “" + esc(name) + "” created.");
+    else showError(r.data, r.status, "Creating the folder failed.");
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);                   // also refreshes the SD card list
+}
+
+// Upload one file into the current folder; true when stored.
+async function sdUploadOne(file, index, count) {
+  const where = (count > 1 ? "(" + (index + 1) + "/" + count + ") " : "") + file.name + ": ";
+  const body = { filename: file.name, size: file.size, destination: "sd", path: S.sdPath };
+  sdStage(where + "reading…", null);
+  body.crc32 = crc32(new Uint8Array(await file.arrayBuffer()));
+  let c = await api("POST", "/api/v1/uploads", body, 15000, true);
+  if (c.status === 409 && c.data && c.data.error && c.data.error.code === "FILE_EXISTS") {
+    if (!confirm("“" + file.name + "” already exists in this folder.\n\nReplace it?")) return false;
+    body.overwrite = true;
+    c = await api("POST", "/api/v1/uploads", body, 15000, true);
+  }
+  if (c.status !== 201 || !c.data || !c.data.upload_url) {
+    showError(c.data, c.status, "“" + file.name + "” refused.", true);
+    return false;
+  }
+  const r = await putFile(c.data.upload_url, file, (text, p) => sdStage(where + text.toLowerCase(), p));
+  if (r.status === 200 && r.data && r.data.state === "done") return true;
+  showError(r.data, r.status, "“" + file.name + "” failed.", true);
+  return false;
+}
+
+async function sdUpload(files) {
+  if (S.busy || !files.length) return;
+  setBusy(true);
+  $("msg").classList.add("hidden");
+  let ok = 0;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      if (await sdUploadOne(files[i], i, files.length)) ok++;
+      else if (i < files.length - 1 && !confirm("Continue with the other files?")) break;
+    }
+    sdStage("");
+    if (ok) showMsg("ok", ok + (ok === 1 ? " file" : " files") + " stored on the SD card" +
+                    (ok < files.length ? " (" + (files.length - ok) + " not)." : "."));
+  } catch (e) {
+    sdStage("");
+    setOnline(false);
+    showMsg("err", "The connection to RadioFloppy was lost during the upload.");
+  }
+  setBusy(false);                   // also refreshes the SD card list
+}
+
+$("sdup").addEventListener("click", () => { $("sdfile").value = ""; $("sdfile").click(); });
+$("sdfile").addEventListener("change", () => sdUpload([...$("sdfile").files]));
+$("sdnewdir").addEventListener("click", sdNewFolder);
 
 // ---- Settings ----------------------------------------------------------------
 

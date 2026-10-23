@@ -13,6 +13,7 @@ lost connection and a phone screen are simulated in the browser.
 """
 import http.client
 import json
+import urllib.parse
 import os
 import shutil
 import subprocess
@@ -97,12 +98,16 @@ class Browser:
         if msg.get("method") == "Page.javascriptDialogOpening":
             self.events.append(msg)
             # answered by the test via self.dialog_answer
+            params = {"accept": self.dialog_answer}
+            if msg["params"].get("type") == "prompt":
+                params["promptText"] = self.prompt_text
             self.ws.send(json.dumps({"id": 0, "method": "Page.handleJavaScriptDialog",
-                                     "params": {"accept": self.dialog_answer}}))
+                                     "params": params}))
         elif msg.get("method"):
             self.events.append(msg)
 
     dialog_answer = True
+    prompt_text = ""
 
     def js(self, expr, await_promise=False):
         r = self.cmd("Runtime.evaluate", expression=expr, awaitPromise=await_promise,
@@ -380,6 +385,46 @@ def main():
               downloadThroughput=-1, uploadThroughput=-1)
         check(b.wait("document.getElementById('offline').classList.contains('hidden')", 20),
               "reconnected automatically")
+
+        print("SD card")
+        sd = api("GET", "/api/v1/settings")[1].get("sd", {})
+        if not sd.get("present"):
+            print("        (no SD card: skipped)")
+        else:
+            T = "RF UI test"
+            q = lambda p: "?path=" + urllib.parse.quote(p)
+            if api("GET", "/api/v1/sd/files" + q(T))[0] == 200:      # left over from an aborted run
+                api("DELETE", "/api/v1/sd/folders" + q(T) + "&recursive=true&confirm=" + urllib.parse.quote(T))
+                b.js("refreshSd()")
+            check(b.wait("S.sdState === 'ok' && !document.getElementById('sdup').disabled", 20),
+                  "SD card block shown, buttons enabled")
+            check(b.wait("document.getElementById('sdcrumbs').innerText.includes(%s)"
+                         % json.dumps(api("GET", "/api/v1/settings")[1]["root_dir"] or "SD card"), 10),
+                  "breadcrumb shows the root directory")
+            b.dialog_answer = True
+            b.prompt_text = T
+            b.js("document.getElementById('sdnewdir').click()")
+            check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === %s && e.type === 'folder')" % json.dumps(T), 20),
+                  "New folder: created and listed")
+            b.js("[...document.querySelectorAll('#sdlist a.sdname')].find(a => a.textContent === %s).click()" % json.dumps(T))
+            check(b.wait("S.sdPath === %s && S.sdState === 'ok' && document.getElementById('sdcrumbs').innerText.includes(%s)"
+                         % (json.dumps(T), json.dumps(T)), 20), "folder opened, breadcrumb follows")
+            check(b.wait("document.getElementById('sdlist').innerText.includes('empty')", 10), "empty folder says so")
+            b.set_file(cc, "#sdfile")
+            check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === %s && e.size === %d)"
+                         % (json.dumps(os.path.basename(cc)), os.path.getsize(cc)), 60),
+                  "Upload here: the file is listed with its size")
+            check(b.wait("document.getElementById('msg').innerText.includes('stored on the SD card')", 10),
+                  "upload message")
+            b.set_file(cc, "#sdfile")     # same name again: confirm "Replace it?" (answered yes)
+            check(b.wait("document.getElementById('msg').innerText.includes('1 file stored')", 60), "replacing asks and works")
+            b.js("[...document.querySelectorAll('#sdcrumbs a')][0].click()")
+            check(b.wait("S.sdPath === '' && S.sdState === 'ok'", 20), "breadcrumb back to the root directory")
+            b.js("[...document.querySelectorAll('#sdlist li')].find(li => li.innerText.includes(%s))"
+                 ".querySelector('button.danger').click()" % json.dumps(T))
+            check(b.wait("S.sdData && !S.sdData.entries.some(e => e.name === %s)" % json.dumps(T), 60),
+                  "non-empty folder deleted after two confirmations")
+            check(api("GET", "/api/v1/sd/files" + q(T))[0] == 404, "gone on the card")
 
         print("phone screen")
         b.cmd("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleFactor=2, mobile=True)
