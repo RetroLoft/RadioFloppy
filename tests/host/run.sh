@@ -15,6 +15,7 @@ gcc $CFLAGS -o test_st_format test_st_format.c ../../main/st_format.c ../../main
     ../../main/mfm_track.c
 gcc $CFLAGS -o test_mfm_write test_mfm_write.c ../../main/mfm_track.c
 gcc $CFLAGS -o test_hfe test_hfe.c ../../main/hfe.c
+gcc $CFLAGS -o test_sd_path test_sd_path.c ../../main/sd_path.c
 gcc $CFLAGS -DIMAGE_STORE_NO_LOCK -o test_hfe_import test_hfe_import.c mock_ext_flash.c \
     img_codec_host.c ../../main/image_store.c ../../main/hfe.c ../../main/hfe_import.c
 gcc $CFLAGS -o test_title test_title.c ../../main/disk_title.c ../../main/oled_gfx.c
@@ -28,3 +29,4 @@ echo "== blank disk =="; ./test_st_format
 echo "== MFM write decoding =="; ./test_mfm_write
 echo "== HFE =="; ./test_hfe ~/Downloads/road_runner_us_gold/*.hfe ${HFE_TEST_FILES:-}
 echo "== HFE import =="; ./test_hfe_import
+echo "== SD paths =="; ./test_sd_path

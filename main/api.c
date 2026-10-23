@@ -41,6 +41,7 @@
 #include "ext_flash.h"
 #include "machine.h"
 #include "sd_card.h"
+#include "sd_path.h"
 #include "settings.h"
 #include "step_sound.h"
 #include "hfe.h"
@@ -83,6 +84,10 @@ typedef struct {
     bool to_flash;
     uint16_t replace_id;    /* flash: image to replace, 0 = new image */
     bool hfe;               /* .hfe: stored as a stream (hfe_import) */
+    bool to_sd;             /* destination "sd": a file below the root directory */
+    char sd_folder[SD_REL_MAX + 1];
+    char sd_name[SD_NAME_MAX + 1];
+    bool overwrite;
     bool activate;
     bool have_crc;
     uint32_t expected_crc;
@@ -402,7 +407,11 @@ static cJSON *upload_json(void)
     cJSON_AddStringToObject(u, "name", up.name);
     cJSON_AddNumberToObject(u, "size", up.size);
     cJSON_AddNumberToObject(u, "received", up.received);
-    cJSON_AddStringToObject(u, "destination", up.to_flash ? "flash" : "psram");
+    cJSON_AddStringToObject(u, "destination", up.to_sd ? "sd" : up.to_flash ? "flash" : "psram");
+    if (up.to_sd) {
+        cJSON_AddStringToObject(u, "path", up.sd_folder);
+        cJSON_AddStringToObject(u, "file", up.sd_name);
+    }
     if (up.to_flash && up.replace_id) {
         cJSON_AddNumberToObject(u, "replace", up.replace_id);
     }
@@ -443,7 +452,9 @@ static const char *status_for(const char *code)
         { "IMAGE_NOT_FOUND", HTTP_404 },   { "STORAGE_NOT_READY", HTTP_503 },
         { "MACHINE_NOT_SUPPORTED", HTTP_409 },   { "UNSAVED_CHANGES", HTTP_409 },
         { "UNSUPPORTED_FORMAT", HTTP_422 },   { "INVALID_NAME", HTTP_400 },
-        { "UPLOAD_BUSY", HTTP_409 },
+        { "UPLOAD_BUSY", HTTP_409 },        { "SD_ERROR", HTTP_500 },
+        { "SD_NOT_PRESENT", HTTP_503 },    { "FOLDER_NOT_FOUND", HTTP_404 },
+        { "FILE_EXISTS", HTTP_409 },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].code, code) == 0) {
@@ -670,6 +681,391 @@ static esp_err_t receive_hfe(httpd_req_t *req)
         printf("API: upload %lu failed: %s - %s\n", (unsigned long)up.id, up.err_code, up.err_msg);
     }
     return send_json(req, status, upload_json());
+}
+
+/* ---- SD card: files below the root directory ------------------------------------- */
+
+#define SD_HFE_MAX      (8u * 1024u * 1024u)    /* the track buffer fit decides */
+#define SD_LIST_MAX     400
+#define QUERY_MAX       (3 * SD_REL_MAX + 64)   /* %-encoded path and a few keys */
+
+/* API error for an SD card result. */
+static esp_err_t sd_error(httpd_req_t *req, sd_result_t r, bool folder)
+{
+    switch (r) {
+    case SD_NO_CARD:
+        return send_error(req, HTTP_503, "SD_NOT_PRESENT", "no SD card");
+    case SD_INVALID:
+        return send_error(req, HTTP_400, "INVALID_PATH", "path: names separated by '/' below the "
+                          "root directory, at most %d characters; no \"..\", no '/' at the start or "
+                          "end, no name starting with '.' or ' ' or ending with '.' or ' ', none of "
+                          "\\ : * ? \" < > |", SD_REL_MAX);
+    case SD_NOT_FOUND:
+        return send_error(req, HTTP_404, folder ? "FOLDER_NOT_FOUND" : "FILE_NOT_FOUND",
+                          folder ? "no such folder" : "no such file");
+    case SD_EXISTS:
+        return send_error(req, HTTP_409, folder ? "FOLDER_EXISTS" : "FILE_EXISTS",
+                          folder ? "a folder or file of that name exists" : "the file exists");
+    case SD_NOT_EMPTY:
+        return send_error(req, HTTP_409, "FOLDER_NOT_EMPTY", "the folder is not empty; delete it "
+                          "with recursive=true&confirm=<its path> to remove its contents too");
+    default:
+        return send_error(req, HTTP_500, "SD_ERROR", "SD card error");
+    }
+}
+
+/* Query parameter key, %-decoded, into out. ESP_ERR_NOT_FOUND: missing;
+ * ESP_ERR_INVALID_ARG: malformed or too long. */
+static esp_err_t query_param(httpd_req_t *req, const char *key, char *out, size_t size)
+{
+    char q[QUERY_MAX];
+    size_t n = httpd_req_get_url_query_len(req);
+
+    if (n == 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (n >= sizeof(q) || httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = httpd_query_key_value(q, key, out, size);
+    if (err == ESP_ERR_NOT_FOUND) {
+        return err;
+    }
+    return err == ESP_OK && sd_url_decode(out) ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+
+static void list_entry(void *ctx, const sd_entry_t *e)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "name", e->name);
+    cJSON_AddStringToObject(o, "type", e->is_dir ? "folder" : "file");
+    if (!e->is_dir) {
+        cJSON_AddNumberToObject(o, "size", e->size);
+    }
+    cJSON_AddItemToArray(ctx, o);
+}
+
+/* GET /api/v1/sd/files?path=<folder>: the contents of a folder. */
+static esp_err_t get_sd_files(httpd_req_t *req)
+{
+    char path[SD_REL_MAX + 1] = "";
+    esp_err_t err = query_param(req, "path", path, sizeof(path));
+    if (err == ESP_ERR_INVALID_ARG) {
+        return sd_error(req, SD_INVALID, true);
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON *list = cJSON_CreateArray();
+    bool more = false;
+    sd_result_t r = sd_card_list(path, SD_LIST_MAX, list_entry, list, &more);
+    if (r != SD_OK) {
+        cJSON_Delete(list);
+        cJSON_Delete(root);
+        return sd_error(req, r, true);
+    }
+    settings_t cfg;
+    settings_get(&cfg);
+    cJSON_AddStringToObject(root, "root_dir", cfg.root_dir);
+    cJSON_AddStringToObject(root, "path", path);
+    cJSON_AddItemToObject(root, "entries", list);
+    cJSON_AddBoolToObject(root, "truncated", more);
+    return send_json(req, "200 OK", root);
+}
+
+/* DELETE /api/v1/sd/files?path=<file> */
+static esp_err_t delete_sd_file(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return ESP_OK;
+    }
+    char path[SD_REL_MAX + 1];
+    if (query_param(req, "path", path, sizeof(path)) != ESP_OK) {
+        return sd_error(req, SD_INVALID, false);
+    }
+    xSemaphoreTake(api_lock, portMAX_DELAY);
+    sd_result_t r = sd_card_remove(path);
+    xSemaphoreGive(api_lock);
+    if (r != SD_OK) {
+        return sd_error(req, r, false);
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "path", path);
+    cJSON_AddStringToObject(root, "status", "deleted");
+    return send_json(req, "200 OK", root);
+}
+
+/* POST /api/v1/sd/folders {"path": "<folder>"}: create it (and the ones on the way). */
+static esp_err_t post_sd_folder(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return ESP_OK;
+    }
+    cJSON *body = read_json(req);
+    if (!body) {
+        return ESP_OK;
+    }
+    const cJSON *jp = cJSON_GetObjectItem(body, "path");
+    char path[SD_REL_MAX + 1];
+    if (!cJSON_IsString(jp) || strlen(jp->valuestring) >= sizeof(path) || !jp->valuestring[0]) {
+        cJSON_Delete(body);
+        return sd_error(req, SD_INVALID, true);
+    }
+    snprintf(path, sizeof(path), "%s", jp->valuestring);
+    cJSON_Delete(body);
+    xSemaphoreTake(api_lock, portMAX_DELAY);
+    sd_result_t r = sd_card_mkdir(path);
+    xSemaphoreGive(api_lock);
+    if (r != SD_OK) {
+        return sd_error(req, r, true);
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "path", path);
+    cJSON_AddStringToObject(root, "status", "created");
+    return send_json(req, "201 Created", root);
+}
+
+/* DELETE /api/v1/sd/folders?path=<folder>[&recursive=true&confirm=<folder>] */
+static esp_err_t delete_sd_folder(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return ESP_OK;
+    }
+    char path[SD_REL_MAX + 1], rec[8] = "", confirm[SD_REL_MAX + 1] = "";
+    if (query_param(req, "path", path, sizeof(path)) != ESP_OK || !path[0]) {
+        return sd_error(req, SD_INVALID, true);
+    }
+    query_param(req, "recursive", rec, sizeof(rec));
+    query_param(req, "confirm", confirm, sizeof(confirm));
+    bool recursive = strcmp(rec, "true") == 0;
+    if (recursive && strcmp(confirm, path) != 0) {
+        return send_error(req, HTTP_400, "CONFIRMATION_REQUIRED", "deleting a folder with its "
+                          "contents needs confirm=<the same path>: everything in it is lost");
+    }
+    xSemaphoreTake(api_lock, portMAX_DELAY);
+    sd_result_t r = sd_card_rmdir(path, recursive);
+    xSemaphoreGive(api_lock);
+    if (r != SD_OK) {
+        return sd_error(req, r, true);
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "path", path);
+    cJSON_AddStringToObject(root, "status", "deleted");
+    return send_json(req, "200 OK", root);
+}
+
+/* POST /api/v1/uploads with "destination": "sd" (api_lock held, no upload running). */
+static esp_err_t post_upload_sd(httpd_req_t *req, const cJSON *body)
+{
+    const cJSON *jfn = cJSON_GetObjectItem(body, "filename");
+    const cJSON *jsize = cJSON_GetObjectItem(body, "size");
+    const cJSON *jpath = cJSON_GetObjectItem(body, "path");
+    const cJSON *jover = cJSON_GetObjectItem(body, "overwrite");
+    const cJSON *jact = cJSON_GetObjectItem(body, "activate");
+    const cJSON *jcrc = cJSON_GetObjectItem(body, "crc32");
+
+    if (!cJSON_IsString(jfn) || !cJSON_IsNumber(jsize) || jsize->valuedouble < 0 ||
+        jsize->valuedouble > 0xffffffffu || (jpath && !cJSON_IsString(jpath)) ||
+        (jover && !cJSON_IsBool(jover))) {
+        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"filename\" (string) and \"size\" "
+                          "(number) are required; \"path\" (string) and \"overwrite\" (true/false) "
+                          "are optional");
+    }
+    if (cJSON_IsTrue(jact)) {
+        return send_error(req, HTTP_400, "INVALID_REQUEST", "inserting an image from the SD card "
+                          "is not available yet: \"activate\" must be false");
+    }
+    const char *name = jfn->valuestring, *folder = jpath ? jpath->valuestring : "";
+    if (!sd_name_valid(name)) {
+        return send_error(req, HTTP_422, "INVALID_NAME", "file name: at most %d characters, none "
+                          "of \\ / : * ? \" < > |, not starting with '.' or ' ', not ending with "
+                          "'.' or ' '", SD_NAME_MAX);
+    }
+    if (!sd_relpath_valid(folder) || strlen(folder) > SD_REL_MAX) {
+        return sd_error(req, SD_INVALID, true);
+    }
+    size_t fl = strlen(name);
+    bool hfe = fl >= 4 && strcasecmp(name + fl - 4, ".hfe") == 0;
+    bool st = fl >= 3 && strcasecmp(name + fl - 3, ".st") == 0;
+    if (!hfe && !st) {
+        return send_error(req, HTTP_422, "UNSUPPORTED_FORMAT", "only .ST and .HFE images can be "
+                          "stored on the SD card");
+    }
+    uint32_t size = (uint32_t)jsize->valuedouble;
+    st_info_t sti;
+    if (hfe && (size < 512 || size > SD_HFE_MAX)) {
+        return send_error(req, status_for("IMAGE_TOO_LARGE"), "IMAGE_TOO_LARGE",
+                          "%lu bytes, an HFE image on the SD card may have at most %u",
+                          (unsigned long)size, SD_HFE_MAX);
+    }
+    if (st) {
+        st_result_t r = st_check_size(size, &sti);
+        if (r != ST_OK) {
+            const char *code = r == ST_TOO_LARGE ? "IMAGE_TOO_LARGE"
+                               : r == ST_UNSUPPORTED ? "UNSUPPORTED_GEOMETRY" : "INVALID_IMAGE";
+            return send_error(req, status_for(code), code, "%s", sti.detail);
+        }
+    }
+    bool have_crc = false;
+    uint32_t crc = 0;
+    if (jcrc) {
+        char *end = NULL;
+        if (cJSON_IsString(jcrc)) {
+            crc = strtoul(jcrc->valuestring, &end, 16);
+        }
+        if (!end || *end || end == jcrc->valuestring) {
+            return send_error(req, HTTP_400, "INVALID_REQUEST",
+                              "\"crc32\" must be a hex string, e.g. \"42ce7eed\"");
+        }
+        have_crc = true;
+    }
+    /* The folder must exist; the file only with "overwrite". */
+    char rel[SD_REL_MAX + SD_NAME_MAX + 2];
+    bool is_dir = false;
+    uint32_t old_size;
+    sd_result_t r = sd_card_stat(folder, &is_dir, &old_size);
+    if (r == SD_OK && !is_dir) {
+        r = SD_NOT_FOUND;
+    }
+    if (r != SD_OK) {
+        return sd_error(req, r, true);
+    }
+    snprintf(rel, sizeof(rel), "%s%s%s", folder, folder[0] ? "/" : "", name);
+    if (strlen(rel) <= SD_REL_MAX && sd_card_stat(rel, &is_dir, &old_size) == SD_OK &&
+        (is_dir || !cJSON_IsTrue(jover))) {
+        return sd_error(req, SD_EXISTS, is_dir);
+    }
+
+    memset(&up, 0, sizeof(up));
+    up.id = next_upload_id++;
+    up.state = UP_READY;
+    disk_title_from_filename(name, up.name);
+    up.size = size;
+    up.to_sd = true;
+    up.hfe = hfe;
+    snprintf(up.sd_folder, sizeof(up.sd_folder), "%s", folder);
+    snprintf(up.sd_name, sizeof(up.sd_name), "%s", name);
+    up.overwrite = cJSON_IsTrue(jover);
+    up.have_crc = have_crc;
+    up.expected_crc = crc;
+    up.touched_us = esp_timer_get_time();
+    return send_json(req, "201 Created", upload_json());
+}
+
+static void fail_sd(sd_result_t r)
+{
+    switch (r) {
+    case SD_NO_CARD:   fail_upload("SD_NOT_PRESENT", "no SD card"); break;
+    case SD_NOT_FOUND: fail_upload("FOLDER_NOT_FOUND", "the folder does not exist (any more)"); break;
+    case SD_EXISTS:    fail_upload("FILE_EXISTS", "the file exists"); break;
+    case SD_INVALID:   fail_upload("INVALID_NAME", "invalid file or folder name"); break;
+    default:           fail_upload("SD_ERROR", "writing to the SD card failed; nothing stored"); break;
+    }
+}
+
+/*
+ * PUT data of an upload to the SD card: written straight into a hidden
+ * temporary file while it arrives (CRC, and for HFE the stream check);
+ * checked as an image afterwards; only then, after reading it back, the
+ * file gets its name.
+ */
+static esp_err_t receive_sd(httpd_req_t *req)
+{
+    uint8_t *chunk = heap_caps_malloc(RECV_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint8_t head[512];
+    uint32_t head_n = 0, crc = 0;
+    hfe_stream_t *hs = NULL;
+    uint8_t *region = NULL;
+    hfe_pack_t pack;
+    hfe_result_t hr = HFE_OK;
+    sd_writer_t *w = NULL;
+    int64_t t0 = esp_timer_get_time();
+
+    if (up.hfe) {
+        hs = heap_caps_malloc(sizeof(*hs), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        region = heap_caps_malloc(HFE_REGION_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    sd_result_t r = SD_IO;
+    if (!chunk || (up.hfe && (!hs || !region))) {
+        fail_upload("INSUFFICIENT_MEMORY", "no memory for the upload");
+    } else if ((r = sd_card_writer_open(up.sd_folder, up.sd_name, up.overwrite, &w)) != SD_OK) {
+        fail_sd(r);
+    } else {
+        up.state = UP_RECEIVING;
+        if (hs) {
+            hfe_pack_init(&pack, NULL, DISK_TRACKS_BYTES);
+            hfe_stream_init(hs, up.size, region, &pack);
+        }
+    }
+    up.touched_us = esp_timer_get_time();
+    while (up.received < up.size && chunk) {
+        uint32_t want = up.size - up.received < RECV_CHUNK ? up.size - up.received : RECV_CHUNK;
+        int n = httpd_req_recv(req, (char *)chunk, want);
+        if (n <= 0) {
+            break;      /* closed or timed out (recv_wait_timeout) */
+        }
+        up.received += n;
+        up.touched_us = esp_timer_get_time();
+        if (up.state != UP_RECEIVING) {
+            continue;   /* refused early: drain the rest */
+        }
+        crc = image_store_crc32(crc, chunk, n);
+        if (head_n < sizeof(head)) {
+            uint32_t k = sizeof(head) - head_n < (uint32_t)n ? sizeof(head) - head_n : (uint32_t)n;
+            memcpy(head + head_n, chunk, k);
+            head_n += k;
+        }
+        if (hs && (hr = hfe_stream_feed(hs, chunk, n)) != HFE_OK) {
+            fail_upload(hr == HFE_V2 || hr == HFE_UNSUPPORTED || hr == HFE_BAD_LAYOUT ? "UNSUPPORTED_FORMAT"
+                        : hr == HFE_TOO_LARGE ? "IMAGE_TOO_LARGE" : "INVALID_IMAGE",
+                        "%s", hfe_stream_info(hs)->detail);
+        } else if ((r = sd_card_writer_write(w, chunk, n)) != SD_OK) {
+            fail_sd(r);
+        }
+    }
+    free(chunk);
+
+    if (up.state == UP_RECEIVING && up.received != up.size) {
+        fail_upload("UPLOAD_INCOMPLETE", "received %lu of %lu bytes",
+                    (unsigned long)up.received, (unsigned long)up.size);
+    }
+    if (up.state == UP_RECEIVING) {
+        up.state = UP_PROCESSING;
+        up.crc32 = crc;
+        st_info_t st;
+        if (hs && (hr = hfe_stream_end(hs)) != HFE_OK) {
+            fail_upload(hr == HFE_TOO_LARGE ? "IMAGE_TOO_LARGE" : "INVALID_IMAGE", "%s",
+                        hfe_stream_info(hs)->detail);
+        } else if (!hs && hfe_signature(head, head_n)) {
+            fail_upload("INVALID_IMAGE", "this is an HFE file: upload it with the .hfe extension");
+        } else if (!hs && st_check_image(head, up.size, &st) != ST_OK) {
+            fail_upload("INVALID_IMAGE", "%s", st.detail);
+        } else if (up.have_crc && crc != up.expected_crc) {
+            fail_upload("CHECKSUM_MISMATCH", "received data has CRC-32 %08lx, expected %08lx",
+                        (unsigned long)crc, (unsigned long)up.expected_crc);
+        } else {
+            if (!hs && st.detail[0]) {
+                printf("API: note on \"%s\": %s\n", up.sd_name, st.detail);
+            }
+            r = sd_card_writer_commit(w, crc);
+            w = NULL;                   /* freed by the commit */
+            if (r != SD_OK) {
+                fail_sd(r);
+            } else {
+                up.state = UP_DONE;
+                up.touched_us = esp_timer_get_time();
+                printf("API: \"%s\" stored on the SD card in %s%s (%lu bytes, CRC32 %08lx, %lld ms)\n",
+                       up.sd_name, up.sd_folder[0] ? up.sd_folder : "the root directory",
+                       up.overwrite ? ", replacing" : "", (unsigned long)up.size,
+                       (unsigned long)crc, (esp_timer_get_time() - t0) / 1000);
+            }
+        }
+    }
+    sd_card_writer_abort(w);
+    free(hs);
+    free(region);
+    if (up.state == UP_FAILED) {
+        printf("API: upload %lu failed: %s - %s\n", (unsigned long)up.id, up.err_code, up.err_msg);
+    }
+    return send_json(req, up.state == UP_DONE ? "200 OK" : status_for(up.err_code), upload_json());
 }
 
 /* ---- Handlers ----------------------------------------------------------- */
@@ -1177,10 +1573,14 @@ static esp_err_t post_upload(httpd_req_t *req)
                          "\"filename\" (string), \"size\" (number) and \"destination\" are required");
         goto out;
     }
+    if (strcmp(jdest->valuestring, "sd") == 0) {
+        ret = post_upload_sd(req, body);
+        goto out;
+    }
     bool to_flash = strcmp(jdest->valuestring, "flash") == 0;
     if (!to_flash && strcmp(jdest->valuestring, "psram") != 0) {
         ret = send_error(req, HTTP_400, "INVALID_REQUEST",
-                         "\"destination\" must be \"psram\" or \"flash\"");
+                         "\"destination\" must be \"psram\", \"flash\" or \"sd\"");
         goto out;
     }
     if (jact && !cJSON_IsBool(jact)) {
@@ -1359,6 +1759,10 @@ static esp_err_t put_upload_data(httpd_req_t *req)
         goto out;
     }
 
+    if (up.to_sd) {
+        ret = receive_sd(req);
+        goto out;
+    }
     if (up.hfe) {
         ret = receive_hfe(req);
         goto out;
@@ -1674,7 +2078,7 @@ esp_err_t api_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.core_id = 1;                    /* away from the floppy ISRs */
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 28;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.recv_wait_timeout = 10;
     cfg.send_wait_timeout = 10;
@@ -1700,6 +2104,10 @@ esp_err_t api_start(void)
         { .uri = "/api/v1/uploads",   .method = HTTP_POST,   .handler = post_upload },
         { .uri = "/api/v1/uploads/*", .method = HTTP_GET,    .handler = get_upload },
         { .uri = "/api/v1/uploads/*", .method = HTTP_PUT,    .handler = put_upload_data },
+        { .uri = "/api/v1/sd/files",  .method = HTTP_GET,    .handler = get_sd_files },
+        { .uri = "/api/v1/sd/files",  .method = HTTP_DELETE, .handler = delete_sd_file },
+        { .uri = "/api/v1/sd/folders", .method = HTTP_POST,  .handler = post_sd_folder },
+        { .uri = "/api/v1/sd/folders", .method = HTTP_DELETE, .handler = delete_sd_folder },
         { .uri = "/api/v1/settings",  .method = HTTP_GET,    .handler = get_settings },
         { .uri = "/api/v1/settings",  .method = HTTP_PUT,    .handler = put_settings },
         { .uri = "/api/v1/system/restart", .method = HTTP_POST, .handler = post_restart },

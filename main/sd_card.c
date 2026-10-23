@@ -4,13 +4,16 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/sdspi_host.h"
+#include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -18,6 +21,7 @@
 #include "board_pins.h"
 #include "ext_flash.h"
 #include "sd_card.h"
+#include "sd_path.h"
 #include "settings.h"
 
 #define SD_HOST         SPI2_HOST       /* the bus ext_flash sets up */
@@ -168,4 +172,375 @@ esp_err_t sd_card_make_root(const char *root)
     esp_err_t err = !card && !mount_locked() ? ESP_ERR_NOT_FOUND : make_root_locked(root);
     xSemaphoreGive(lock);
     return err;
+}
+
+/* ---- Folders and files ------------------------------------------------------------ */
+
+#define PATH_MAX_LEN    (sizeof(SD_MOUNT) + SETTINGS_ROOT_MAX + SD_REL_MAX + 3)
+#define TMP_NAME        ".rf-upload.tmp"
+#define OLD_NAME        ".rf-replaced.tmp"
+#define RM_DEPTH        12              /* recursive delete: folder levels */
+
+const char *sd_result_name(sd_result_t r)
+{
+    switch (r) {
+    case SD_OK:         return "ok";
+    case SD_NO_CARD:    return "no SD card";
+    case SD_INVALID:    return "invalid path";
+    case SD_NOT_FOUND:  return "not found";
+    case SD_EXISTS:     return "already exists";
+    case SD_NOT_EMPTY:  return "folder not empty";
+    default:            return "SD card error";
+    }
+}
+
+/* Lock taken, card checked, full path of rel built. */
+static sd_result_t begin(const char *rel, char *path)
+{
+    settings_t cfg;
+
+    if (!lock) {
+        return SD_NO_CARD;
+    }
+    if (!sd_relpath_valid(rel)) {
+        return SD_INVALID;
+    }
+    settings_get(&cfg);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (card && sdmmc_get_status(card) != ESP_OK) {
+        unmount_locked();
+    }
+    if (!card && !mount_locked()) {
+        xSemaphoreGive(lock);
+        return SD_NO_CARD;
+    }
+    if (!sd_path_join(path, PATH_MAX_LEN, SD_MOUNT, cfg.root_dir, rel)) {
+        xSemaphoreGive(lock);
+        return SD_INVALID;
+    }
+    return SD_OK;
+}
+
+static bool is_file(const char *path, uint32_t *size)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return false;
+    }
+    if (size) {
+        *size = (uint32_t)st.st_size;
+    }
+    return true;
+}
+
+sd_result_t sd_card_list(const char *rel, int max, void (*cb)(void *ctx, const sd_entry_t *e),
+                         void *ctx, bool *more)
+{
+    char path[PATH_MAX_LEN], child[PATH_MAX_LEN + 256 + 2];   /* FAT names up to 255 */
+    sd_result_t r = begin(rel, path);
+
+    *more = false;
+    if (r != SD_OK) {
+        return r;
+    }
+    DIR *d = opendir(path);
+    if (!d) {
+        xSemaphoreGive(lock);
+        return SD_NOT_FOUND;
+    }
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') {
+            continue;                   /* hidden, also our temporary files */
+        }
+        if (n == max) {
+            *more = true;
+            break;
+        }
+        snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        sd_entry_t ent = { .name = e->d_name, .is_dir = e->d_type == DT_DIR };
+        if (!ent.is_dir) {
+            is_file(child, &ent.size);
+        }
+        cb(ctx, &ent);
+        n++;
+    }
+    closedir(d);
+    xSemaphoreGive(lock);
+    return SD_OK;
+}
+
+sd_result_t sd_card_stat(const char *rel, bool *dir, uint32_t *size)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+
+    if (r != SD_OK) {
+        return r;
+    }
+    *size = 0;
+    *dir = is_dir(path);
+    if (!*dir && !is_file(path, size)) {
+        r = SD_NOT_FOUND;
+    }
+    xSemaphoreGive(lock);
+    return r;
+}
+
+sd_result_t sd_card_mkdir(const char *rel)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+
+    if (r != SD_OK) {
+        return r;
+    }
+    if (!rel[0] || is_dir(path)) {
+        r = SD_EXISTS;
+    } else if (is_file(path, NULL)) {
+        r = SD_EXISTS;                  /* a file of that name */
+    } else {
+        /* Every folder on the way, from the root directory down. */
+        size_t start = strlen(path) - strlen(rel);
+        for (size_t i = start; r == SD_OK; i++) {
+            if (path[i] == '/' || path[i] == 0) {
+                char c = path[i];
+                path[i] = 0;
+                if (!is_dir(path) && mkdir(path, 0777) != 0) {
+                    printf("SD card: cannot create %s (errno %d)\n", path, errno);
+                    r = SD_IO;
+                }
+                path[i] = c;
+                if (!c) {
+                    break;
+                }
+            }
+        }
+        if (r == SD_OK) {
+            printf("SD card: created folder %s\n", path);
+        }
+    }
+    xSemaphoreGive(lock);
+    return r;
+}
+
+/* Everything in path, then path itself. With the lock held. */
+static sd_result_t remove_tree(char *path, size_t size, int depth)
+{
+    if (depth > RM_DEPTH) {
+        return SD_IO;
+    }
+    DIR *d = opendir(path);
+    if (!d) {
+        return SD_IO;
+    }
+    size_t len = strlen(path);
+    sd_result_t r = SD_OK;
+    struct dirent *e;
+    while (r == SD_OK && (e = readdir(d)) != NULL) {
+        if (len + 1 + strlen(e->d_name) + 1 > size) {
+            r = SD_IO;
+            break;
+        }
+        snprintf(path + len, size - len, "/%s", e->d_name);
+        if (e->d_type == DT_DIR) {
+            r = remove_tree(path, size, depth + 1);
+        } else if (unlink(path) != 0) {
+            r = SD_IO;
+        }
+        path[len] = 0;
+    }
+    closedir(d);
+    if (r == SD_OK && rmdir(path) != 0) {
+        r = SD_IO;
+    }
+    return r;
+}
+
+sd_result_t sd_card_rmdir(const char *rel, bool recursive)
+{
+    char path[PATH_MAX_LEN + 256];
+    sd_result_t r = begin(rel, path);
+
+    if (r != SD_OK) {
+        return r;
+    }
+    if (!rel[0]) {
+        r = SD_INVALID;                 /* never the root directory itself */
+    } else if (!is_dir(path)) {
+        r = SD_NOT_FOUND;
+    } else if (recursive) {
+        r = remove_tree(path, sizeof(path), 0);
+    } else if (rmdir(path) != 0) {
+        r = errno == ENOTEMPTY || errno == EEXIST || errno == EACCES ? SD_NOT_EMPTY : SD_IO;
+        /* FatFs reports a non-empty folder as EACCES or ENOTEMPTY */
+        if (r == SD_NOT_EMPTY) {
+            DIR *d = opendir(path);
+            struct dirent *e = d ? readdir(d) : NULL;
+            if (d) {
+                closedir(d);
+            }
+            if (!e) {
+                r = SD_IO;              /* empty after all: a real error */
+            }
+        }
+    }
+    if (r == SD_OK) {
+        printf("SD card: removed folder %s%s\n", path, recursive ? " with its contents" : "");
+    }
+    xSemaphoreGive(lock);
+    return r;
+}
+
+sd_result_t sd_card_remove(const char *rel)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+
+    if (r != SD_OK) {
+        return r;
+    }
+    if (!rel[0] || !is_file(path, NULL)) {
+        r = SD_NOT_FOUND;
+    } else if (unlink(path) != 0) {
+        r = SD_IO;
+    } else {
+        printf("SD card: removed %s\n", path);
+    }
+    xSemaphoreGive(lock);
+    return r;
+}
+
+struct sd_writer {
+    FILE *f;
+    bool overwrite;
+    char target[PATH_MAX_LEN + SD_NAME_MAX + 2];
+    char tmp[PATH_MAX_LEN + sizeof(TMP_NAME) + 2];
+    char old[PATH_MAX_LEN + sizeof(OLD_NAME) + 2];
+};
+
+sd_result_t sd_card_writer_open(const char *folder, const char *name, bool overwrite,
+                                sd_writer_t **wp)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r;
+
+    *wp = NULL;
+    if (!sd_name_valid(name)) {
+        return SD_INVALID;
+    }
+    if ((r = begin(folder, path)) != SD_OK) {
+        return r;
+    }
+    sd_writer_t *w = calloc(1, sizeof(*w));
+    if (!w) {
+        r = SD_IO;
+    } else if (!is_dir(path)) {
+        r = SD_NOT_FOUND;
+    } else {
+        snprintf(w->target, sizeof(w->target), "%s/%s", path, name);
+        snprintf(w->tmp, sizeof(w->tmp), "%s/" TMP_NAME, path);
+        snprintf(w->old, sizeof(w->old), "%s/" OLD_NAME, path);
+        w->overwrite = overwrite;
+        if (is_dir(w->target) || (!overwrite && is_file(w->target, NULL))) {
+            r = SD_EXISTS;
+        } else {
+            unlink(w->tmp);             /* left over from an interrupted upload */
+            w->f = fopen(w->tmp, "wb");
+            r = w->f ? SD_OK : SD_IO;
+            if (w->f) {
+                setvbuf(w->f, NULL, _IONBF, 0);     /* the caller writes whole pieces */
+            }
+        }
+    }
+    xSemaphoreGive(lock);
+    if (r != SD_OK) {
+        free(w);
+        return r;
+    }
+    *wp = w;
+    return SD_OK;
+}
+
+sd_result_t sd_card_writer_write(sd_writer_t *w, const void *data, uint32_t len)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    size_t n = card ? fwrite(data, 1, len, w->f) : 0;
+    xSemaphoreGive(lock);
+    return n == len ? SD_OK : SD_IO;
+}
+
+void sd_card_writer_abort(sd_writer_t *w)
+{
+    if (!w) {
+        return;
+    }
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (w->f) {
+        fclose(w->f);
+    }
+    if (card) {
+        unlink(w->tmp);
+    }
+    xSemaphoreGive(lock);
+    free(w);
+}
+
+sd_result_t sd_card_writer_commit(sd_writer_t *w, uint32_t crc)
+{
+    static uint8_t buf[4096];
+    sd_result_t r = SD_OK;
+
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool closed = w->f && fclose(w->f) == 0;
+    w->f = NULL;
+    if (!card || !closed) {
+        r = SD_IO;
+    }
+    /* Read it back: what is on the card must be what was received. */
+    FILE *f = r == SD_OK ? fopen(w->tmp, "rb") : NULL;
+    if (r == SD_OK) {
+        uint32_t c = 0;
+        size_t n;
+        if (!f) {
+            r = SD_IO;
+        } else {
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+                c = esp_rom_crc32_le(c, buf, n);
+            }
+            fclose(f);
+            if (c != crc) {
+                printf("SD card: %s reads back with CRC %08lx, expected %08lx\n", w->tmp,
+                       (unsigned long)c, (unsigned long)crc);
+                r = SD_IO;
+            }
+        }
+    }
+    if (r == SD_OK) {
+        bool had = is_file(w->target, NULL);
+        if (had && !w->overwrite) {
+            r = SD_EXISTS;              /* appeared meanwhile */
+        } else if (had) {
+            /* Old one aside, new one in place, old one away. */
+            unlink(w->old);
+            if (rename(w->target, w->old) != 0 || rename(w->tmp, w->target) != 0) {
+                rename(w->old, w->target);      /* put the old one back */
+                r = SD_IO;
+            } else {
+                unlink(w->old);
+            }
+        } else if (rename(w->tmp, w->target) != 0) {
+            r = SD_IO;
+        }
+    }
+    if (r != SD_OK && card) {
+        unlink(w->tmp);
+    }
+    if (r == SD_OK) {
+        printf("SD card: stored %s\n", w->target);
+    }
+    xSemaphoreGive(lock);
+    free(w);
+    return r;
 }

@@ -227,6 +227,10 @@ web page asks for the token.
 | `POST /api/v1/uploads`          | (yes) | Start an upload (new, replacement or PSRAM) |
 | `PUT /api/v1/uploads/{id}/data` | (yes) | Send the image bytes of an upload           |
 | `GET /api/v1/uploads/{id}`      |       | State of an upload                          |
+| `GET /api/v1/sd/files?path=`    |       | Contents of a folder on the SD card         |
+| `DELETE /api/v1/sd/files?path=` | (yes) | Delete a file on the SD card                |
+| `POST /api/v1/sd/folders`       | (yes) | Create a folder on the SD card              |
+| `DELETE /api/v1/sd/folders?path=` | (yes) | Delete a folder (with contents: confirm)  |
 | `GET /api/v1/settings`          |       | Device settings, WiFi and firmware          |
 | `PUT /api/v1/settings`          | (yes) | Change settings (host name)                 |
 | `POST /api/v1/system/restart`   | (yes) | Restart the device                          |
@@ -490,7 +494,7 @@ Request fields:
 | ------------- | ------- | -------- | --------------------------------------------------------- |
 | `filename`    | string  | yes      | Original file name; becomes the title (TOSEC tags removed, max. 52 characters). Only used as a name. |
 | `size`        | number  | yes      | Exact size of the file in bytes                           |
-| `destination` | string  | yes      | `"psram"` (temporary) or `"flash"` (my floppy images)     |
+| `destination` | string  | yes      | `"psram"` (temporary), `"flash"` (my floppy images) or `"sd"` (a file on the SD card, see [SD card files](#sd-card-files)) |
 | `replace`     | number  | no       | Only with `"flash"`: id of the image to **replace** (keeps its id and position). Leave out to add a new image at the end. |
 | `activate`    | boolean | no       | `"flash"`: make it the active disk afterwards (default `false`). `"psram"`: always activated; `false` is refused. |
 | `crc32`       | string  | no       | CRC-32 of the file as hex, e.g. `"42ce7eed"`. If given, the received data must match. |
@@ -574,7 +578,8 @@ State of an upload. Only the most recent upload is kept; older ids give
 | `state`          | always             | `ready`, `receiving`, `processing`, `done`, `failed` |
 | `name`           | always             | Title derived from `filename`                   |
 | `size`, `received` | always           | Announced and received byte count               |
-| `destination`    | always             | `psram` or `flash`                              |
+| `destination`    | always             | `psram`, `flash` or `sd`                        |
+| `path`, `file`   | `sd`               | Folder (below the root directory) and file name |
 | `replace`        | when replacing     | The image being replaced                        |
 | `activate`       | always             | Whether it will be / was activated              |
 | `upload_url`     | state `ready`      | Where to `PUT` the data                         |
@@ -582,6 +587,69 @@ State of an upload. Only the most recent upload is kept; older ids give
 | `image_id`       | stored             | The stored image (also on `DRIVE_BUSY`)         |
 | `active`         | state `done`       | It is now the active disk                       |
 | `error`          | state `failed`     | `{ "code": ..., "message": ... }`               |
+
+### SD card files
+
+The SD card (board revision 2) holds images as plain files below the
+**root directory** (setting `root_dir`, e.g. `My Floppies`). Every path in
+these calls is **relative to that root directory**: `""` is the root
+directory itself, `L` a folder in it, `L/Larry.st` a file in that folder.
+
+Paths are checked strictly and only ever used below the root directory:
+names separated by single `/`, at most 200 characters in all; a name is
+1–120 printable ASCII characters except `\ / : * ? " < > |`, not starting
+with `.` or a space (so no `.`, `..` or hidden names) and not ending with
+`.` or a space. Anything else: `400 INVALID_PATH`. In a query string the
+path is URL-encoded (`%20` or `+` for a space). Hidden files (starting
+with `.`) are not listed. No card: `503 SD_NOT_PRESENT`.
+
+`GET /api/v1/sd/files?path=L` — the folder's contents (at most 400
+entries, `truncated` when there are more), not sorted:
+
+```json
+{ "root_dir": "My Floppies", "path": "L", "truncated": false,
+  "entries": [ { "name": "Leisure Suit Larry (1987)(Sierra).st", "type": "file", "size": 737280 },
+               { "name": "Disk 2", "type": "folder" } ] }
+```
+
+`404 FOLDER_NOT_FOUND` when it does not exist.
+
+`POST /api/v1/sd/folders` `{"path": "L"}` — creates the folder, and every
+folder on the way (`{"path": "Games/L"}` also creates `Games`).
+`201 Created`; `409 FOLDER_EXISTS` when a folder or file of that name
+is already there.
+
+`DELETE /api/v1/sd/folders?path=L` — deletes an empty folder
+(`409 FOLDER_NOT_EMPTY` otherwise). With its contents:
+`?path=L&recursive=true&confirm=L` — `confirm` must repeat the path
+(`400 CONFIRMATION_REQUIRED` otherwise): everything in it is lost. The
+root directory itself cannot be deleted.
+
+`DELETE /api/v1/sd/files?path=L/Larry.st` — deletes a file
+(`404 FILE_NOT_FOUND`).
+
+**Uploading to the SD card:** `POST /api/v1/uploads` with
+`"destination": "sd"`, then the data as usual:
+
+| Field       | Meaning                                                              |
+| ----------- | -------------------------------------------------------------------- |
+| `filename`  | The file name on the card (rules above, `422 INVALID_NAME`); `.st` or `.hfe` only (`422 UNSUPPORTED_FORMAT`) |
+| `size`      | Exact size: a supported .ST size, or an HFE file of at most 8 MiB    |
+| `path`      | Folder below the root directory (default `""`); must exist (`404 FOLDER_NOT_FOUND`) |
+| `overwrite` | `true`: replace a file of that name (default `false`: `409 FILE_EXISTS`) |
+| `crc32`     | Optional, as for the other destinations                              |
+| `activate`  | Must be `false`: inserting from the SD card is not available yet     |
+
+Only images that can be played are stored: the same checks as for the
+library (.ST geometry, HFE format and track buffer fit; an HFE file named
+`.st` or the other way round is refused). The data is written straight to
+a hidden temporary file in the target folder while it arrives; after the
+checks it is read back and compared (CRC-32), and only then it gets its
+name (replacing an older file only with `overwrite`). An interrupted or
+refused upload leaves nothing behind. Images are stored as they are (not
+compressed).
+
+---
 
 ### `GET /api/v1/settings`
 

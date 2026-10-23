@@ -18,6 +18,7 @@ import os
 import socket
 import sys
 import time
+import urllib.parse
 import zlib
 
 HOST = os.environ.get("RADIOFLOPPY_HOST")
@@ -92,6 +93,74 @@ def synthetic(size, seed):
 
 def crc(data):
     return "%08x" % (zlib.crc32(data) & 0xffffffff)
+
+
+def sd_tests(cc, big):
+    """The SD card API, in a test folder below the root directory (removed again)."""
+    sd = call("GET", "/api/v1/settings")[1].get("sd", {})
+    if not sd.get("present"):
+        print("        (no SD card: skipped)")
+        return
+    q = lambda **kw: "?" + urllib.parse.urlencode(kw, quote_via=urllib.parse.quote)
+    T = "RF API test"
+
+    def sd_upload(data, name, **opts):
+        body = {"filename": name, "size": len(data), "destination": "sd", "crc32": crc(data)}
+        body.update(opts)
+        c = call("POST", "/api/v1/uploads", body)
+        return c if c[0] != 201 else call("PUT", c[1]["upload_url"], raw=data)
+
+    r = call("GET", "/api/v1/sd/files" + q(path=T))
+    if r[0] == 200:     # left over from an aborted run
+        call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true", confirm=T))
+    check(call("GET", "/api/v1/sd/files")[0] == 200, "list the root directory")
+    r = call("POST", "/api/v1/sd/folders", {"path": T + "/L"})
+    check(r[0] == 201, "create a nested folder")
+    r = call("POST", "/api/v1/sd/folders", {"path": T + "/L"})
+    check(r[0] == 409 and err(r) == "FOLDER_EXISTS", "again: FOLDER_EXISTS")
+    for bad in ["../x", "/abs", T + "/../..", "a//b", ".hidden"]:
+        r = call("POST", "/api/v1/sd/folders", {"path": bad})
+        check(r[0] == 400 and err(r) == "INVALID_PATH", "folder %r refused" % bad)
+    check(call("GET", "/api/v1/sd/files" + q(path="../"))[0] == 400, "list ../ refused")
+    check(call("GET", "/api/v1/sd/files" + q(path="nope " + T))[0] == 404, "list a missing folder: 404")
+    name = "Crystal Castles [test].st"
+    r = sd_upload(cc, name, path=T + "/L")
+    check(r[0] == 200 and r[1]["state"] == "done", "upload .ST into a subfolder")
+    ents = call("GET", "/api/v1/sd/files" + q(path=T + "/L"))[1]["entries"]
+    check([(e["name"], e.get("size")) for e in ents] == [(name, len(cc))], "listed with its size, no temporary file")
+    r = call("POST", "/api/v1/uploads", {"filename": name, "size": len(cc), "destination": "sd", "path": T + "/L"})
+    check(r[0] == 409 and err(r) == "FILE_EXISTS", "same name again: FILE_EXISTS")
+    check(sd_upload(cc, name, path=T + "/L", overwrite=True)[0] == 200, "overwrite: true replaces it")
+    hfe_files = [os.path.join(IMAGES, f) for f in os.listdir(IMAGES) if f.lower().endswith(".hfe")]
+    if hfe_files:
+        check(sd_upload(open(hfe_files[0], "rb").read(), "test.hfe", path=T)[0] == 200, "upload .HFE")
+    check(sd_upload(b"x" * 1000, "tiny.st", path=T)[0] in (413, 422), "not an image: refused")
+    check(sd_upload(cc, "wrong.hfe", path=T)[0] == 422, ".ST content named .hfe: refused")
+    r = sd_upload(cc, "bad?name.st", path=T)
+    check(r[0] == 422 and err(r) == "INVALID_NAME", "name with '?': refused")
+    r = sd_upload(cc, "x.msa", path=T)
+    check(r[0] == 422 and err(r) == "UNSUPPORTED_FORMAT", ".msa: refused")
+    check(sd_upload(cc, "x.st", path=T, activate=True)[0] == 400, "activate from the SD card: not yet")
+    c = call("POST", "/api/v1/uploads", {"filename": "crc.st", "size": len(cc), "destination": "sd",
+                                         "path": T, "crc32": "00000000"})
+    r = call("PUT", c[1]["upload_url"], raw=cc)
+    check(r[0] == 422 and err(r) == "CHECKSUM_MISMATCH", "wrong CRC: refused")
+    names = sorted(e["name"] for e in call("GET", "/api/v1/sd/files" + q(path=T))[1]["entries"])
+    check(names == sorted(["L"] + (["test.hfe"] if hfe_files else [])), "only the good uploads are there: %s" % names)
+    check(call("DELETE", "/api/v1/sd/files" + q(path=T + "/L/" + name))[0] == 200, "delete a file")
+    check(call("DELETE", "/api/v1/sd/files" + q(path=T + "/L/" + name))[0] == 404, "delete it again: 404")
+    if hfe_files:
+        r = call("DELETE", "/api/v1/sd/folders" + q(path=T))
+        check(r[0] == 409 and err(r) == "FOLDER_NOT_EMPTY", "folder with contents: FOLDER_NOT_EMPTY")
+    r = call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true"))
+    check(r[0] == 400 and err(r) == "CONFIRMATION_REQUIRED", "with contents, no confirm: refused")
+    check(call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true", confirm="x"))[0] == 400,
+          "wrong confirm: refused")
+    check(call("DELETE", "/api/v1/sd/folders" + q(path="", recursive="true", confirm=""))[0] == 400,
+          "the root directory itself: refused")
+    check(call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true", confirm=T))[0] == 200,
+          "with contents and confirm: deleted")
+    check(T not in [e["name"] for e in call("GET", "/api/v1/sd/files")[1]["entries"]], "test folder gone")
 
 
 def main():
@@ -317,6 +386,9 @@ def main():
         r = call("PUT", "/api/v1/current", {"image_id": z})
         check(r[0] == 200 and r[1]["crc32"] == crc(big), "compressed image activates with the right CRC")
     r = call("PUT", "/api/v1/settings", {"compression": False})
+
+    print("SD card")
+    sd_tests(cc, big)
 
     print("delete own images")
     first = orig_ids[0] if orig_ids else None
