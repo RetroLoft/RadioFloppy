@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/sdspi_host.h"
+#include "esp_heap_caps.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
@@ -119,39 +120,39 @@ void sd_card_init(void)
     if (!lock) {
         lock = xSemaphoreCreateMutex();
     }
-    settings_t cfg;
-    settings_get(&cfg);
+    char root[SETTINGS_ROOT_MAX + 1];
+    settings_get_root(root);
     xSemaphoreTake(lock, portMAX_DELAY);
     if (!mount_locked()) {
         printf("SD card: none\n");
-    } else if (make_root_locked(cfg.root_dir) == ESP_OK) {
-        printf("SD card: root directory \"%s\"\n", cfg.root_dir[0] ? cfg.root_dir : "/");
+    } else if (make_root_locked(root) == ESP_OK) {
+        printf("SD card: root directory \"%s\"\n", root[0] ? root : "/");
     }
     xSemaphoreGive(lock);
 }
 
 void sd_card_status(sd_status_t *st)
 {
-    settings_t cfg;
+    char root[SETTINGS_ROOT_MAX + 1];
     char path[sizeof(SD_MOUNT) + SETTINGS_ROOT_MAX + 1];
 
     memset(st, 0, sizeof(*st));
     if (!lock) {
         return;
     }
-    settings_get(&cfg);
+    settings_get_root(root);
     xSemaphoreTake(lock, portMAX_DELAY);
     if (card && sdmmc_get_status(card) != ESP_OK) {
         unmount_locked();               /* taken out */
     }
     if (!card && esp_timer_get_time() / 1000 - tried_at_ms >= RETRY_MS && mount_locked()) {
-        make_root_locked(cfg.root_dir); /* a card inserted since */
+        make_root_locked(root);         /* a card inserted since */
     }
     if (card) {
         st->present = true;
         st->size_mb = (uint32_t)((uint64_t)card->csd.capacity * card->csd.sector_size /
                                  (1024 * 1024));
-        root_path(cfg.root_dir, path, sizeof(path));
+        root_path(root, path, sizeof(path));
         st->root_exists = is_dir(path);
     }
     xSemaphoreGive(lock);
@@ -197,7 +198,7 @@ const char *sd_result_name(sd_result_t r)
 /* Lock taken, card checked, full path of rel built. */
 static sd_result_t begin(const char *rel, char *path)
 {
-    settings_t cfg;
+    char root[SETTINGS_ROOT_MAX + 1];
 
     if (!lock) {
         return SD_NO_CARD;
@@ -205,7 +206,7 @@ static sd_result_t begin(const char *rel, char *path)
     if (!sd_relpath_valid(rel)) {
         return SD_INVALID;
     }
-    settings_get(&cfg);
+    settings_get_root(root);
     xSemaphoreTake(lock, portMAX_DELAY);
     if (card && sdmmc_get_status(card) != ESP_OK) {
         unmount_locked();
@@ -214,7 +215,7 @@ static sd_result_t begin(const char *rel, char *path)
         xSemaphoreGive(lock);
         return SD_NO_CARD;
     }
-    if (!sd_path_join(path, PATH_MAX_LEN, SD_MOUNT, cfg.root_dir, rel)) {
+    if (!sd_path_join(path, PATH_MAX_LEN, SD_MOUNT, root, rel)) {
         xSemaphoreGive(lock);
         return SD_INVALID;
     }
@@ -542,5 +543,42 @@ sd_result_t sd_card_writer_commit(sd_writer_t *w, uint32_t crc)
     }
     xSemaphoreGive(lock);
     free(w);
+    return r;
+}
+
+sd_result_t sd_card_load(const char *rel, uint32_t max, uint8_t **buf, uint32_t *size)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+
+    *buf = NULL;
+    *size = 0;
+    if (r != SD_OK) {
+        return r;
+    }
+    uint32_t n = 0;
+    if (!rel[0] || !is_file(path, &n)) {
+        r = is_dir(path) ? SD_INVALID : SD_NOT_FOUND;
+    } else if (n == 0 || n > max) {
+        r = SD_INVALID;
+    } else {
+        uint8_t *b = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        FILE *f = b ? fopen(path, "rb") : NULL;
+        if (!f) {
+            free(b);
+            r = SD_IO;
+        } else {
+            size_t got = fread(b, 1, n, f);
+            fclose(f);
+            if (got != n) {
+                free(b);
+                r = SD_IO;
+            } else {
+                *buf = b;
+                *size = n;
+            }
+        }
+    }
+    xSemaphoreGive(lock);
     return r;
 }

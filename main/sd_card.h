@@ -90,4 +90,10 @@ sd_result_t sd_card_writer_write(sd_writer_t *w, const void *data, uint32_t len)
 sd_result_t sd_card_writer_commit(sd_writer_t *w, uint32_t crc);     /* frees w */
 void sd_card_writer_abort(sd_writer_t *w);                           /* NULL is fine */
 
+/*
+ * Read file rel completely into a new PSRAM buffer (*buf, caller frees),
+ * *size its length. SD_INVALID also when it is larger than max or a folder.
+ */
+sd_result_t sd_card_load(const char *rel, uint32_t max, uint8_t **buf, uint32_t *size);
+
 const char *sd_result_name(sd_result_t r);

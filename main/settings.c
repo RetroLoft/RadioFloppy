@@ -15,6 +15,7 @@
 #include "ext_flash.h"
 #include "flash_layout.h"
 #include "machine.h"
+#include "sd_path.h"
 #include "settings.h"
 
 #ifdef SETTINGS_NO_LOCK                 /* host tests: single threaded */
@@ -36,10 +37,11 @@ static SemaphoreHandle_t mutex;
 #endif
 
 #define SET_MAGIC       0x54534652  /* "RFST" little endian */
-#define SET_VERSION     7           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
+#define SET_VERSION     8           /* 2: + drive_select, 3: + buzzer_off, last_image_id,
                                        4: + machine, 5: + compress (was 0 padding in 4),
                                        6: + leds (was 0 padding in 5),
-                                       7: + root_dir (record grows) */
+                                       7: + root_dir (record grows),
+                                       8: + last_sd (record grows) */
 #define SET_V1_SIZE     148         /* version 1 records are still read */
 #define SET_COMMIT      0x21544d43  /* "CMT!", last word of the sector */
 #define COMMIT_OFFSET   (RF_SECTOR_SIZE - 4)
@@ -62,11 +64,16 @@ typedef struct {
     uint8_t leds;               /* since version 6 (was 0 padding in 5): 1 or 2 */
     uint8_t reserved;           /* 0 (padding up to version 6) */
     char root_dir[SETTINGS_ROOT_MAX + 1];   /* since version 7 */
+    uint8_t reserved2[3];       /* 0 (padding in version 7) */
+    char last_sd[SETTINGS_SD_PATH_MAX + 1]; /* since version 8 */
 } record_t;
 
 #define SET_V6_SIZE     156         /* versions 4-6 */
 _Static_assert(offsetof(record_t, root_dir) == SET_V6_SIZE, "settings record layout");
-_Static_assert(sizeof(record_t) == 260, "settings record layout");
+#define SET_V7_SIZE     260
+_Static_assert(offsetof(record_t, last_sd) == SET_V7_SIZE, "settings record layout");
+_Static_assert(sizeof(record_t) == 464, "settings record layout");
+_Static_assert(SETTINGS_SD_PATH_MAX == SD_REL_MAX, "a last_sd path is an SD path");
 _Static_assert(offsetof(record_t, machine) == 152, "settings record layout");
 
 static settings_t current;
@@ -98,7 +105,8 @@ static size_t version_size(uint16_t version)
     case 4:                             /* + machine (+ 3 bytes 0) */
     case 5:                             /* + compress */
     case 6:  return SET_V6_SIZE;        /* + leds */
-    case 7:  return sizeof(record_t);   /* + root_dir */
+    case 7:  return SET_V7_SIZE;        /* + root_dir */
+    case 8:  return sizeof(record_t);   /* + last_sd */
     default: return 0;
     }
 }
@@ -135,13 +143,17 @@ static bool read_copy(int copy, record_t *r)
     if (r->version < 7) {
         memset(r->root_dir, 0, sizeof(r->root_dir));
     }
+    if (r->version < 8) {
+        memset(r->last_sd, 0, sizeof(r->last_sd));
+    }
     return r->magic == SET_MAGIC && commit == SET_COMMIT &&
            terminated(r->hostname, sizeof(r->hostname)) &&
            terminated(r->wifi_ssid, sizeof(r->wifi_ssid)) &&
            terminated(r->wifi_pass, sizeof(r->wifi_pass)) &&
            r->wifi_security < WIFI_SEC_COUNT && r->drive_select <= 1 && r->buzzer_off <= 1 &&
            r->machine < MACHINE_COUNT && r->compress <= 1 && r->leds >= 1 && r->leds <= 2 &&
-           terminated(r->root_dir, sizeof(r->root_dir)) && settings_root_valid(r->root_dir);
+           terminated(r->root_dir, sizeof(r->root_dir)) && settings_root_valid(r->root_dir) &&
+           terminated(r->last_sd, sizeof(r->last_sd)) && sd_relpath_valid(r->last_sd);
 }
 
 static void defaults(settings_t *s)
@@ -195,6 +207,7 @@ esp_err_t settings_init(void)
     current.compress = r[best].compress;
     current.leds = r[best].leds;
     memcpy(current.root_dir, r[best].root_dir, sizeof(current.root_dir));
+    memcpy(current.last_sd, r[best].last_sd, sizeof(current.last_sd));
     generation = r[best].generation;
     current_copy = best;
     return ESP_OK;
@@ -203,6 +216,13 @@ esp_err_t settings_init(void)
 bool settings_stored(void)
 {
     return current_copy >= 0;
+}
+
+void settings_get_root(char out[SETTINGS_ROOT_MAX + 1])
+{
+    settings_lock();
+    memcpy(out, current.root_dir, SETTINGS_ROOT_MAX + 1);
+    settings_unlock();
 }
 
 void settings_get(settings_t *out)
@@ -227,9 +247,28 @@ esp_err_t settings_set_last_image(uint16_t image_id)
     esp_err_t err = ESP_OK;
 
     settings_lock();
-    if (current.last_image_id != image_id) {
+    if (current.last_image_id != image_id || current.last_sd[0]) {
         settings_t s = current;
         s.last_image_id = image_id;
+        s.last_sd[0] = 0;
+        err = save_locked(&s);
+    }
+    settings_unlock();
+    return err;
+}
+
+esp_err_t settings_set_last_sd(const char *path)
+{
+    esp_err_t err = ESP_OK;
+
+    if (strlen(path) > SETTINGS_SD_PATH_MAX || !sd_relpath_valid(path)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    settings_lock();
+    if (strcmp(current.last_sd, path) != 0 || current.last_image_id) {
+        settings_t s = current;
+        s.last_image_id = 0;
+        snprintf(s.last_sd, sizeof(s.last_sd), "%s", path);
         err = save_locked(&s);
     }
     settings_unlock();
@@ -248,11 +287,12 @@ static esp_err_t save_locked(const settings_t *s)
         s->drive_select > 1 || s->buzzer > 1 || s->machine >= MACHINE_COUNT || s->compress > 1 ||
         s->leds < 1 || s->leds > 2 ||
         !terminated(s->root_dir, sizeof(s->root_dir)) || !settings_root_valid(s->root_dir) ||
+        !terminated(s->last_sd, sizeof(s->last_sd)) || !sd_relpath_valid(s->last_sd) ||
         (s->wifi_ssid[0] && !settings_password_valid(s->wifi_pass, s->wifi_security))) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    record_t r, check;
+    static record_t r, check;           /* not on the caller's stack; the lock is held */
     memset(&r, 0, sizeof(r));
     r.magic = SET_MAGIC;
     r.version = SET_VERSION;
@@ -269,6 +309,7 @@ static esp_err_t save_locked(const settings_t *s)
     r.compress = s->compress;
     r.leds = s->leds;
     memcpy(r.root_dir, s->root_dir, sizeof(r.root_dir));
+    memcpy(r.last_sd, s->last_sd, sizeof(r.last_sd));
     r.crc32 = record_crc(&r, sizeof(r));
 
     /* Never touch the copy in use. */

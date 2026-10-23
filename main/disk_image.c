@@ -25,7 +25,9 @@
 #include "img_codec.h"
 #include "st_image.h"
 #include "ext_flash.h"
+#include "disk_title.h"
 #include "image_store.h"
+#include "sd_card.h"
 #include "settings.h"
 
 uint8_t *volatile disk_tracks;
@@ -216,6 +218,19 @@ void disk_note_image_changed(uint16_t image_id)
     portEXIT_CRITICAL(&info_lock);
 }
 
+void disk_note_sd_changed(const char *path, bool folder)
+{
+    size_t n = strlen(path);
+
+    portENTER_CRITICAL(&info_lock);
+    if (current.source == DISK_SRC_SD &&
+        (folder ? strncmp(current.sd_path, path, n) == 0 && current.sd_path[n] == '/'
+                : strcmp(current.sd_path, path) == 0)) {
+        current.image_changed = true;
+    }
+    portEXIT_CRITICAL(&info_lock);
+}
+
 /* Log the image library. */
 static void report_store(store_state_t st)
 {
@@ -343,8 +358,37 @@ static esp_err_t build_hfe(uint8_t *buf, disk_info_t *info)
     return err;
 }
 
-/* Start-up image: the one active at power-off, else by name, else the first
- * valid image in sequence order. */
+/* The start-up disk from the SD card (sd_card_init ran before). */
+static esp_err_t load_boot_sd(const char *path, uint8_t **raw, disk_info_t *info)
+{
+    uint8_t *buf;
+    uint32_t size;
+    st_info_t st;
+    int64_t t0 = esp_timer_get_time();
+
+    sd_result_t r = sd_card_load(path, ST_MAX_SIZE, &buf, &size);
+    if (r != SD_OK) {
+        printf("Last disk: %s on the SD card: %s\n", path, sd_result_name(r));
+        return ESP_FAIL;
+    }
+    if (st_check_image(buf, size, &st) != ST_OK) {
+        printf("Last disk: %s on the SD card: %s\n", path, st.detail);
+        free(buf);
+        return ESP_FAIL;
+    }
+    *info = (disk_info_t) { .source = DISK_SRC_SD, .size = size,
+                            .crc32 = image_store_crc32(0, buf, size) };
+    const char *name = strrchr(path, '/');
+    disk_title_from_filename(name ? name + 1 : path, info->name);
+    snprintf(info->sd_path, sizeof(info->sd_path), "%s", path);
+    printf("Last disk: %s (SD card, %lu bytes, CRC32 %08lx, read in %lld ms)\n", path,
+           (unsigned long)size, (unsigned long)info->crc32, (esp_timer_get_time() - t0) / 1000);
+    *raw = buf;
+    return ESP_OK;
+}
+
+/* Start-up image: the one active at power-off (SD card or library), else
+ * by name, else the first valid image in sequence order. */
 static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
 {
     esp_err_t err = ext_flash_init();
@@ -358,6 +402,9 @@ static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
     settings_t cfg;
     image_record_t last;
     settings_get(&cfg);
+    if (cfg.last_sd[0] && load_boot_sd(cfg.last_sd, raw, info) == ESP_OK) {
+        return ESP_OK;
+    }
     uint16_t id = 0;
     if (cfg.last_image_id && image_store_get(cfg.last_image_id, &last) &&
         image_store_is_valid(&last)) {
@@ -576,7 +623,8 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
      * before anybody may overwrite that buffer. */
     vTaskDelay(pdMS_TO_TICKS(20));
     printf("Active disk: %s (%s%s)%s\n", info->name,
-           info->source == DISK_SRC_PSRAM ? "PSRAM" : "image library", info->hfe ? ", HFE" : "",
+           info->source == DISK_SRC_PSRAM ? "PSRAM" : info->source == DISK_SRC_SD ? "SD card"
+           : "image library", info->hfe ? ", HFE" : "",
            how == DRIVE_SWAP_SELECTED ? " - changed while the drive was selected" : "");
     return ESP_OK;
 }

@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -23,6 +24,8 @@
 #include "disk_switch.h"
 #include "disk_write.h"
 #include "image_store.h"
+#include "disk_title.h"
+#include "sd_card.h"
 #include "settings.h"
 #include "st_image.h"
 
@@ -34,6 +37,9 @@ static uint8_t *psram_raw;          /* the kept PSRAM image */
 static disk_info_t psram_info;
 
 static TaskHandle_t remember_task;
+#define REMEMBER_SD     0x10000     /* notification value: the SD path in remember_sd */
+static char remember_sd[SD_REL_MAX + 1];
+static portMUX_TYPE remember_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool enabled = true;         /* false: unsupported machine profile */
 
 /* Waits for a change, then until REMEMBER_MS passed without another one. */
@@ -49,7 +55,16 @@ static void remember_task_fn(void *arg)
         }
         settings_t s;
         settings_get(&s);
-        if (s.last_image_id != id) {
+        if (id == REMEMBER_SD) {
+            char path[SD_REL_MAX + 1];
+            portENTER_CRITICAL(&remember_lock);
+            memcpy(path, remember_sd, sizeof(path));
+            portEXIT_CRITICAL(&remember_lock);
+            if (strcmp(s.last_sd, path) != 0 || s.last_image_id) {
+                esp_err_t err = settings_set_last_sd(path);
+                printf("Last disk: %s (SD card) remembered%s\n", path, err == ESP_OK ? "" : " - FAILED");
+            }
+        } else if (s.last_image_id != id || s.last_sd[0]) {
             esp_err_t err = settings_set_last_image((uint16_t)id);
             printf("Last disk: image %lu remembered%s\n", (unsigned long)id,
                    err == ESP_OK ? "" : " - FAILED");
@@ -62,6 +77,11 @@ static void remember(const disk_info_t *info)
 {
     if (remember_task && info->source == DISK_SRC_FLASH && info->image_id) {
         xTaskNotify(remember_task, info->image_id, eSetValueWithOverwrite);
+    } else if (remember_task && info->source == DISK_SRC_SD) {
+        portENTER_CRITICAL(&remember_lock);
+        memcpy(remember_sd, info->sd_path, sizeof(remember_sd));
+        portEXIT_CRITICAL(&remember_lock);
+        xTaskNotify(remember_task, REMEMBER_SD, eSetValueWithOverwrite);
     }
 }
 
@@ -171,7 +191,7 @@ void disk_switch_set_enabled(bool on)
 void disk_switch_init(void)
 {
     lock = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(remember_task_fn, "remember", 3072, NULL, 1, &remember_task, 1);
+    xTaskCreatePinnedToCore(remember_task_fn, "remember", 4096, NULL, 1, &remember_task, 1);
 }
 
 esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e)
@@ -266,6 +286,45 @@ esp_err_t disk_switch_step(int dir, switch_error_t *e)
     }
 
     esp_err_t err = list[next] == 0 ? psram_locked(e) : image_locked(list[next], e);
+    xSemaphoreGive(lock);
+    return err;
+}
+
+esp_err_t disk_switch_sd(const char *path, switch_error_t *e)
+{
+    uint8_t *raw = NULL;
+    uint32_t size = 0;
+    size_t n = strlen(path);
+    st_info_t st;
+    esp_err_t err;
+
+    if (n < 4 || strcasecmp(path + n - 3, ".st") != 0) {
+        return fail(e, "UNSUPPORTED_FORMAT", "only .ST images can be inserted from the SD card "
+                    "for now%s", "");
+    }
+    xSemaphoreTake(lock, portMAX_DELAY);
+    int64_t t0 = esp_timer_get_time();
+    sd_result_t r = sd_card_load(path, ST_MAX_SIZE, &raw, &size);
+    load_us = esp_timer_get_time() - t0;
+    if (r != SD_OK) {
+        err = fail(e, r == SD_NO_CARD ? "SD_NOT_PRESENT" : r == SD_NOT_FOUND ? "FILE_NOT_FOUND"
+                   : r == SD_INVALID ? "INVALID_IMAGE" : "SD_ERROR", "%s",
+                   r == SD_INVALID ? "not an image file (a folder, empty, or larger than an .ST image)"
+                   : sd_result_name(r));
+    } else if (st_check_image(raw, size, &st) != ST_OK) {
+        err = ESP_FAIL;
+        e->code = "UNSUPPORTED_GEOMETRY";
+        snprintf(e->msg, sizeof(e->msg), "%s", st.detail);
+    } else {
+        disk_info_t info = { .source = DISK_SRC_SD, .size = size,
+                             .crc32 = image_store_crc32(0, raw, size),
+                             .cylinders = st.cylinders, .heads = st.heads, .sectors = st.sectors };
+        const char *name = strrchr(path, '/');
+        disk_title_from_filename(name ? name + 1 : path, info.name);
+        snprintf(info.sd_path, sizeof(info.sd_path), "%s", path);
+        err = activate_locked(raw, &info, e);
+    }
+    free(raw);
     xSemaphoreGive(lock);
     return err;
 }

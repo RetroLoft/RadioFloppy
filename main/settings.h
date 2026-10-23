@@ -15,6 +15,7 @@
 #define SETTINGS_SSID_MAX       32
 #define SETTINGS_PASS_MAX       64
 #define SETTINGS_ROOT_MAX       100     /* SD card folder, see settings_root_valid */
+#define SETTINGS_SD_PATH_MAX    200     /* = SD_REL_MAX (sd_path.h) */
 
 /* Lowest security accepted when joining the network. */
 typedef enum {
@@ -37,6 +38,8 @@ typedef struct {
     uint8_t compress;           /* 1 = store new read-only images compressed */
     uint8_t leds;               /* LEDs fitted on J4: 1 (pin 3) or 2 (pins 1 and 3), default 1 */
     char root_dir[SETTINGS_ROOT_MAX + 1];   /* folder on the SD card, "" = the card's root */
+    char last_sd[SETTINGS_SD_PATH_MAX + 1]; /* disk active at power-off when it came from the
+                                               SD card (below root_dir), else "" */
 } settings_t;
 
 /* Read the settings (initialises the external flash if needed). */
@@ -55,6 +58,10 @@ esp_err_t settings_save(const settings_t *s);
  * one (no flash write otherwise). */
 esp_err_t settings_set_last_image(uint16_t image_id);
 
+/* The same for a disk from the SD card (a path below root_dir, sd_path.h
+ * rules): stored, and last_image_id cleared. "" clears it. */
+esp_err_t settings_set_last_sd(const char *path);
+
 /* RFC 1123 label: 1..32 letters, digits and '-', not starting/ending with '-'. */
 bool settings_hostname_valid(const char *h);
 
@@ -67,6 +74,9 @@ bool settings_hostname_valid(const char *h);
  * card's mount point, never as a path of its own.
  */
 bool settings_root_valid(const char *root);
+
+/* Only the root directory (a whole settings_t is large for small stacks). */
+void settings_get_root(char out[SETTINGS_ROOT_MAX + 1]);
 
 /* WPA passphrase: 8..63 printable ASCII or 64 hex digits; "" for open. */
 bool settings_password_valid(const char *pass, wifi_security_t sec);

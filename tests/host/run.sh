@@ -10,7 +10,7 @@ gcc $CFLAGS -o test_st_image test_st_image.c ../../main/st_image.c
 gcc $CFLAGS -o test_mfm test_mfm.c ../../main/mfm_track.c
 gcc $CFLAGS -DSETTINGS_NO_LOCK -DSETTINGS_DEFAULT_HOSTNAME='"RadioFloppy"' -DSETTINGS_DEFAULT_SSID='"DefaultNet"' \
     -DSETTINGS_DEFAULT_PASS='"password1"' -o test_settings test_settings.c mock_ext_flash.c \
-    ../../main/settings.c ../../main/machine.c
+    ../../main/settings.c ../../main/machine.c ../../main/sd_path.c
 gcc $CFLAGS -o test_st_format test_st_format.c ../../main/st_format.c ../../main/st_image.c \
     ../../main/mfm_track.c
 gcc $CFLAGS -o test_mfm_write test_mfm_write.c ../../main/mfm_track.c

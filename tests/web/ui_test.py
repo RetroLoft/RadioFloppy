@@ -416,6 +416,14 @@ def main():
                   "Upload here: the file is listed with its size")
             check(b.wait("document.getElementById('msg').innerText.includes('stored on the SD card')", 10),
                   "upload message")
+            b.js("[...document.querySelectorAll('#sdlist li')].find(li => li.innerText.includes(%s))"
+                 ".querySelector('button:not(.danger)').click()" % json.dumps(os.path.basename(cc)))
+            check(b.wait("S.current && S.current.source === 'sd' && "
+                         "document.getElementById('current').innerText.includes('From the SD card')", 30),
+                  "Insert: the file is the current floppy, from the SD card")
+            check(b.wait("document.querySelector('#sdlist li.active') && "
+                         "document.querySelector('#sdlist li.active').innerText.includes('Active')", 10),
+                  "the inserted file is marked Active in the SD list")
             b.set_file(cc, "#sdfile")     # same name again: confirm "Replace it?" (answered yes)
             check(b.wait("document.getElementById('msg').innerText.includes('1 file stored')", 60), "replacing asks and works")
             b.js("[...document.querySelectorAll('#sdcrumbs a')][0].click()")

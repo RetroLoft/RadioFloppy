@@ -377,9 +377,14 @@ static cJSON *current_json(void)
     cJSON *c = cJSON_CreateObject();
     cJSON_AddBoolToObject(c, "inserted", d.source != DISK_SRC_NONE);
     cJSON_AddStringToObject(c, "source", d.source == DISK_SRC_FLASH ? "flash"
-                                        : d.source == DISK_SRC_PSRAM ? "psram" : "none");
+                                        : d.source == DISK_SRC_PSRAM ? "psram"
+                                        : d.source == DISK_SRC_SD ? "sd" : "none");
     if (d.source == DISK_SRC_FLASH && d.image_id) {
         cJSON_AddNumberToObject(c, "image_id", d.image_id);
+        cJSON_AddBoolToObject(c, "image_changed_since", d.image_changed);
+    }
+    if (d.source == DISK_SRC_SD) {
+        cJSON_AddStringToObject(c, "sd_path", d.sd_path);
         cJSON_AddBoolToObject(c, "image_changed_since", d.image_changed);
     }
     if (d.source != DISK_SRC_NONE) {
@@ -454,7 +459,7 @@ static const char *status_for(const char *code)
         { "UNSUPPORTED_FORMAT", HTTP_422 },   { "INVALID_NAME", HTTP_400 },
         { "UPLOAD_BUSY", HTTP_409 },        { "SD_ERROR", HTTP_500 },
         { "SD_NOT_PRESENT", HTTP_503 },    { "FOLDER_NOT_FOUND", HTTP_404 },
-        { "FILE_EXISTS", HTTP_409 },
+        { "FILE_EXISTS", HTTP_409 },        { "FILE_NOT_FOUND", HTTP_404 },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].code, code) == 0) {
@@ -784,6 +789,9 @@ static esp_err_t delete_sd_file(httpd_req_t *req)
     xSemaphoreTake(api_lock, portMAX_DELAY);
     sd_result_t r = sd_card_remove(path);
     xSemaphoreGive(api_lock);
+    if (r == SD_OK) {
+        disk_note_sd_changed(path, false);
+    }
     if (r != SD_OK) {
         return sd_error(req, r, false);
     }
@@ -843,6 +851,9 @@ static esp_err_t delete_sd_folder(httpd_req_t *req)
     xSemaphoreTake(api_lock, portMAX_DELAY);
     sd_result_t r = sd_card_rmdir(path, recursive);
     xSemaphoreGive(api_lock);
+    if (r == SD_OK) {
+        disk_note_sd_changed(path, true);
+    }
     if (r != SD_OK) {
         return sd_error(req, r, true);
     }
@@ -1050,6 +1061,12 @@ static esp_err_t receive_sd(httpd_req_t *req)
             if (r != SD_OK) {
                 fail_sd(r);
             } else {
+                if (up.overwrite) {
+                    char rel[SD_REL_MAX + SD_NAME_MAX + 2];
+                    snprintf(rel, sizeof(rel), "%s%s%s", up.sd_folder, up.sd_folder[0] ? "/" : "",
+                             up.sd_name);
+                    disk_note_sd_changed(rel, false);
+                }
                 up.state = UP_DONE;
                 up.touched_us = esp_timer_get_time();
                 printf("API: \"%s\" stored on the SD card in %s%s (%lu bytes, CRC32 %08lx, %lld ms)\n",
@@ -1524,16 +1541,27 @@ static esp_err_t put_current(httpd_req_t *req)
     if (!body) {
         return ESP_OK;
     }
+    const cJSON *jsd = cJSON_GetObjectItem(body, "sd_path");
+    char sd_path[SD_REL_MAX + 1] = "";
+    if (jsd) {
+        if (!cJSON_IsString(jsd) || strlen(jsd->valuestring) > SD_REL_MAX ||
+            !jsd->valuestring[0] || !sd_relpath_valid(jsd->valuestring)) {
+            cJSON_Delete(body);
+            return sd_error(req, SD_INVALID, false);
+        }
+        snprintf(sd_path, sizeof(sd_path), "%s", jsd->valuestring);
+    }
     uint16_t id = json_image_id(cJSON_GetObjectItem(body, "image_id"));
     cJSON_Delete(body);
-    if (!id) {
-        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"image_id\" must be an image id");
+    if (!id && !sd_path[0]) {
+        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"image_id\" (an image id) or "
+                          "\"sd_path\" (a file on the SD card) is required");
     }
 
     xSemaphoreTake(api_lock, portMAX_DELAY);
     switch_error_t e;
     esp_err_t ret;
-    if (disk_switch_image(id, &e) == ESP_OK) {
+    if ((sd_path[0] ? disk_switch_sd(sd_path, &e) : disk_switch_image(id, &e)) == ESP_OK) {
         ret = send_json(req, "200 OK", current_json());
     } else {
         ret = send_error(req, status_for(e.code), e.code, "%s", e.msg);

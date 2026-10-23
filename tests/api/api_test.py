@@ -147,7 +147,17 @@ def sd_tests(cc, big):
     check(r[0] == 422 and err(r) == "CHECKSUM_MISMATCH", "wrong CRC: refused")
     names = sorted(e["name"] for e in call("GET", "/api/v1/sd/files" + q(path=T))[1]["entries"])
     check(names == sorted(["L"] + (["test.hfe"] if hfe_files else [])), "only the good uploads are there: %s" % names)
+    r = call("PUT", "/api/v1/current", {"sd_path": T + "/L/" + name})
+    check(r[0] == 200 and r[1]["source"] == "sd" and r[1]["sd_path"] == T + "/L/" + name and
+          r[1]["crc32"] == crc(cc) and not r[1]["image_changed_since"], "insert the .ST from the SD card")
+    check(r[0] == 200 and r[1]["write"]["state"] == "read_only", "a disk from the SD card is write-protected")
+    for bad, code in [("nope.st", 404), ("../x.st", 400)]:
+        check(call("PUT", "/api/v1/current", {"sd_path": bad})[0] == code, "insert %r: %d" % (bad, code))
+    if hfe_files:
+        r = call("PUT", "/api/v1/current", {"sd_path": T + "/test.hfe"})
+        check(r[0] == 422 and err(r) == "UNSUPPORTED_FORMAT", "insert .HFE from the SD card: not yet")
     check(call("DELETE", "/api/v1/sd/files" + q(path=T + "/L/" + name))[0] == 200, "delete a file")
+    check(current()["image_changed_since"], "deleting the active file: flagged as changed")
     check(call("DELETE", "/api/v1/sd/files" + q(path=T + "/L/" + name))[0] == 404, "delete it again: 404")
     if hfe_files:
         r = call("DELETE", "/api/v1/sd/folders" + q(path=T))

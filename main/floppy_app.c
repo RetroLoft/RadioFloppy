@@ -301,10 +301,10 @@ static void run_without_emulation(const machine_profile_t *mp)
     printf(" Floppy interface OFF - all outputs released.\n");
     printf("========================================\n\n");
 
+    sd_card_init();                         /* before the start-up disk: it may be on the card */
     if (disk_image_init() != ESP_OK) {      /* image library for the API */
         printf("Disk buffers not available.\n");
     }
-    sd_card_init();                         /* shares the SPI bus with the flash */
     leds_init();
     bool wifi = wifi_net_start(setup_mode_verify_pending() ? SETUP_VERIFY_MS : 0) == ESP_OK;
     step_sound_init();                      /* buzzer pin defined, silent */
@@ -345,11 +345,11 @@ void floppy_emu_run(void)
     printf(" Read-only drive %s (%s)\n", EMU_DRIVE_NAME, EMU_SELECT_NAME);
     printf("========================================\n\n");
 
+    sd_card_init();                 /* before the start-up disk: it may be on the card */
     if (disk_image_init() != ESP_OK) {
         printf("Disk buffers not available - emulator stays disabled.\n");
         return;
     }
-    sd_card_init();                 /* shares the SPI bus with the flash */
     disk_info_t disk;
     disk_get_current(&disk);
     printf("Floppy image: %s (%s)\n", disk.name,

@@ -339,13 +339,49 @@ static void test_root_dir(void)
                                  ? RF_SETTINGS_A : RF_SETTINGS_B);
     rec[4] = 6; rec[5] = 0;
     rec[6] = 156; rec[7] = 0;                   /* size */
-    memset(rec + 156, 0xff, 104);               /* as never written */
+    memset(rec + 156, 0xff, 308);               /* as never written */
     memset(rec + 12, 0, 4);
     uint32_t crc = esp_rom_crc32_le(0, rec, 156);
     memcpy(rec + 12, &crc, 4);
     settings_init();
     settings_get(&r);
     CHECK(settings_stored() && r.root_dir[0] == 0 && r.leds == 2);
+}
+
+static void test_last_sd(void)
+{
+    settings_t s, r;
+
+    mock_flash_reset(0xff);
+    settings_init();
+    settings_get(&s);
+    CHECK(s.last_sd[0] == 0);
+    CHECK(settings_set_last_image(7) == ESP_OK);
+    CHECK(settings_set_last_sd("L/Larry (1987)[a].st") == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(strcmp(r.last_sd, "L/Larry (1987)[a].st") == 0 && r.last_image_id == 0);   /* one or the other */
+    CHECK(settings_set_last_image(9) == ESP_OK);
+    settings_init();
+    settings_get(&r);
+    CHECK(r.last_sd[0] == 0 && r.last_image_id == 9);
+    CHECK(settings_set_last_sd("../x.st") == ESP_ERR_INVALID_ARG);
+    CHECK(settings_set_last_sd("/x.st") == ESP_ERR_INVALID_ARG);
+    CHECK(settings_set_last_sd("") == ESP_OK);
+
+    /* A version 7 record (260 bytes): last_sd "". */
+    CHECK(settings_set_last_image(3) == ESP_OK);
+    uint8_t *rec = mock_flash + ((mock_erases[mock_erase_count - 1].addr == RF_SETTINGS_A)
+                                 ? RF_SETTINGS_A : RF_SETTINGS_B);
+    rec[4] = 7; rec[5] = 0;
+    rec[6] = 260 & 0xff; rec[7] = 260 >> 8;
+    memset(rec + 260, 0xff, 204);
+    memset(rec + 12, 0, 4);
+    uint32_t crc = esp_rom_crc32_le(0, rec, 260);
+    memcpy(rec + 12, &crc, 4);
+    settings_init();
+    settings_get(&r);
+    CHECK(settings_stored() && r.last_sd[0] == 0 && r.last_image_id == 3);
 }
 
 int main(void)
@@ -360,6 +396,7 @@ int main(void)
     test_compress();
     test_leds();
     test_root_dir();
+    test_last_sd();
     printf(failures ? "FAILED (%d)\n" : "settings OK\n", failures);
     return failures != 0;
 }

@@ -196,8 +196,8 @@
 
   <section aria-labelledby="h-sdcard" id="sdsec">
     <h2 id="h-sdcard">SD card <span id="sdcount" class="muted small"></span></h2>
-    <p class="small muted" style="margin:0 0 10px">Images on the SD card. Inserting them into the drive
-      comes in a next version; for now the drive plays <em>My floppy images</em>.</p>
+    <p class="small muted" style="margin:0 0 10px">Images on the SD card. <strong>.ST</strong> images can be
+      inserted (read-only for now); inserting .HFE images from the card comes later.</p>
     <div id="sdcrumbs" class="small" style="margin-bottom:10px"></div>
     <div class="row" style="margin-bottom:10px">
       <button id="sdup" type="button">Upload here…</button>
@@ -517,6 +517,12 @@ function renderCurrent() {
   let origin;
   if (c.source === "psram") {
     origin = '<span class="badge temp">Temporary</span> in working memory (PSRAM), not stored — gone after a restart.';
+  } else if (c.source === "sd") {
+    origin = 'From the SD card: <span class="code">' + esc(c.sd_path) + "</span>";
+    if (c.image_changed_since) {
+      origin += '<div class="banner warn small" style="margin-top:6px">Note: this file has been ' +
+        "replaced or deleted since it was loaded. The Atari still reads the version loaded earlier.</div>";
+    }
   } else if (c.image_id) {
     origin = "From my floppy images.";
     if (c.image_changed_since) {
@@ -763,6 +769,7 @@ async function refreshCurrent() {
     S.current = r.data;
     if (changed) {
       renderCurrent();
+      if (S.sdData) renderSd();        // the SD list marks the active file itself
       // The active mark in the list comes from /images: fetch it when the disk changed.
       return true;
     }
@@ -1184,6 +1191,7 @@ function renderSd() {
   for (const e of entries) {
     const li = document.createElement("li");
     const path = sdJoin(S.sdPath, e.name);
+    const active = e.type === "file" && S.current && S.current.source === "sd" && S.current.sd_path === path;
     const ic = document.createElement("span");
     ic.className = "muted";
     ic.innerHTML = icon(e.type === "folder" ? "folder" : "file");
@@ -1197,11 +1205,20 @@ function renderSd() {
       a.addEventListener("click", (ev) => { ev.preventDefault(); sdOpen(path); });
       main.append(a);
     } else {
-      main.innerHTML = '<span class="sdname">' + esc(e.name) + '</span><br><span class="small muted">' +
-        kib(e.size) + "</span>";
+      main.innerHTML = '<span class="sdname">' + esc(e.name) + "</span>" +
+        (active ? ' <span class="badge active">Active</span>' : "") +
+        '<br><span class="small muted">' + kib(e.size) + "</span>";
     }
+    if (active) li.className = "active";
     const act = document.createElement("div");
     act.className = "actions";
+    if (e.type === "file") {
+      const isSt = /\.st$/i.test(e.name);
+      act.append(button("Insert", "", active ? "This disk is already in drive " + S.drive
+        : !isSt ? "Inserting HFE images from the SD card comes later"
+        : lock || "Put this disk into floppy drive " + S.drive, !canChange || active || !isSt,
+        () => sdInsert(path, e.name)));
+    }
     act.append(button(icon("trash"), "danger icon", lock || (e.type === "folder" ? "Delete folder" : "Delete file"),
       !canChange, () => (e.type === "folder" ? sdDeleteFolder(path, e.name) : sdDeleteFile(path, e.name))));
     li.append(ic, main, act);
@@ -1215,6 +1232,25 @@ async function sdOpen(path) {
   S.sdState = "loading";
   renderSd();
   await refreshSd();
+}
+
+async function sdInsert(path, name) {
+  if (S.busy) return;
+  setBusy(true);
+  try {
+    const r = await api("PUT", "/api/v1/current", { sd_path: path }, 20000, true);
+    if (r.status === 200) {
+      S.current = r.data;
+      renderCurrent();
+      renderSd();
+      showMsg("ok", "“" + esc(name) + "” is now the active floppy (from the SD card).");
+    } else {
+      showError(r.data, r.status, "Inserting “" + name + "” failed.");
+    }
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);
 }
 
 async function sdDeleteFile(path, name) {

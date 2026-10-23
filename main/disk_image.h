@@ -20,6 +20,7 @@
 
 #include "esp_err.h"
 #include "mfm_track.h"
+#include "sd_path.h"
 
 #define DISK_BOOT_IMAGE             "Crystal Castles"
 
@@ -39,6 +40,7 @@ typedef enum {
     DISK_SRC_NONE,          /* no disk inserted */
     DISK_SRC_FLASH,         /* from the image library (external flash) */
     DISK_SRC_PSRAM,         /* temporary upload, lost at reset */
+    DISK_SRC_SD,            /* a file on the SD card (read-only for now) */
 } disk_source_t;
 
 typedef struct {
@@ -53,6 +55,7 @@ typedef struct {
     int sectors;            /* per track */
     bool keep_sectors;      /* READ_WRITE .ST image: keep its sectors for writing */
     bool hfe;               /* HFE image: packed tracks (hfe.h), played in native timing */
+    char sd_path[SD_REL_MAX + 1];   /* DISK_SRC_SD: the file, below the root directory */
 } disk_info_t;
 
 /* Active tracks, [cyl][head][MFM_MAX_BYTES]; read by the flux ISR. */
@@ -119,6 +122,10 @@ void disk_set_change_callback(void (*cb)(void));
 
 /* A library image was replaced or deleted: flag the current disk if it came from there. */
 void disk_note_image_changed(uint16_t image_id);
+
+/* A file on the SD card was replaced or deleted (folder: everything in
+ * folder path): flag the current disk if it came from there. */
+void disk_note_sd_changed(const char *path, bool folder);
 
 /* ---- Writing (see disk_write.h) ---------------------------------------------- */
 

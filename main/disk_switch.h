@@ -39,6 +39,13 @@ esp_err_t disk_switch_raw(const uint8_t *raw, const disk_info_t *info, switch_er
 esp_err_t disk_switch_psram_upload(uint8_t *raw, const disk_info_t *info, switch_error_t *e);
 
 /* Step through the disk list (dir -1 / +1). */
+/*
+ * Insert the .ST file path (below the SD card's root directory, sd_path.h
+ * rules) as a read-only disk. Errors as above, plus SD_NOT_PRESENT,
+ * FILE_NOT_FOUND, INVALID_IMAGE, UNSUPPORTED_FORMAT (not .ST), SD_ERROR.
+ */
+esp_err_t disk_switch_sd(const char *path, switch_error_t *e);
+
 esp_err_t disk_switch_step(int dir, switch_error_t *e);
 
 /* Info of the kept PSRAM image; false if there is none. */

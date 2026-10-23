@@ -454,9 +454,10 @@ The active disk.
 | Field                 | Meaning                                                          |
 | --------------------- | ---------------------------------------------------------------- |
 | `inserted`            | `false`: no disk in the drive (then only `source: "none"`)       |
-| `source`              | `flash` (my floppy images), `psram` or `none`                    |
+| `source`              | `flash` (my floppy images), `psram`, `sd` (a file on the SD card) or `none` |
+| `sd_path`             | Only for `sd`: the file, relative to the root directory           |
 | `image_id`            | Only for `flash`: the image it was loaded from                   |
-| `image_changed_since` | Only for `flash`: that image was replaced or deleted since; the drive still plays the disk as it was when activated |
+| `image_changed_since` | For `flash` and `sd`: that image (file) was replaced or deleted since; the drive still plays the disk as it was when activated |
 | `name`, `size`, `crc32` | The disk image                                                 |
 | `sides`, `cylinders`, `sectors` | Geometry: 1 or 2 sides, 79–84 cylinders, 9–11 sectors per track |
 | `write`               | Write state of the inserted disk, see [Writing](#writing)        |
@@ -471,13 +472,30 @@ Make a stored image the active disk. Token required.
 { "image_id": 5 }
 ```
 
+or a file on the SD card (relative to the root directory, see
+[SD card files](#sd-card-files)):
+
+```json
+{ "sd_path": "Bolo (1987)(Application Systems Heidelberg)(de-en).st" }
+```
+
+From the SD card only `.ST` images for now, and always write-protected.
+The disk is remembered like a library image: after a restart it is read
+from the card again (when the card or the file is missing, the start-up
+falls back to the library).
+
 Response `200`: the new [`current`](#get-apiv1current) object. Takes about
 0.4–0.9 s (the image is read through its blocks, its CRC checked, the
 tracks prepared).
 
 | Error                  | When                                             |
 | ---------------------- | ------------------------------------------------ |
-| `400 INVALID_REQUEST`  | `image_id` missing or not a number 1–65535       |
+| `400 INVALID_REQUEST`  | neither `image_id` (1–65535) nor `sd_path`       |
+| `400 INVALID_PATH`     | `sd_path` breaks the path rules                  |
+| `404 FILE_NOT_FOUND`   | No such file on the SD card                      |
+| `422 UNSUPPORTED_FORMAT` | `sd_path` is not an `.ST` file (HFE from the card comes later) |
+| `422 INVALID_IMAGE` / `UNSUPPORTED_GEOMETRY` | The file is not a usable .ST image |
+| `503 SD_NOT_PRESENT`   | No SD card                                        |
 | `404 IMAGE_NOT_FOUND`  | No valid image with this id                      |
 | `409 DRIVE_BUSY`       | The Atari kept writing to drive B:; nothing changed |
 | `500 FLASH_ERROR`      | The stored image could not be read or its CRC is wrong |
