@@ -134,8 +134,8 @@ are erased once at start-up). Now:
   card at start-up, the image checked on a PC (FAT and folders intact).
 - The MOTOR input reads as on all the time with the ST idle (seen
   2026-10-25), so "motor off 2 s" never triggered a save (it came after
-  the 60 s fallback). A save now also starts when B: has not been
-  selected for 3 s.
+  the 60 s fallback). A save now also starts when the emulated drive
+  (DS0/DS1, setting `drive_select`) has not been selected for 3 s.
 
 Tested on the board: inserting .ST and HFE from the card, the flash
 copy, the buttons (their task needs 8 KiB of stack for a step), and

@@ -225,6 +225,8 @@ web page asks for the token.
 | `PUT /api/v1/settings`          | (yes) | Change settings                             |
 | `POST /api/v1/system/restart`   | (yes) | Restart the device                          |
 | `GET /api/v1/system/update`     |       | Check for firmware updates (placeholder)    |
+| `GET /api/v1/debug/flux`        |       | Flux monitor results (debug)                |
+| `PUT /api/v1/debug/flux`        | (yes) | Switch the flux monitor on/off, reset it    |
 
 ---
 
@@ -621,6 +623,36 @@ Placeholder for online updates; always answers:
   "message": "Online update checks are not available yet." }
 ```
 
+### Flux monitor (debug)
+
+A tool for firmware work: it measures what the emulated drive really puts
+on its INDEX and RDATA pins while the computer reads the disk (the pins
+are only driven while the drive is selected). Off after every start.
+
+`PUT /api/v1/debug/flux` `{"enabled": true, "reset": true}` — switch on
+(and/or clear the results). `GET /api/v1/debug/flux`:
+
+```json
+{ "enabled": true, "mode": "hfe", "hfe": { "late_pulses": 0, "late_max_us": 0 },
+  "tracks": [ { "cyl": 1, "side": 0, "revs": 889, "expected_us": 200064,
+                "period_min_us": 200064, "period_max_us": 200064,
+                "pulse_min_us": 3000, "pulse_max_us": 3000,
+                "checks": 896, "clean": 896, "unaligned": 0, "intervals": 3654000, "bad": 0,
+                "align_min_us": 2910, "align_max_us": 3640 } ],
+  "failures": [ { "cyl": 71, "side": 0, "first_at": 107, "cell": 1051,
+                  "expected_ns": 6000, "got_ns": 4000, "bad": 143, "intervals": 4078 } ] }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `period_*_us`, `expected_us` | INDEX period per revolution (MCPWM capture, 12.5 ns) against the track's duration (HFE: the sum of its cell times; ST: 200 ms). Only revolutions with two whole pulses and no step, side or select change in between. |
+| `pulse_*_us` | INDEX pulse width (3 ms) |
+| `checks`, `clean`, `bad` | After an INDEX pulse, 4096 RDATA pulses are recorded (RMT, 50 ns) and compared with the track in memory (within 0.5 µs): checks done, without any mismatch, mismatching intervals |
+| `unaligned` | Checks whose pulses were not found in the track at all |
+| `align_*_us` | Where the recording started, after INDEX |
+| `failures` | The last 16 checks with mismatches: the first one (interval number, cell of the track, expected and measured interval) |
+| `hfe.late_pulses` | HFE INDEX pulses that came after their tick (should stay 0) |
+
 ## Writing
 
 The Atari can write to an **.ST file on the SD card** that is not
@@ -641,7 +673,8 @@ whose file was replaced or deleted since it was inserted. What happens:
 4. **Apply** — the sector is patched into the image kept in PSRAM and its
    track is encoded again, so the next read returns the new data.
 5. **Save** — when the drive motor has been off for 2 s (one save per disk
-   operation) or drive B: has not been selected for 3 s (the MOTOR line
+   operation) or the emulated drive has not been selected for 3 s (its
+   select line, DS0 or DS1 as set with `drive_select`; the MOTOR line
    can read as on all the time on board revision 2); at the latest a
    minute after the last write:
    1. the changed 64 KiB blocks go into the **copy of the disk in the

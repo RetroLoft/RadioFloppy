@@ -28,8 +28,8 @@ working. Never flash current firmware on a rev 1 board (GPIO20 is the
 buzzer there).
 
 Open work, in order: HFE weak bits (phase 3, needs a test file with real RAND
-areas); a timing measurement tool (P-47 hangs after its intro); cosmetic
-items listed in `docs/HANDOFF_HFE.md`.
+areas); P-47 still hangs after its copyright screen (flux and INDEX
+measured correct, see `docs/HANDOFF_HFE.md`); cosmetic items listed there.
 
 ## How the user wants to work
 
@@ -89,6 +89,7 @@ HFEv3 from a Greaseweazle flux dump). Commercial images are never committed.
 - `drive_emu.c` – Shugart drive state in ISRs; `drive_swap_media` (disk
   change, also while selected unless the computer writes).
 - `flux_stream.c` – RMT flux (RDATA) and INDEX; ST mode and HFE mode.
+  `flux_monitor.c` – debug: measures the INDEX/RDATA pins (`/api/v1/debug/flux`).
 - `disk_image.c`, `disk_switch.c` – track buffers in PSRAM, disk changes.
 - `disk_write.c` – receives and decodes sectors the computer writes,
   write protection, saving (journal in the flash copy, then the file).

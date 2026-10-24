@@ -88,7 +88,38 @@ Cosmetic issues seen:
 - The boot log prints the ST lines (`Geometry: 80/2/0/512`, `MFM: ...
   100000 bitcells/track, GAP3 84`, `RPM: 300 (200 ms, INDEX 3 ms)`) also
   for an HFE disk; `/current` reports `"sectors": 0` and no format.
-- `flux_hfe_stats` (`late_pulses`) is not printed or exposed anywhere yet.
+- (`flux_hfe_stats`/`late_pulses` is now in `GET /api/v1/debug/flux`.)
+
+## Flux monitor and the INDEX fix (2026-10-25)
+
+`main/flux_monitor.c` (API `/api/v1/debug/flux`, see `docs/API.md`)
+measures the INDEX and RDATA pins while the Atari reads: INDEX period and
+width per track (MCPWM capture) and the recorded flux against the track
+in memory (RMT RX on the RDATA pin).
+
+First measurement with P-47: the flux content matched the HFE file, but
+the INDEX was off by up to 1.3 ms (periods in steps of exactly 240 us,
+`late_pulses` 1123, one pulse almost 2 s late). Cause: the HFE INDEX
+channel (no DMA, 48 symbols) filled its memory with 10 us steps while it
+did not know the next boundary; a refill was needed every 0.24 ms, and a
+late refill replayed old symbols, after which every pulse came late.
+Fix (`main/flux_stream.c`): the data encoder publishes when the current
+revolution will end (last boundary + track duration, recomputed on a
+track change) with a revolution number; the INDEX encoder sends symbols
+of at most 200 us up to that tick (a refill every 4.8 ms). Also: on a
+track change the rest of the cell in progress is counted (a revolution
+was up to one cell short). After the fix: periods exactly the track
+duration on every track, `late_pulses` 0; P-47 loads about five times
+faster. Pink Panther, Prince of Persia 1 and 2 and Klax play well.
+
+P-47 still hangs after its copyright screen: it then reads cylinder 1
+for minutes, and every recording of that track matches the file and the
+INDEX is exact. Suspected: its protection needs something the STX to
+HFE conversion lost (variable bit density, weak bits). Not proven.
+
+The ST route is unchanged; drive_emu only got a counter of step, side
+and select events (`drive_head_events`) for the monitor. Bolo (ST) with
+the monitor: periods exactly 200 ms, 567 of 568 checks clean.
 
 ## HFE plan (phases, approved by the user)
 
@@ -155,7 +186,7 @@ the Atari: HFEv1 first, then HFEv3, then copy-protected images.
 
 1. ~~Flash `wip/hfe-player` with `HFE_PLAYBACK 1`, ST regression, upload
    and insert an HFE file.~~ Done 2026-09-28, see above.
-2. **Measurement tool (not built yet)**, with P-47 as the failing case: capture INDEX and RDATA on the
+2. ~~**Measurement tool**~~ built 2026-10-25 (flux monitor, see above). Original plan, with P-47 as the failing case: capture INDEX and RDATA on the
    device itself and verify:
    - the INDEX period equals the track duration;
    - the first flux pulse after INDEX is at the same offset every revolution
