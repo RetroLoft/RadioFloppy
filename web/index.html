@@ -62,15 +62,6 @@
   #sdcrumbs a { text-decoration: none; }
   #sdcrumbs a:hover { text-decoration: underline; }
   ul.slots li.active { border: 2px solid var(--active); background: var(--active-bg); }
-  #images li { position: relative; padding-left: 30px; }
-  .grip { position: absolute; left: 0; top: 0; bottom: 0; width: 20px; border-radius: 7px 0 0 7px;
-          background: repeating-linear-gradient(to bottom, var(--line) 0 2px, transparent 2px 5px) center / 8px 60% no-repeat,
-                      var(--bg);
-          border-right: 1px solid var(--line); cursor: grab; touch-action: none; }
-  .grip:hover, .grip:focus-visible { background-color: var(--line); outline: none; }
-  .grip.off { cursor: default; opacity: .5; }
-  #images li.dragging { opacity: .85; box-shadow: 0 6px 18px rgba(0, 0, 0, .25); z-index: 2; }
-  #images li.dragging .grip { cursor: grabbing; }
   .slotno { font-weight: 700; text-align: right; color: var(--muted); }
   .slotname { font-weight: 600; word-break: break-word; }
   label.wp { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
@@ -140,30 +131,18 @@
   <div id="msg" class="banner hidden" role="status" aria-live="polite"></div>
 
   <section aria-labelledby="h-upload">
-    <h2 id="h-upload">Add a floppy</h2>
+    <h2 id="h-upload">Load a floppy temporarily</h2>
     <form id="upform" class="current" autocomplete="off">
       <div class="row">
-        <input id="file" type="file" accept=".st,.ST,.hfe,.HFE" class="grow" aria-label="Choose a .ST or .HFE file">
+        <input id="file" type="file" accept=".st,.ST" class="grow" aria-label="Choose a .ST file">
       </div>
       <p id="fileinfo" class="small muted" style="margin:0">
-        Supported: <strong>.ST</strong> images with <strong>79–84 tracks</strong>,
-        <strong>9, 10 or 11 sectors</strong> per track and 1 or 2 sides (up to 924 KiB)
-        (e.g. 360, 400, 410, 440, 720, 800 or 880 KiB), and <strong>.HFE</strong> images (v1, v3;
-        always stored). .MSA is not supported yet.
+        Straight into the drive, not stored: gone after a restart; ideal for quickly trying something.
+        <strong>.ST</strong> images with <strong>79–84 tracks</strong>, <strong>9, 10 or 11 sectors</strong>
+        per track and 1 or 2 sides (up to 924 KiB). To keep an image, upload it to the SD card below.
       </p>
-      <fieldset>
-        <legend>Destination</legend>
-        <label class="opt"><input type="radio" name="dest" value="psram" checked>
-          <span><strong>Load temporarily</strong> — straight into the drive, not stored.
-          <span class="muted small">Gone after a restart; ideal for quickly trying something.</span></span></label>
-        <label class="opt"><input type="radio" name="dest" value="flash">
-          <span><strong>Add to my floppy images</strong>
-          <span class="muted small">Stored on RadioFloppy; to replace an image, use its Replace button.</span></span></label>
-        <label class="opt" id="actrow"><input type="checkbox" id="activate" checked>
-          <span>Also load after uploading</span></label>
-      </fieldset>
       <div class="row">
-        <button id="upbtn" type="submit">Upload</button>
+        <button id="upbtn" type="submit">Load</button>
         <span id="upstage" class="small muted"></span>
       </div>
       <progress id="upprog" class="hidden" max="100" value="0"></progress>
@@ -174,30 +153,21 @@
     <h2 id="h-new">New disk</h2>
     <form id="newform" class="current" autocomplete="off">
       <div class="row">
-        <input id="newname" type="text" class="grow" maxlength="52" placeholder="Name, e.g. Save games"
+        <input id="newname" type="text" class="grow" maxlength="52" placeholder="File name, e.g. Save games"
                aria-label="Name of the new disk" required>
         <button id="newbtn" type="submit">Create</button>
       </div>
       <p id="newinfo" class="small muted" style="margin:0">An empty, formatted Atari disk: .ST, 720 KiB
-        (80 tracks, 2 sides, 9 sectors). It is added to my floppy images, read-write.</p>
+        (80 tracks, 2 sides, 9 sectors), created in the folder that is open in the SD card block.</p>
     </form>
-  </section>
-
-  <section aria-labelledby="h-images">
-    <h2 id="h-images">My floppy images <span id="imgcount" class="muted small"></span></h2>
-    <div id="storage" class="small" style="margin-bottom:12px"></div>
-    <div id="storefix" class="banner err hidden" style="margin-bottom:12px"></div>
-    <p class="small muted" style="margin:0 0 12px">An image that is not <em>Write protected</em> can be
-      written by the Atari (.ST only; new). Written sectors are saved when the drive motor has been off
-      for 2 seconds; wait for “all changes saved” before switching the power off.</p>
-    <ul id="images" class="slots"><li class="free">Loading…</li></ul>
-    <input type="file" id="replacefile" accept=".st,.ST,.hfe,.HFE" class="hidden" aria-hidden="true" tabindex="-1">
   </section>
 
   <section aria-labelledby="h-sdcard" id="sdsec">
     <h2 id="h-sdcard">SD card <span id="sdcount" class="muted small"></span></h2>
-    <p class="small muted" style="margin:0 0 10px">Images on the SD card. <strong>.ST</strong> images can be
-      inserted (read-only for now); inserting .HFE images from the card comes later.</p>
+    <p class="small muted" style="margin:0 0 10px">Your floppy images: <strong>.ST</strong> and
+      <strong>.HFE</strong> files on the SD card. <em>Insert</em> puts one into the drive (write-protected
+      for now: writing to the card comes later). The buttons on RadioFloppy step through the images of
+      the folder of the disk inserted last.</p>
     <div id="sdcrumbs" class="small" style="margin-bottom:10px"></div>
     <div class="row" style="margin-bottom:10px">
       <button id="sdup" type="button">Upload here…</button>
@@ -317,14 +287,6 @@
     </form>
   </section>
 
-  <section aria-labelledby="h-store">
-    <h2 id="h-store">Storage</h2>
-    <label class="opt"><input type="checkbox" id="compress">
-      <span><strong>Compress new images</strong> <span class="muted small">— images added from now on, and
-      writable disks when their changes are saved, are stored compressed (game disks typically 20–85% of
-      their size, a new empty disk almost nothing). Images already stored stay as they are.</span></span></label>
-  </section>
-
   <section aria-labelledby="h-fw">
     <h2 id="h-fw">Firmware</h2>
     <dl class="kv">
@@ -346,11 +308,8 @@
 const S = {
   token: "",            // only in memory
   authRequired: false,  // from /status: a token is configured on the device
-  images: null,         // last /images answer: images in sequence order
-  storage: null,        // storage use from /images
   current: null,        // last /current answer
   busy: false,          // own load or upload in progress: no polling
-  dragging: false,      // a row is being dragged: the list is not re-rendered
   online: null,
   drive: "B:",          // drive letter RadioFloppy answers as (from /status)
   driveDirty: false,    // settings: drive choice changed, not saved yet
@@ -362,11 +321,9 @@ const S = {
 };
 
 const POLL_CURRENT_MS = 3000;
-const POLL_IMAGES_MS = 15000;
-const MAX_SIZE = 1572864;               // 1.5 MiB: storage limit of the image library
-const MAX_HFE_SIZE = 3145728;           // 3 MiB: HFE, always stored compressed
+const POLL_LIST_MS = 15000;              // the SD card list
+const MAX_SIZE = 1572864;               // 1.5 MiB: .ST images (the firmware checks the exact sizes)
 const isHfe = (name) => /\.hfe$/i.test(name);
-const maxSizeOf = (name) => isHfe(name) ? MAX_HFE_SIZE : MAX_SIZE;
 // Same rule as the firmware (st_image.c): 79-84 tracks, 9-11 sectors, 1-2 sides.
 function geometryOf(size) {
   if (size % 512 || size > MAX_SIZE) return null;
@@ -501,7 +458,7 @@ function setOnline(ok) {
   $("offline").classList.toggle("hidden", ok);
   $("conn").textContent = ok ? "Connected" : "No connection";
   $("conn").className = "conn " + (ok ? "ok" : "bad");
-  document.querySelectorAll("#current, #images").forEach((el) => el.classList.toggle("stale", !ok));
+  document.querySelectorAll("#current, #sdlist").forEach((el) => el.classList.toggle("stale", !ok));
 }
 
 // ---- Rendering ---------------------------------------------------------------
@@ -525,14 +482,8 @@ function renderCurrent() {
       origin += '<div class="banner warn small" style="margin-top:6px">Note: this file has been ' +
         "replaced or deleted since it was loaded. The Atari still reads the version loaded earlier.</div>";
     }
-  } else if (c.image_id) {
-    origin = "From my floppy images.";
-    if (c.image_changed_since) {
-      origin += '<div class="banner warn small" style="margin-top:6px">Note: this image has been ' +
-        "replaced or deleted since it was loaded. The Atari still reads the version loaded earlier.</div>";
-    }
   } else {
-    origin = "From the flash memory.";
+    origin = "";
   }
   const w = c.write || {};
   const WS = {
@@ -549,32 +500,6 @@ function renderCurrent() {
     ' · CRC32 <span class="code">' + esc(c.crc32 || "") + "</span></div><div>" + origin + "</div>";
 }
 
-function renderStorage() {
-  const st = S.storage;
-  const el = $("storage"), fix = $("storefix");
-  if (!st) { el.textContent = ""; return; }
-  if (st.state !== "valid") {
-    el.textContent = "";
-    fix.classList.remove("hidden");
-    const why = st.state === "old_format"
-      ? "The flash memory still holds the old RadioFloppy slot format."
-      : st.state === "no_flash" ? "No external flash memory was found."
-      : "The flash memory holds unknown or damaged data, or a different flash size.";
-    fix.innerHTML = "<strong>Storage not ready.</strong> " + esc(why) +
-      (st.state === "no_flash" ? "" : ' <button type="button" id="format">Initialise storage (erases all images)</button>');
-    if ($("format")) $("format").addEventListener("click", formatStorage);
-    return;
-  }
-  fix.classList.add("hidden");
-  const freeMb = (st.free_bytes / 1048576).toFixed(1);
-  el.innerHTML = "<strong>Storage: " + st.used_percent + "% used</strong>" +
-    '<div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
-    st.used_percent + '"><div style="width:' + st.used_percent + '%"></div></div>' +
-    '<span class="muted">' + freeMb + " MB free · " + st.blocks_used + " of " + st.blocks_total +
-    " blocks of " + (st.block_size / 1024) + " KiB</span>";
-}
-
-// Tabler icons (MIT), stroke = currentColor.
 const ICON_PATHS = {
   refresh: '<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/>',
   trash: '<path d="M4 7l16 0"/><path d="M10 11l0 6"/><path d="M14 11l0 6"/>' +
@@ -605,136 +530,6 @@ function button(text, cls, title, disabled, onClick) {
   return b;
 }
 
-// Drag handle: drag the row to a new place (mouse or touch), or focus it
-// and use the arrow keys. Only the order changes; no image data moves.
-function makeGrip(li, im, index, enabled) {
-  const g = document.createElement("div");
-  g.className = "grip" + (enabled ? "" : " off");
-  g.title = enabled ? "Drag to change the order" : "";
-  g.setAttribute("role", "button");
-  g.setAttribute("aria-label", "Move " + im.name + " (arrow keys)");
-  g.tabIndex = enabled ? 0 : -1;
-  if (!enabled) return g;
-  g.addEventListener("keydown", (ev) => {
-    if (ev.key === "ArrowUp" && index > 0) { ev.preventDefault(); moveImage(im, index); }
-    if (ev.key === "ArrowDown" && index < S.images.length - 1) { ev.preventDefault(); moveImage(im, index + 2); }
-  });
-  g.addEventListener("pointerdown", (ev) => {
-    if (S.busy || ev.button > 0) return;
-    ev.preventDefault();
-    const list = $("images");
-    const from = [...list.children].indexOf(li);
-    S.dragging = true;
-    li.classList.add("dragging");
-    // Listen on the window: moving the row in the DOM ends any pointer capture.
-    const move = (e) => {
-      if (e.pointerId !== ev.pointerId) return;
-      const y = e.clientY;
-      if (y < 60) window.scrollBy(0, -12);                       // follow the finger
-      if (y > window.innerHeight - 60) window.scrollBy(0, 12);
-      for (const other of list.children) {
-        if (other === li) continue;
-        const r = other.getBoundingClientRect();
-        if (y > r.top && y < r.bottom) {
-          list.insertBefore(li, y < r.top + r.height / 2 ? other : other.nextSibling);
-          break;
-        }
-      }
-    };
-    const up = (e) => {
-      if (e.pointerId !== ev.pointerId) return;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
-      li.classList.remove("dragging");
-      S.dragging = false;
-      const to = [...list.children].indexOf(li);
-      if (to !== from) moveImage(im, to + 1);
-      else renderImages();
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
-  });
-  return g;
-}
-
-// Download: always the uncompressed .st (the browser saves it).
-function downloadLink(im, enabled) {
-  const title = enabled ? "Download (.st, uncompressed)" : "Download: wait until the changes are saved";
-  if (!enabled) return button(icon("download"), "secondary icon", title, true, () => {});
-  const a = document.createElement("a");
-  a.className = "btn secondary icon";
-  a.href = "/api/v1/images/" + im.id + "/data";
-  a.setAttribute("download", "");
-  a.title = title;
-  a.setAttribute("aria-label", title);
-  a.innerHTML = icon("download");
-  return a;
-}
-
-function renderImages() {
-  const list = $("images");
-  renderStorage();
-  if (!S.images || S.dragging) return;       // never rebuild the list under a drag
-  const canChange = (!S.authRequired || !!S.token) && !S.busy && S.online !== false;
-  const lock = S.authRequired && !S.token ? "Enter the API token first" : "";
-  list.innerHTML = "";
-  if (!S.images.length) {
-    list.innerHTML = '<li class="free">No images yet. Add one above.</li>';
-  }
-  S.images.forEach((im, i) => {
-    const li = document.createElement("li");
-    const valid = im.status === "valid";
-    const busyDisk = im.active && S.current && S.current.write && S.current.write.unsaved;
-    li.className = im.active ? "active" : "";
-    li.innerHTML = '<span class="slotno">' + (i + 1) + '</span>' +
-      '<span><span class="slotname">' + esc(im.name) + '</span>' +
-      (im.active ? ' <span class="badge active">Active</span>' : "") +
-      (valid && im.access === "READ_WRITE" ? ' <span class="badge temp">Read-write</span>' : "") +
-      '<br><span class="small muted">' +
-      (valid ? kib(im.size) + (im.storage_format === "deflate"
-                 ? ' · <span title="Stored compressed">' + icon("zip", 14) + "</span> " + kib(im.stored_size) +
-                   " (" + Math.round(100 * im.stored_size / im.size) + "%)" : "")
-             : '<span style="color:var(--err)">incomplete — replacing failed; replace or delete it</span>') +
-      "</span></span>";
-    if (valid) {
-      // "Write protected": on = READ_ONLY, off = READ_WRITE.
-      const wp = document.createElement("label");
-      wp.className = "wp small";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = im.access !== "READ_WRITE";
-      cb.disabled = !canChange || !im.write_supported;
-      cb.addEventListener("change", () => setAccess(im, cb.checked ? "READ_ONLY" : "READ_WRITE", cb));
-      wp.append(cb, " Write protected");
-      if (!im.write_supported) {
-        const n = document.createElement("span");
-        n.className = "muted";
-        n.textContent = " — this image format does not support writing.";
-        wp.append(n);
-      }
-      li.children[1].appendChild(wp);
-    }
-    const a = document.createElement("div");
-    a.className = "actions";
-    a.append(
-      button("Insert", "", im.active ? "This disk is already in drive " + S.drive
-             : lock || "Put this disk into floppy drive " + S.drive, !canChange || !valid || im.active,
-             () => loadImage(im.id, im.name)),
-      downloadLink(im, valid && !busyDisk),
-      button(icon("refresh"), "secondary icon", busyDisk ? "Changes written by the Atari are not saved yet"
-             : lock || "Replace with another file…", !canChange || busyDisk, () => chooseReplacement(im)),
-      button(icon("trash"), "danger icon", busyDisk ? "Changes written by the Atari are not saved yet"
-             : lock || "Delete", !canChange || busyDisk, () => deleteImage(im)));
-    li.appendChild(a);
-    li.prepend(makeGrip(li, im, i, canChange));
-    list.appendChild(li);
-  });
-  const n = S.images.filter((x) => x.status === "valid").length;
-  $("imgcount").textContent = "(" + n + (n === 1 ? " image)" : " images)");
-}
-
 function renderAuth() {
   const st = $("authstate");
   $("authsec").classList.toggle("hidden", !S.authRequired);
@@ -748,9 +543,8 @@ function renderAuth() {
   $("newbtn").disabled = (S.authRequired && !S.token) || S.busy || !atari;
   $("newname").disabled = !atari;
   $("newinfo").innerHTML = atari
-    ? "An empty, formatted Atari disk: .ST, 720 KiB (80 tracks, 2 sides, 9 sectors). It is added to my floppy images, read-write."
+    ? "An empty, formatted Atari disk: .ST, 720 KiB (80 tracks, 2 sides, 9 sectors), created in the folder that is open in the SD card block."
     : '<span style="color:var(--warn)">Creating a new disk is not available yet for ' + esc(S.machineName || "this computer") + ".</span>";
-  renderImages();
 }
 
 function setBusy(b) {
@@ -771,21 +565,11 @@ async function refreshCurrent() {
     S.current = r.data;
     if (changed) {
       renderCurrent();
-      if (S.sdData) renderSd();        // the SD list marks the active file itself
-      // The active mark in the list comes from /images: fetch it when the disk changed.
+      if (S.sdData) renderSd();        // the SD list marks the active file
       return true;
     }
   }
   return false;
-}
-
-async function refreshImages() {
-  const r = await api("GET", "/api/v1/images");
-  if (r.status === 200 && r.data && r.data.images) {
-    S.images = r.data.images;
-    S.storage = r.data.storage;
-    renderImages();
-  }
 }
 
 async function refreshStatus() {
@@ -814,7 +598,6 @@ async function refreshStatus() {
 async function refreshAll() {
   try {
     await refreshCurrent();
-    await refreshImages();
     await refreshSd();
     setOnline(true);
   } catch (e) {
@@ -822,15 +605,15 @@ async function refreshAll() {
   }
 }
 
-let lastImages = 0;
+let lastList = 0;
 async function pollLoop() {
   if (!S.busy) {
     try {
-      const changed = await refreshCurrent();
+      await refreshCurrent();
       const now = Date.now();
-      if (changed || now - lastImages > POLL_IMAGES_MS) {
-        lastImages = now;
-        await refreshImages();
+      if (now - lastList > POLL_LIST_MS) {
+        lastList = now;
+        await refreshSd();
       }
       setOnline(true);
     } catch (e) {
@@ -840,60 +623,7 @@ async function pollLoop() {
   setTimeout(pollLoop, POLL_CURRENT_MS);
 }
 
-// ---- My floppy images: load, move, delete, replace ----------------------------
-
-async function loadImage(id, name) {
-  if (S.busy) return;
-  setBusy(true);
-  showMsg("warn", "Loading floppy… (" + esc(name) + ")");
-  try {
-    const r = await api("PUT", "/api/v1/current", { image_id: id }, 30000, true);
-    if (r.status === 200) {
-      showMsg("ok", "“" + esc(name) + "” is now the active floppy.");
-    } else if (r.data && r.data.error && r.data.error.code === "DRIVE_BUSY") {
-      showMsg("err", esc(ERRORS.DRIVE_BUSY.replace("{drive}", S.drive)) + ' <button type="button" id="retry">Try again</button>');
-      $("retry").addEventListener("click", () => loadImage(id, name));
-    } else {
-      showError(r.data, r.status, "Loading “" + name + "” failed.");
-    }
-  } catch (e) {
-    setOnline(false);
-    showMsg("err", "No connection to RadioFloppy; it is unknown whether the floppy was changed.");
-  }
-  setBusy(false);
-}
-
-// Only the order changes; no image data is moved.
-async function moveImage(im, position) {
-  if (S.busy) return;
-  setBusy(true);
-  try {
-    const r = await api("PUT", "/api/v1/images/" + im.id, { sequence: position }, 12000, true);
-    if (r.status !== 200) showError(r.data, r.status, "Moving “" + im.name + "” failed.");
-  } catch (e) {
-    setOnline(false);
-  }
-  setBusy(false);
-}
-
-// Only the stored setting changes; the drive stays write-protected for now.
-async function setAccess(im, access, cb) {
-  if (S.busy) return;
-  setBusy(true);
-  try {
-    const r = await api("PUT", "/api/v1/images/" + im.id, { access }, 12000, true);
-    if (r.status === 200) {
-      showMsg("ok", "“" + esc(im.name) + "” is set to " +
-        (access === "READ_WRITE" ? "read-write" : "read-only (write-protected)") + ".");
-    } else {
-      cb.checked = access !== "READ_ONLY";
-      showError(r.data, r.status, "Changing the write protection failed.");
-    }
-  } catch (e) {
-    setOnline(false);
-  }
-  setBusy(false);
-}
+// ---- New disk ------------------------------------------------------------------
 
 $("newform").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -903,9 +633,9 @@ $("newform").addEventListener("submit", async (ev) => {
   setBusy(true);
   showMsg("warn", "Creating “" + esc(name) + "”…");
   try {
-    const r = await api("POST", "/api/v1/images", { name }, 30000, true);
+    const r = await api("POST", "/api/v1/sd/disks", { path: S.sdPath, name }, 30000, true);
     if (r.status === 201) {
-      showMsg("ok", "“" + esc(r.data.name) + "” is created: an empty 720 KiB disk in my floppy images (read-write).");
+      showMsg("ok", "“" + esc(r.data.path) + "” is created on the SD card: an empty 720 KiB disk.");
       $("newname").value = "";
     } else if (r.data && r.data.error && r.data.error.code === "MACHINE_NOT_SUPPORTED") {
       showMsg("err", "Creating a new disk is not available yet for this computer. " + esc(r.data.error.message) + ".");
@@ -914,58 +644,10 @@ $("newform").addEventListener("submit", async (ev) => {
     }
   } catch (e) {
     setOnline(false);
-    showMsg("err", "No connection to RadioFloppy; check My floppy images afterwards.");
+    showMsg("err", "No connection to RadioFloppy; check the SD card list afterwards.");
   }
   setBusy(false);
 });
-
-async function deleteImage(im) {
-  if (S.busy) return;
-  if (!confirm("Delete “" + im.name + "”?\n\nThe image is removed from RadioFloppy." +
-               (im.active ? " The Atari keeps reading the loaded copy until another floppy is loaded." : ""))) return;
-  setBusy(true);
-  try {
-    const r = await api("DELETE", "/api/v1/images/" + im.id, undefined, 12000, true);
-    if (r.status === 200) showMsg("ok", "“" + esc(im.name) + "” deleted.");
-    else showError(r.data, r.status, "Deleting “" + im.name + "” failed.");
-  } catch (e) {
-    setOnline(false);
-  }
-  setBusy(false);
-}
-
-let replaceTarget = null;
-function chooseReplacement(im) {
-  replaceTarget = im;
-  $("replacefile").value = "";
-  $("replacefile").click();
-}
-$("replacefile").addEventListener("change", () => {
-  const file = $("replacefile").files[0];
-  const im = replaceTarget;
-  replaceTarget = null;
-  if (!file || !im) return;
-  if (!confirm("Replace “" + im.name + "” with “" + file.name + "”?\n\nThe old image is lost, " +
-               "even if the upload fails.")) return;
-  uploadFile(file, { filename: file.name, size: file.size, destination: "flash", replace: im.id,
-                     activate: !!im.active });
-});
-
-async function formatStorage() {
-  if (!confirm("Initialise the image storage?\n\nALL images on RadioFloppy are erased. " +
-               "The floppy in the drive stays loaded until the next restart.")) return;
-  setBusy(true);
-  try {
-    const r = await api("POST", "/api/v1/storage/format", { confirm: "ERASE ALL IMAGES" }, 30000, true);
-    if (r.status === 200) showMsg("ok", "The image storage is initialised and empty.");
-    else showError(r.data, r.status, "Initialising failed.");
-  } catch (e) {
-    setOnline(false);
-  }
-  setBusy(false);
-}
-
-// ---- Upload ------------------------------------------------------------------
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -982,26 +664,15 @@ function crc32(buf) {
   return ((c ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0");
 }
 
-function destination() {
-  return document.querySelector('input[name=dest]:checked').value;
-}
-
 function updateUploadForm() {
   const f = $("file").files[0];
-  // HFE images are always stored: "Load temporarily" is not possible for them.
-  const psram = document.querySelector('input[name=dest][value=psram]');
-  psram.disabled = !!f && isHfe(f.name);
-  if (psram.disabled && psram.checked) document.querySelector('input[name=dest][value=flash]').checked = true;
-  const dest = destination();
-  $("actrow").classList.toggle("hidden", dest === "psram");
   const info = $("fileinfo");
   if (!f) return;
-  if (f.size > maxSizeOf(f.name)) {
-    info.innerHTML = '<span style="color:var(--err)">' + esc(f.name) + " is " + kib(f.size) +
-      ": too large (" + (isHfe(f.name) ? "3" : "1.5") + " MiB at most).</span>";
-  } else if (isHfe(f.name)) {
-    info.innerHTML = esc(f.name) + ": " + kib(f.size) + ", HFE image. RadioFloppy checks it; " +
-      "HFE images are always stored in my floppy images.";
+  if (isHfe(f.name)) {
+    info.innerHTML = '<span style="color:var(--warn)">' + esc(f.name) + ": HFE images cannot be loaded " +
+      "temporarily; upload them to the SD card below and insert them from there.</span>";
+  } else if (f.size > MAX_SIZE) {
+    info.innerHTML = '<span style="color:var(--err)">' + esc(f.name) + " is " + kib(f.size) + ": too large.</span>";
   } else if (!geometryOf(f.size)) {
     info.innerHTML = '<span style="color:var(--warn)">' + esc(f.name) + " is " + f.size +
       " bytes: probably a format that is not supported yet (79–84 tracks, 9–11 sectors). " +
@@ -1048,30 +719,23 @@ async function upload(ev) {
   ev.preventDefault();
   const file = $("file").files[0];
   if (!file) { showMsg("err", "Choose a .ST file first."); return; }
-  const dest = destination();
-  const body = { filename: file.name, size: file.size, destination: dest };
-  if (dest !== "psram") body.activate = $("activate").checked;
-  await uploadFile(file, body);
-}
-
-// Upload file with the options in body (POST /uploads, then PUT the bytes).
-async function uploadFile(file, body) {
-  if (file.size > maxSizeOf(file.name)) { showMsg("err", esc(ERRORS.IMAGE_TOO_LARGE)); return; }
-  if (isHfe(file.name) && body.destination === "psram") {
-    showMsg("err", "HFE images cannot be loaded temporarily. Choose “Add to my floppy images”.");
+  if (isHfe(file.name)) {
+    showMsg("err", "HFE images cannot be loaded temporarily. Upload them to the SD card and insert them from there.");
     return;
   }
+  if (file.size > MAX_SIZE) { showMsg("err", esc(ERRORS.IMAGE_TOO_LARGE)); return; }
   if (S.busy) return;
   setBusy(true);
   setStage("Reading file…", null);
   $("msg").classList.add("hidden");
   try {
-    body.crc32 = crc32(new Uint8Array(await file.arrayBuffer()));
+    const body = { filename: file.name, size: file.size, destination: "psram",
+                   crc32: crc32(new Uint8Array(await file.arrayBuffer())) };
     setStage("Preparing upload…", null);
     const c = await api("POST", "/api/v1/uploads", body, 15000, true);
     if (c.status !== 201 || !c.data || !c.data.upload_url) {
       setStage("");
-      showError(c.data, c.status, "Upload refused.", isHfe(file.name));
+      showError(c.data, c.status, "Upload refused.");
       return;
     }
     setStage("Sending file… 0%", 0);
@@ -1079,27 +743,16 @@ async function uploadFile(file, body) {
     const u = r.data || {};
     if (r.status === 200 && u.state === "done") {
       setStage("Done", 100);
-      if (u.destination === "psram") {
-        showMsg("ok", "“" + esc(u.name) + "” is loaded as a temporary floppy (PSRAM, not stored).");
-      } else {
-        showMsg("ok", "“" + esc(u.name) + "” is " + (body.replace ? "stored (replaced)" : "added to my floppy images") +
-          (u.active ? " and is now the active floppy." : "."));
-      }
-      if (!body.replace) $("file").value = "";
-    } else if (u.error && u.error.code === "DRIVE_BUSY" && u.image_id) {
-      setStage("");
-      showMsg("warn", "“" + esc(u.name) + "” <strong>is stored</strong>, but not loaded: the Atari is still " +
-        'writing to drive ' + S.drive + '. <button type="button" id="later">Load it now</button>');
-      const id = u.image_id, name = u.name;
-      $("later").addEventListener("click", () => loadImage(id, name));
+      showMsg("ok", "“" + esc(u.name) + "” is loaded as a temporary floppy (PSRAM, not stored).");
+      $("file").value = "";
     } else {
       setStage("");
-      showError(u, r.status, "Upload failed.", isHfe(file.name));
+      showError(u, r.status, "Upload failed.");
     }
   } catch (e) {
     setStage("");
     setOnline(false);
-    showMsg("err", "The connection to RadioFloppy was lost during the upload. Check My floppy images afterwards.");
+    showMsg("err", "The connection to RadioFloppy was lost during the upload.");
   } finally {
     if (S.busy) setBusy(false);
   }
@@ -1215,10 +868,10 @@ function renderSd() {
     const act = document.createElement("div");
     act.className = "actions";
     if (e.type === "file") {
-      const isSt = /\.st$/i.test(e.name);
+      const isImage = /\.(st|hfe)$/i.test(e.name);
       act.append(button("Insert", "", active ? "This disk is already in drive " + S.drive
-        : !isSt ? "Inserting HFE images from the SD card comes later"
-        : lock || "Put this disk into floppy drive " + S.drive, !canChange || active || !isSt,
+        : !isImage ? "Only .ST and .HFE images can be inserted"
+        : lock || "Put this disk into floppy drive " + S.drive, !canChange || active || !isImage,
         () => sdInsert(path, e.name)));
     }
     act.append(button(icon("trash"), "danger icon", lock || (e.type === "folder" ? "Delete folder" : "Delete file"),
@@ -1240,12 +893,16 @@ async function sdInsert(path, name) {
   if (S.busy) return;
   setBusy(true);
   try {
-    const r = await api("PUT", "/api/v1/current", { sd_path: path }, 20000, true);
+    showMsg("warn", "Loading floppy… (" + esc(name) + ")");
+    const r = await api("PUT", "/api/v1/current", { sd_path: path }, 30000, true);
     if (r.status === 200) {
       S.current = r.data;
       renderCurrent();
       renderSd();
-      showMsg("ok", "“" + esc(name) + "” is now the active floppy (from the SD card).");
+      showMsg("ok", "“" + esc(name) + "” is now the active floppy.");
+    } else if (r.data && r.data.error && r.data.error.code === "DRIVE_BUSY") {
+      showMsg("err", esc(ERRORS.DRIVE_BUSY.replace("{drive}", S.drive)) + ' <button type="button" id="retry">Try again</button>');
+      $("retry").addEventListener("click", () => sdInsert(path, name));
     } else {
       showError(r.data, r.status, "Inserting “" + name + "” failed.");
     }
@@ -1389,7 +1046,6 @@ function renderSettings(d) {
     ? "Now answering as " + (d.drive_select_active === "DS0" ? "A:" : "B:") + " until the restart."
     : "";
   $("buzzer").checked = !!d.buzzer;
-  $("compress").checked = !!d.compression;
   document.querySelectorAll("input[name=leds]").forEach((r) => {
     r.checked = Number(r.value) === d.leds;
     r.disabled = S.authRequired && !S.token;
@@ -1409,7 +1065,6 @@ function renderSettings(d) {
   $("hostsave").disabled = locked;
   $("connsave").disabled = locked;
   $("buzzer").disabled = locked;
-  $("compress").disabled = locked;
   $("restart").disabled = locked;
 }
 
@@ -1494,42 +1149,6 @@ $("connform").addEventListener("submit", async (ev) => {
   $("connsave").disabled = false;
 });
 
-$("compress").addEventListener("change", async () => {
-  const on = $("compress").checked;
-  showSetMsg("", "");
-  try {
-    const r = await api("PUT", "/api/v1/settings", { compression: on }, 12000, true);
-    if (r.status === 200) {
-      renderSettings(r.data);
-      showSetMsg("ok", "New images are " + (on ? "stored compressed." : "stored uncompressed."));
-    } else {
-      $("compress").checked = !on;
-      showSetMsg("err", errorText(r.data, r.status).text);
-    }
-  } catch (e) {
-    $("compress").checked = !on;
-    showSetMsg("err", "RadioFloppy cannot be reached.");
-  }
-});
-
-document.querySelectorAll("input[name=leds]").forEach((radio) => radio.addEventListener("change", async () => {
-  const n = Number(radio.value);
-  showSetMsg("", "");
-  try {
-    const r = await api("PUT", "/api/v1/settings", { leds: n }, 12000, true);
-    if (r.status === 200) {
-      renderSettings(r.data);
-      showSetMsg("ok", n === 2 ? "Two LEDs: WiFi status on J4 pin 1." : "One LED: WiFi status on the board's own LED.");
-    } else {
-      showSetMsg("err", errorText(r.data, r.status).text);
-      refreshSettings();
-    }
-  } catch (e) {
-    showSetMsg("err", "RadioFloppy cannot be reached.");
-    refreshSettings();
-  }
-}));
-
 $("buzzer").addEventListener("change", async () => {
   const on = $("buzzer").checked;
   showSetMsg("", "");
@@ -1603,14 +1222,13 @@ $("tokclear").addEventListener("click", () => {
 });
 $("upform").addEventListener("submit", upload);
 $("file").addEventListener("change", updateUploadForm);
-document.querySelectorAll("input[name=dest]").forEach((r) => r.addEventListener("change", updateUploadForm));
 updateUploadForm();
 
 (async () => {
   try {
     await refreshStatus();
     await refreshAll();
-    lastImages = Date.now();
+    lastList = Date.now();
   } catch (e) {
     setOnline(false);
   }

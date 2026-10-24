@@ -131,11 +131,9 @@ the Atari: HFEv1 first, then HFEv3, then copy-protected images.
   slot table (`hfe_slot_t`, 168 slots) followed per track by cells (MSB
   first, 32-bit aligned), timing segments and weak areas. Checking a file
   runs the same packing in count-only mode.
-- `main/hfe_import.c`: upload → CRC + early check + streaming deflate into
-  reserved flash blocks (`image_store_writer_*`) → afterwards inflate from
-  flash and check again → commit.
-- `main/img_codec.c`: streaming deflate (worker task on core 1, ROM tdefl)
-  and streaming inflate.
+- (Removed since: `hfe_import.c` and `img_codec.c`, which stored HFE
+  files compressed in the flash library. HFE files now live on the SD
+  card and are streamed from it into the track buffer.)
 - **Phase 2 (this branch):**
   - `main/flux_stream.c`: `FLUX_MODE_HFE`, set with `flux_stream_set_mode`,
     which restarts both RMT channels in sync on an ST↔HFE disk change.

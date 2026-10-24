@@ -5,11 +5,11 @@ Browser test of the RadioFloppy web interface against a real device.
     RADIOFLOPPY_HOST=192.168.x.y [RADIOFLOPPY_TOKEN=...] tests/web/ui_test.py
 
 Needs Google Chrome and the Python package websocket-client (for the
-DevTools protocol). The image library must hold at least two valid images
-and have room for some more. Images stored when the test starts are left
-alone (ids, order, data): the test adds its own images, deletes exactly
-those, and restores the disk that was active at the start. DRIVE_BUSY, a
-lost connection and a phone screen are simulated in the browser.
+DevTools protocol). Needs an SD card with at least two .ST images in the
+root directory. Files on the card are left alone: the test works in its
+own folder "RF UI test" and removes it again, and inserts the disk that
+was active at the start again. DRIVE_BUSY, a lost connection and a phone
+screen are simulated in the browser.
 """
 import http.client
 import json
@@ -149,34 +149,25 @@ def text(b, sel):
     return b.js("(document.querySelector(%s)||{}).innerText||''" % json.dumps(sel))
 
 
-def upload_via_ui(b, path, dest, activate=False):
+def load_temporarily(b, path):
+    """Choose a file in "Load a floppy temporarily" and press Load."""
     b.set_file(path)
-    b.js("document.querySelector('input[name=dest][value=%s]').click()" % dest)
-    b.js("document.getElementById('activate').checked=%s" % ("true" if activate else "false"))
     b.js("document.getElementById('msg').classList.add('hidden')")
     b.js("document.getElementById('upbtn').click()")
 
 
-def images():
-    return api("GET", "/api/v1/images")[1]["images"]
+def q(path):
+    return "?path=" + urllib.parse.quote(path)
 
 
-def row(image_id):
-    """JS expression: the list row of an image (by id)."""
-    return "document.querySelectorAll('#images li')[S.images.findIndex(x => x.id == %d)]" % image_id
+def sd_row(name):
+    """JS expression: the SD list row of a file or folder (by name)."""
+    return ("[...document.querySelectorAll('#sdlist li')].find(li => "
+            "(li.querySelector('.sdname') || {}).textContent === %s)" % json.dumps(name))
 
 
-def btn(image_id, label):
-    """A row's button by its text or, for icon buttons, its aria-label."""
-    return ("[...%s.querySelectorAll('button')].find(x => x.textContent.startsWith(%s) || "
-            "(x.getAttribute('aria-label') || '').startsWith(%s))" % (
-                row(image_id), json.dumps(label), json.dumps(label)))
-
-
-def grip_key(image_id, key):
-    """Press an arrow key on a row's drag handle (keyboard reordering)."""
-    return ("%s.querySelector('.grip').dispatchEvent(new KeyboardEvent('keydown', "
-            "{key: %s, bubbles: true}))" % (row(image_id), json.dumps(key)))
+def insert_btn(name):
+    return "[...%s.querySelectorAll('button')].find(x => x.textContent === 'Insert')" % sd_row(name)
 
 
 def synthetic(path, size, seed):
@@ -200,179 +191,112 @@ def main():
     open(bad, "wb").write(os.urandom(1000))
     tenspt = os.path.join(tmp, "seventy tracks.st")
     open(tenspt, "wb").write(bytes(645120))
-    big = synthetic(os.path.join(tmp, "Big test 880K.st"), 901120, 7)
+    hfe = os.path.join(tmp, "game.hfe")
+    open(hfe, "wb").write(bytes(1000))
+    T = "RF UI test"
 
     start = api("GET", "/api/v1/current")[1]
-    orig = images()
-    orig_ids = [x["id"] for x in orig]
-    valid = [x["id"] for x in orig if x["status"] == "valid"]
+    settings = api("GET", "/api/v1/settings")[1]
+    if not settings.get("sd", {}).get("present"):
+        sys.exit("no SD card in RadioFloppy")
+    if api("GET", "/api/v1/sd/files" + q(T))[0] == 200:      # left over from an aborted run
+        api("DELETE", "/api/v1/sd/folders" + q(T) + "&recursive=true&confirm=" + urllib.parse.quote(T))
+    root = api("GET", "/api/v1/sd/files")[1]["entries"]
+    sts = sorted([e["name"] for e in root if e["type"] == "file" and e["name"].lower().endswith(".st")],
+                 key=str.lower)
+    if len(sts) < 2:
+        sys.exit("need at least two .ST images in the SD card's root directory")
     b = Browser()
     try:
-        print("page and image list")
+        print("page and SD card list")
         b.cmd("Page.navigate", url="http://%s/" % HOST)
-        check(b.wait("document.querySelectorAll('#images li').length == %d" % max(len(orig), 1)),
-              "%d images shown" % len(orig))
+        check(b.wait("S.sdState === 'ok' && document.querySelectorAll('#sdlist li').length == %d" % len(root)),
+              "%d entries of the root directory shown" % len(root))
         check(b.wait("document.getElementById('conn').innerText == 'Connected'"), "status 'Connected'")
-        storage = api("GET", "/api/v1/storage")[1]
-        check(("Storage: %d%% used" % storage["used_percent"]) in text(b, "#storage"),
-              "'Storage: %d%% used' shown" % storage["used_percent"])
-        check(b.js("[...document.querySelectorAll('#images .slotname')].map(x => x.innerText).join('|')")
-              == "|".join(x["name"] for x in orig), "list in sequence order")
+        check(b.wait("document.getElementById('sdcrumbs').innerText.includes(%s)"
+                     % json.dumps(settings["root_dir"] or "SD card"), 10), "breadcrumb shows the root directory")
+        check(not b.js("!!document.getElementById('images')"), "no 'My floppy images' list any more")
         cur = api("GET", "/api/v1/current")[1]
-        check(cur["name"] in text(b, "#current") and "Active" in text(b, "#current"),
-              "Current Floppy shows the active disk")
-        if cur.get("image_id"):
-            check(b.js(row(cur["image_id"]) + ".className") == "active", "active image marked in the list")
+        if cur["inserted"]:
+            check(cur["name"] in text(b, "#current") and "Active" in text(b, "#current"),
+                  "Current Floppy shows the active disk")
         auth = api("GET", "/api/v1/status")[1].get("auth_required", False)
         if auth:
-            check(b.js("[...document.querySelectorAll('#images button')].every(x => x.disabled)"),
-                  "token required, none entered: image buttons disabled")
-            check(b.js("document.getElementById('upbtn').disabled"), "token required: Upload disabled")
+            check(b.js("[...document.querySelectorAll('#sdlist button')].every(x => x.disabled)"),
+                  "token required, none entered: SD buttons disabled")
+            check(b.js("document.getElementById('upbtn').disabled"), "token required: Load disabled")
             check("view only" in text(b, "#authstate"), "token required: 'view only' shown")
         else:
             check(b.js("document.getElementById('authsec').classList.contains('hidden')"),
                   "no token on the device: no 'Admin access' section")
-            check(not b.js("document.getElementById('upbtn').disabled"), "no token needed: Upload enabled")
-            check(b.js("[...document.querySelectorAll('#images li:not(.active)')].every(li => "
-                       "!li.querySelector('button:nth-child(3)').disabled)"),
-                  "no token needed: Load buttons enabled")
+            check(not b.js("document.getElementById('upbtn').disabled"), "no token needed: Load enabled")
 
         print("change made by another client shows up by polling")
-        other = valid[0] if cur.get("image_id") != valid[0] else valid[1]
+        other = sts[0] if cur.get("sd_path") != sts[0] else sts[1]
         for _ in range(5):          # the Atari may be using drive B: (DRIVE_BUSY)
-            st, r = api("PUT", "/api/v1/current", {"image_id": other})
+            st, r = api("PUT", "/api/v1/current", {"sd_path": other})
             if st == 200:
                 break
             print("  (external PUT: %s, retrying)" % (r or {}).get("error", {}).get("code"))
             time.sleep(2)
-        check(st == 200, "external client activated image %d" % other)
-        check(b.wait(row(other) + ".className == 'active'", 20),
-              "image %d marked active after an external change" % other)
+        check(st == 200, "external client inserted %s" % other)
+        check(b.wait(sd_row(other) + " && " + sd_row(other) + ".className == 'active'", 20),
+              "%s marked active after an external change" % other)
 
-        target = valid[1] if other == valid[0] else valid[0]
+        target = sts[1] if other == sts[0] else sts[0]
         if auth:
             print("wrong token")
             b.js("document.getElementById('token').value='wrong'; document.getElementById('authform').requestSubmit()")
-            b.js(btn(target, "Insert") + ".click()")
+            b.js(insert_btn(target) + ".click()")
             check(b.wait("document.getElementById('msg').innerText.includes('token is missing or wrong')"),
                   "401: understandable message")
-
-        print("load a stored image")
-        if auth:
             b.js("document.getElementById('token').value=%s; document.getElementById('authform').requestSubmit()"
                  % json.dumps(TOKEN))
-        check(b.wait("!" + btn(target, "Insert") + ".disabled"), "Load enabled")
-        b.js(btn(target, "Insert") + ".click()")
+
+        print("insert from the SD card")
+        check(b.wait("!" + insert_btn(target) + ".disabled"), "Insert enabled")
+        b.js(insert_btn(target) + ".click()")
         check(b.wait("document.getElementById('msg').innerText.startsWith('Loading floppy')", 5),
               "progress 'Loading floppy…' shown")
         ok = b.wait("document.getElementById('msg').innerText.includes('is now the active floppy')")
-        check(ok, "load succeeded" + ("" if ok else " (page said: %r)" % text(b, "#msg")[:120]))
-        check(b.wait(row(target) + ".className == 'active'"), "active mark moved after the confirmed load")
+        check(ok, "insert succeeded" + ("" if ok else " (page said: %r)" % text(b, "#msg")[:120]))
+        check(b.wait(sd_row(target) + ".className == 'active'"), "active mark moved")
+        check("From the SD card" in text(b, "#current"), "Current Floppy: from the SD card")
 
         print("DRIVE_BUSY (simulated in the browser)")
         b.js("""window._fetch = window.fetch; window.fetch = (u, o) =>
                 (o && o.method == 'PUT' && u.endsWith('/current'))
                 ? Promise.resolve(new Response(JSON.stringify({error:{code:'DRIVE_BUSY',message:'x'}}), {status:409}))
                 : window._fetch(u, o);""")
-        b.js(btn(other, "Insert") + ".click()")
+        b.js(insert_btn(other) + ".click()")
         check(b.wait("document.getElementById('msg').innerText.includes('still writing to drive B')"),
               "DRIVE_BUSY: 'still writing to drive B:' shown")
         check(b.js("!!document.getElementById('retry')"), "DRIVE_BUSY: 'Try again' button")
-        check(b.js(row(target) + ".className") == "active", "DRIVE_BUSY: active mark unchanged")
+        check(b.js(sd_row(target) + ".className") == "active", "DRIVE_BUSY: active mark unchanged")
         b.js("window.fetch = window._fetch")
 
-        print("PSRAM upload")
-        used = lambda: api("GET", "/api/v1/storage")[1]["blocks_used"]
-        before = used()
+        print("load a floppy temporarily")
         b.js("""window._busyGets = 0; const f = window.fetch;
                 window.fetch = (u, o) => { if (S.busy && (!o || o.method == 'GET' || !o.method)) window._busyGets++;
                                            return f(u, o); };""")
-        upload_via_ui(b, rl, "psram")
+        load_temporarily(b, rl)
         check(b.wait("document.getElementById('msg').innerText.includes('temporary floppy')", 60),
-              "PSRAM upload succeeded")
+              "temporary upload succeeded")
         check(b.js("window._busyGets") == 0, "no polling requests during the upload")
         check(b.wait("document.getElementById('current').innerText.includes('Temporary')"),
               "Current Floppy: temporary (PSRAM)")
-        check(used() == before, "no flash blocks used by the PSRAM upload")
-
-        print("add to my floppy images")
-        upload_via_ui(b, cc, "flash")
-        check(b.wait("document.getElementById('msg').innerText.includes('added to my floppy images')", 60),
-              "added")
-        new = images()[-1]
-        check(new["name"] == "CRYSTAL_CASTLES" and new["id"] not in orig_ids, "new image at the end of the list")
-        check(b.wait("document.querySelectorAll('#images li').length == %d" % (len(orig) + 1)), "list refreshed")
-        pct = api("GET", "/api/v1/storage")[1]["used_percent"]
-        check(b.wait("document.getElementById('storage').innerText.includes('Storage: %d%% used')" % pct),
-              "storage percentage updated")
-        upload_via_ui(b, big, "flash", activate=True)
-        check(b.wait("document.getElementById('msg').innerText.includes('is now the active floppy')", 90),
-              "880 KiB image added and loaded")
-        big_img = images()[-1]
-
-        print("change the order")
-        crc_before = {x["id"]: x.get("crc32") for x in images()}
-        b.js(grip_key(big_img["id"], "ArrowUp"))
-        check(b.wait("S.images.length > 1 && S.images[S.images.length - 2].id == %d" % big_img["id"], 20),
-              "arrow up on the handle: one place up")
-        check(images()[-2]["id"] == big_img["id"], "order changed on the device")
-        check({x["id"]: x.get("crc32") for x in images()} == crc_before, "no image data changed")
-        b.js(grip_key(big_img["id"], "ArrowDown"))
-        check(b.wait("S.images[S.images.length - 1].id == %d" % big_img["id"], 20), "arrow down on the handle: back again")
-        check(b.js("[...document.querySelectorAll('#images li')].slice(0, %d).map(li => "
-                   "li.querySelector('.slotname').innerText).join('|')" % len(orig))
-              == "|".join(x["name"] for x in orig), "original images keep their order")
-
-        print("replace")
-        b.dialog_answer = False
-        b.events.clear()
-        b.js("document.getElementById('msg').classList.add('hidden')")
-        b.js(btn(new["id"], "Replace") + ".click(); replaceTarget = S.images.find(x => x.id == %d)" % new["id"])
-        b.set_file(rl, "#replacefile")
-        b.pump(2)
-        dialogs = [e for e in b.events if e["method"] == "Page.javascriptDialogOpening"]
-        check(dialogs and "CRYSTAL_CASTLES" in dialogs[0]["params"]["message"] and
-              "RETROLOFT_TEST_720K" in dialogs[0]["params"]["message"],
-              "confirmation names the old image and the new file")
-        check(api("GET", "/api/v1/images/%d" % new["id"])[1]["name"] == "CRYSTAL_CASTLES",
-              "cancelled: image unchanged")
-        b.dialog_answer = True
-        b.js("replaceTarget = S.images.find(x => x.id == %d)" % new["id"])
-        b.set_file(rl, "#replacefile")
-        check(b.wait("document.getElementById('msg').innerText.includes('stored (replaced)')", 60),
-              "confirmed: replaced")
-        r = api("GET", "/api/v1/images/%d" % new["id"])[1]
-        check(r["name"] == "RETROLOFT_TEST_720K" and r["sequence"] == new["sequence"],
-              "same id and position, new contents")
-
-        print("delete")
-        b.dialog_answer = False
-        b.js(btn(new["id"], "Delete") + ".click()")
-        b.pump(1)
-        check(api("GET", "/api/v1/images/%d" % new["id"])[0] == 200, "cancelled: image kept")
-        b.dialog_answer = True
-        b.js(btn(new["id"], "Delete") + ".click()")
-        check(b.wait("document.getElementById('msg').innerText.includes('deleted')", 20), "deleted")
-        check(api("GET", "/api/v1/images/%d" % new["id"])[0] == 404, "gone on the device")
-        check(b.wait("!S.images.some(x => x.id == %d)" % new["id"], 20), "gone from the list")
 
         print("error messages")
-        upload_via_ui(b, bad, "flash")
+        load_temporarily(b, bad)
         check(b.wait("document.getElementById('msg').innerText.includes('not a valid .ST')", 30),
               "invalid image: understandable message")
-        upload_via_ui(b, tenspt, "flash")
+        load_temporarily(b, tenspt)
         check(b.wait("document.getElementById('msg').innerText.includes('is not supported')", 30),
               "unsupported geometry: understandable message")
         check("probably a format that is not supported" in text(b, "#fileinfo"),
               "file size warning shown right after choosing the file")
-        data = open(big, "rb").read()
-        while api("GET", "/api/v1/storage")[1]["blocks_free"] >= 14:
-            s, u = api_upload(data, "Fill.st", destination="flash")
-            if s != 200:
-                break
-        upload_via_ui(b, big, "flash")
-        check(b.wait("document.getElementById('msg').innerText.includes('Not enough free storage')", 30),
-              "full flash: NO_SPACE explained")
+        b.set_file(hfe)
+        check("cannot be loaded temporarily" in text(b, "#fileinfo"), "HFE chosen: 'upload it to the SD card'")
 
         print("connection lost and restored (simulated)")
         b.cmd("Network.emulateNetworkConditions", offline=True, latency=0,
@@ -386,53 +310,43 @@ def main():
         check(b.wait("document.getElementById('offline').classList.contains('hidden')", 20),
               "reconnected automatically")
 
-        print("SD card")
-        sd = api("GET", "/api/v1/settings")[1].get("sd", {})
-        if not sd.get("present"):
-            print("        (no SD card: skipped)")
-        else:
-            T = "RF UI test"
-            q = lambda p: "?path=" + urllib.parse.quote(p)
-            if api("GET", "/api/v1/sd/files" + q(T))[0] == 200:      # left over from an aborted run
-                api("DELETE", "/api/v1/sd/folders" + q(T) + "&recursive=true&confirm=" + urllib.parse.quote(T))
-                b.js("refreshSd()")
-            check(b.wait("S.sdState === 'ok' && !document.getElementById('sdup').disabled", 20),
-                  "SD card block shown, buttons enabled")
-            check(b.wait("document.getElementById('sdcrumbs').innerText.includes(%s)"
-                         % json.dumps(api("GET", "/api/v1/settings")[1]["root_dir"] or "SD card"), 10),
-                  "breadcrumb shows the root directory")
-            b.dialog_answer = True
-            b.prompt_text = T
-            b.js("document.getElementById('sdnewdir').click()")
-            check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === %s && e.type === 'folder')" % json.dumps(T), 20),
-                  "New folder: created and listed")
-            b.js("[...document.querySelectorAll('#sdlist a.sdname')].find(a => a.textContent === %s).click()" % json.dumps(T))
-            check(b.wait("S.sdPath === %s && S.sdState === 'ok' && document.getElementById('sdcrumbs').innerText.includes(%s)"
-                         % (json.dumps(T), json.dumps(T)), 20), "folder opened, breadcrumb follows")
-            check(b.wait("document.getElementById('sdlist').innerText.includes('empty')", 10), "empty folder says so")
-            b.set_file(cc, "#sdfile")
-            check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === %s && e.size === %d)"
-                         % (json.dumps(os.path.basename(cc)), os.path.getsize(cc)), 60),
-                  "Upload here: the file is listed with its size")
-            check(b.wait("document.getElementById('msg').innerText.includes('stored on the SD card')", 10),
-                  "upload message")
-            b.js("[...document.querySelectorAll('#sdlist li')].find(li => li.innerText.includes(%s))"
-                 ".querySelector('button:not(.danger)').click()" % json.dumps(os.path.basename(cc)))
-            check(b.wait("S.current && S.current.source === 'sd' && "
-                         "document.getElementById('current').innerText.includes('From the SD card')", 30),
-                  "Insert: the file is the current floppy, from the SD card")
-            check(b.wait("document.querySelector('#sdlist li.active') && "
-                         "document.querySelector('#sdlist li.active').innerText.includes('Active')", 10),
-                  "the inserted file is marked Active in the SD list")
-            b.set_file(cc, "#sdfile")     # same name again: confirm "Replace it?" (answered yes)
-            check(b.wait("document.getElementById('msg').innerText.includes('1 file stored')", 60), "replacing asks and works")
-            b.js("[...document.querySelectorAll('#sdcrumbs a')][0].click()")
-            check(b.wait("S.sdPath === '' && S.sdState === 'ok'", 20), "breadcrumb back to the root directory")
-            b.js("[...document.querySelectorAll('#sdlist li')].find(li => li.innerText.includes(%s))"
-                 ".querySelector('button.danger').click()" % json.dumps(T))
-            check(b.wait("S.sdData && !S.sdData.entries.some(e => e.name === %s)" % json.dumps(T), 60),
-                  "non-empty folder deleted after two confirmations")
-            check(api("GET", "/api/v1/sd/files" + q(T))[0] == 404, "gone on the card")
+        print("SD card: folders, upload, new disk")
+        check(b.wait("S.sdState === 'ok' && !document.getElementById('sdup').disabled", 20),
+              "SD card buttons enabled")
+        b.dialog_answer = True
+        b.prompt_text = T
+        b.js("document.getElementById('sdnewdir').click()")
+        check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === %s && e.type === 'folder')" % json.dumps(T), 20),
+              "New folder: created and listed")
+        b.js("[...document.querySelectorAll('#sdlist a.sdname')].find(a => a.textContent === %s).click()" % json.dumps(T))
+        check(b.wait("S.sdPath === %s && S.sdState === 'ok' && document.getElementById('sdcrumbs').innerText.includes(%s)"
+                     % (json.dumps(T), json.dumps(T)), 20), "folder opened, breadcrumb follows")
+        check(b.wait("document.getElementById('sdlist').innerText.includes('empty')", 10), "empty folder says so")
+        b.set_file(cc, "#sdfile")
+        name = os.path.basename(cc)
+        check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === %s && e.size === %d)"
+                     % (json.dumps(name), os.path.getsize(cc)), 60),
+              "Upload here: the file is listed with its size")
+        check(b.wait("document.getElementById('msg').innerText.includes('stored on the SD card')", 10),
+              "upload message")
+        b.js(insert_btn(name) + ".click()")
+        check(b.wait("S.current && S.current.source === 'sd' && S.current.sd_path === %s"
+                     % json.dumps(T + "/" + name), 30), "Insert: the uploaded file is the current floppy")
+        check(b.wait(sd_row(name) + ".className == 'active'", 10), "marked Active in the SD list")
+        b.set_file(cc, "#sdfile")     # same name again: confirm "Replace it?" (answered yes)
+        check(b.wait("document.getElementById('msg').innerText.includes('1 file stored')", 60), "replacing asks and works")
+        b.js("document.getElementById('newname').value = 'Save games'; "
+             "document.getElementById('newform').requestSubmit()")
+        check(b.wait("document.getElementById('msg').innerText.includes('is created on the SD card')", 30),
+              "New disk: created in the open folder")
+        check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === 'Save games.st' && e.size === 737280)", 20),
+              "New disk listed (Save games.st, 720 KiB)")
+        b.js("[...document.querySelectorAll('#sdcrumbs a')][0].click()")
+        check(b.wait("S.sdPath === '' && S.sdState === 'ok'", 20), "breadcrumb back to the root directory")
+        b.js(sd_row(T) + ".querySelector('button.danger').click()")
+        check(b.wait("S.sdData && !S.sdData.entries.some(e => e.name === %s)" % json.dumps(T), 60),
+              "non-empty folder deleted after two confirmations")
+        check(api("GET", "/api/v1/sd/files" + q(T))[0] == 404, "gone on the card")
 
         print("phone screen")
         b.cmd("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleFactor=2, mobile=True)
@@ -445,13 +359,13 @@ def main():
     finally:
         b.close()
         print("cleanup")
-        for x in images():
-            if x["id"] not in orig_ids:
-                api("DELETE", "/api/v1/images/%d" % x["id"])
-        if start.get("image_id"):
-            api("PUT", "/api/v1/current", {"image_id": start["image_id"]})
+        if api("GET", "/api/v1/sd/files" + q(T))[0] == 200:
+            api("DELETE", "/api/v1/sd/folders" + q(T) + "&recursive=true&confirm=" + urllib.parse.quote(T))
+        if start.get("source") == "sd" and start.get("sd_path"):
+            api("PUT", "/api/v1/current", {"sd_path": start["sd_path"]})
         print("  restored: " + json.dumps(api("GET", "/api/v1/current")[1]))
-        check([x["id"] for x in images()] == orig_ids, "end state: the original images in their order")
+        check(sorted(e["name"] for e in api("GET", "/api/v1/sd/files")[1]["entries"]) ==
+              sorted(e["name"] for e in root), "end state: the root directory as it was")
 
     print("\n%s" % ("ALL UI TESTS PASSED" if not failures else "%d FAILED" % failures))
     sys.exit(1 if failures else 0)

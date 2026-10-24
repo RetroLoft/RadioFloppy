@@ -61,7 +61,7 @@ SW_NEXT 19), UART0.
 
 | Item | Result |
 | --- | --- |
-| Flash (app only), boot, image library on the NOR flash | OK (21 images, catalog intact) |
+| Flash (app only), boot, image library on the NOR flash | OK (21 images, catalog intact; the library has since been removed) |
 | DS0/DS1 pull-ups | OK with +5 V on J2 (Atari on): `"selected": false` when idle. Without +5 V on J2 (Atari off, board on USB) the pull-ups have no supply, all lines read active and the activity LED lights; the user accepts this, normal use has +5 V. |
 | Atari reads a game through the emulator | OK |
 | LEDs | Activity on J4 pin 3 OK. 1/2 LED setting (see below) switches at once. With 470R a standard green 3 mm LED is dim (about 2.5 mA). |
@@ -98,22 +98,36 @@ SW_NEXT 19), UART0.
 - Optionally read pin 2 as an input too (PC density select, Falcon HD
   signalling).
 
-## Next: the SD card (J5)
+## Images on the SD card (done) and what comes next
 
-Not started. Plan agreed so far (see `docs/HANDOFF_HFE.md`, "Decision for
-later"):
+The image library on the NOR flash is gone (`image_store.c`,
+`img_codec.c`, `hfe_import.c` and their tests removed; the old catalogs
+are erased once at start-up). Now:
 
-- SD in SPI mode on the same SPI2 bus as the NOR flash (ESP-IDF `sdspi`
-  device on the existing bus, own CS). Keep the `ext_flash` mutex rules in
-  mind: every access to one device goes through its own lock; the bus lock
-  arbitrates between the two devices.
-- Card init needs >= 74 clocks with CS high at 400 kHz; the flash must not
-  be accessed with a different clock setting during that. Test with a card
-  inserted and removed; a card that is removed must never block the flash.
-- Images as plain files on the card; HFE tracks read per cylinder when the
-  Atari asks for them instead of the whole disk in PSRAM. Then raise
-  `HFE_MAX_SEGMENTS` (keep smoothing, do not play every jitter step).
-- Large images (the 6 HFE files that do not fit now) go to the card.
+- Images are files below the root directory. API: `/sd/files`,
+  `/sd/folders`, `/sd/disks` (new blank 720K .ST), uploads with
+  `"destination": "sd"`, `PUT /current {"sd_path"}` for .ST and .HFE
+  (HFE decoded while it is streamed from the card, 8 KiB pieces). PSRAM
+  uploads (.ST) stay for "play now".
+- The NOR flash holds the settings (record v9: `last_sd`, `last_sd_crc`)
+  and one copy of the last disk (`main/disk_copy.c`, up to 3 MiB,
+  written about 5 s after the last change, data in 64 KiB erase blocks:
+  2 MB in about 17 s). Start-up: the file from the card; without a
+  readable card the copy (path and CRC must match); a card without the
+  file: no disk. See `docs/FLASH_LAYOUT.md`.
+- Buttons: previous/next image file in the folder of the disk inserted
+  last (natural sort as the web page), no wrap-around.
+- Every disk is write-protected for now. `disk_write.c` still receives
+  and decodes sectors; saving is the next step: write to the copy in the
+  flash, then to the file on the card.
+
+Tested on the board: inserting .ST and HFE from the card, the flash
+copy, the buttons (their task needs 8 KiB of stack for a step), and
+starting without the card from the copy (Klax, HFEv3 2.9 MB: 6.7 s).
+
+Later: HFE tracks read per cylinder when the Atari asks for them instead
+of the whole disk in PSRAM; then raise `HFE_MAX_SEGMENTS` (keep
+smoothing).
 
 ## Working with this user
 

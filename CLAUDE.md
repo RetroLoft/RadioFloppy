@@ -2,9 +2,9 @@
 
 WiFi floppy emulator for the Atari ST: ESP32-S3 (Otronic DevKitC, N16R8)
 on a carrier board, ESP-IDF 5.5.5, C. It plays .ST and HFE (v1/v3) images
-as drive B: over the Shugart interface; images live in an image library on
-an external SPI NOR flash; an SD card (J5) is mounted and the move of the
-library to the card has started; HTTP API + web UI (`docs/API.md`).
+as drive B: over the Shugart interface; images live as files on the SD
+card (J5); the external SPI NOR flash only holds the settings and a copy
+of the last disk; HTTP API + web UI (`docs/API.md`).
 
 ## Read first
 
@@ -29,11 +29,8 @@ add a handoff file before committing.
 working. Never flash current firmware on a rev 1 board (GPIO20 is the
 buzzer there).
 
-Open work, in order: the image library on the SD card (images as files
-in the root directory; see the plan in `docs/HANDOFF_BOARD_REV2.md`);
-`tests/web/ui_test.py` (the "full flash: NO_SPACE" check fails while
-compression is on, and the arrow-key reorder step can fire while the page
-is still busy); HFE weak bits (phase 3, needs a test file with real RAND
+Open work, in order: writing (every disk is read-only now; plan: write
+to the copy in the flash, then to the file on the SD card); HFE weak bits (phase 3, needs a test file with real RAND
 areas); a timing measurement tool (P-47 hangs after its intro); cosmetic
 items listed in `docs/HANDOFF_HFE.md`.
 
@@ -52,7 +49,8 @@ items listed in `docs/HANDOFF_HFE.md`.
 - Requirements from the HFE work (keep): the ST route stays unchanged
   incl. write support; INDEX sits on the real revolution boundary; measure
   timing on hardware, don't assume; HFE is READ_ONLY and stored
-  compressed; never accept an image that cannot be activated.
+  stored
+as it is; never accept an image that cannot be activated.
 
 ## Build, flash, test
 
@@ -81,9 +79,9 @@ it does not reset the board (reset through RTS/EN, as `idf.py flash` and
 mode (hold BOOT, press RESET).
 After any firmware change run both device tests (ST regression) before
 reporting success. `tests/api/api_test.py` needs
-`images/CRYSTAL_CASTLES.ST` (git-ignored; download it from the board:
-`GET /api/v1/images/1/data`, CRC 42ce7eed). The tests leave the first
-original image active.
+`images/CRYSTAL_CASTLES.ST` (git-ignored, CRC 42ce7eed) and HFE files in
+the SD card's root directory. The tests insert the disk that was active
+before again at the end.
 
 Test images: Linux `/mnt/retroloft/retro/FLOPPIES/HFE` (1442 HFEv1);
 OneDrive `retro/P` (75 HFEv1 converted from STX) and `retro/HFEv3` (Klax,
@@ -96,9 +94,12 @@ HFEv3 from a Greaseweazle flux dump). Commercial images are never committed.
   change, also while selected unless the computer writes).
 - `flux_stream.c` – RMT flux (RDATA) and INDEX; ST mode and HFE mode.
 - `disk_image.c`, `disk_switch.c` – track buffers in PSRAM, disk changes.
-- `hfe.c` / `hfe_import.c` – HFE parser, packing, streaming upload.
-- `image_store.c`, `ext_flash.c`, `img_codec.c` – image library on the NOR flash.
-- `sd_card.c` – SD card in J5 (shared SPI bus, own lock, FAT with long
-  names), root directory; `settings.c` – settings record (v7).
+- `disk_write.c` – receives and decodes sectors the computer writes
+  (saving them is not there yet: every disk is read-only).
+- `hfe.c` – HFE parser, packing, streaming reader.
+- `sd_card.c`, `sd_path.c` – SD card in J5 (shared SPI bus, own lock, FAT
+  with long names), root directory, path rules, file reader and writer.
+- `ext_flash.c`, `disk_copy.c` – NOR flash: the copy of the last disk;
+  `settings.c` – settings record (v9). Layout: `flash_layout.h`.
 - `api.c`, `web/index.html` – HTTP API and web UI. `oled.c`, `leds.c`,
   `buttons.c`, `step_sound.c` – front panel. `wifi_net.c`, `setup_mode.c` – WiFi.

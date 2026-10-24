@@ -2,8 +2,8 @@
  * The active floppy. See disk_image.h.
  *
  * Images are raw .ST sector dumps (79-84 cylinders, 9-11 x 512 bytes, 1 or
- * 2 sides), from the external flash image library (read completely into
- * PSRAM through the image reader) or a temporary upload. Every
+ * 2 sides) or HFE files, from the SD card (or the copy of the last one in
+ * the flash, disk_copy.h) or a temporary upload. Every
  * track is encoded once into a PSRAM track buffer (80 x 2 x 12500 bytes),
  * so a STEP or SIDE change never waits for encoding; side 1 of a
  * single-sided image is an unformatted track. New images go into the
@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -22,11 +23,12 @@
 #include "drive_emu.h"
 #include "flux_stream.h"
 #include "hfe.h"
-#include "img_codec.h"
 #include "st_image.h"
 #include "ext_flash.h"
 #include "disk_title.h"
-#include "image_store.h"
+#include "disk_copy.h"
+#include "esp_rom_crc.h"
+#include "flash_layout.h"
 #include "sd_card.h"
 #include "settings.h"
 
@@ -54,15 +56,17 @@ static uint32_t prepared_cells;     /* track length in the inactive buffer */
 static uint8_t prepared_kind;       /* DISK_TRACKS_* in the inactive buffer */
 
 /*
- * Sector data of the active disk, kept for writing (library images only):
- * written sectors are patched here, their track is encoded again, and the
- * changed storage blocks are marked in dirty_mask until they are saved.
+ * Sector data of the active disk, kept for writing (writable disks only;
+ * none for now): written sectors are patched here, their track is encoded
+ * again, and the changed 64 KiB regions are marked in dirty_mask until
+ * they are saved.
  */
 static SemaphoreHandle_t raw_lock;
 static uint8_t *active_raw;         /* NULL: disk not writable */
 static uint8_t *prepared_raw;       /* copy taken by disk_prepare() */
 static disk_info_t active_geo;      /* geometry and id belonging to active_raw */
-static uint32_t dirty_mask;         /* bit i: storage block i changed */
+static uint32_t dirty_mask;         /* bit i: 64 KiB region i changed */
+#define DIRTY_REGION    (64u * 1024u)
 volatile uint32_t disk_media_gen;   /* +1 per disk change */
 
 /*
@@ -209,15 +213,6 @@ void disk_get_current(disk_info_t *info)
     portEXIT_CRITICAL(&info_lock);
 }
 
-void disk_note_image_changed(uint16_t image_id)
-{
-    portENTER_CRITICAL(&info_lock);
-    if (current.source == DISK_SRC_FLASH && current.image_id == image_id) {
-        current.image_changed = true;
-    }
-    portEXIT_CRITICAL(&info_lock);
-}
-
 void disk_note_sd_changed(const char *path, bool folder)
 {
     size_t n = strlen(path);
@@ -231,91 +226,70 @@ void disk_note_sd_changed(const char *path, bool folder)
     portEXIT_CRITICAL(&info_lock);
 }
 
-/* Log the image library. */
-static void report_store(store_state_t st)
+/* The old image library's catalogs (before the SD card): erased once. */
+static void erase_old_library(void)
 {
-    const rf_geometry_t *g = image_store_geometry();
+    static const uint32_t magics[] = { 0x4c494652 /* "RFIL" */, 0x4c534652 /* "RFSL" */,
+                                       0x54434652 /* "RFCT" */ };
+    static const uint32_t addrs[] = { 0x000000, 0x006000, 0x001000, 0x002000, 0x003000 };
+    bool found = false;
 
-    switch (st) {
-    case STORE_VALID: {
-        store_usage_t u;
-        image_store_usage(&u);
-        printf("Image library: OK (generation %lu), %u KiB blocks, %u of %u blocks used (%u%%), "
-               "%u image(s)\n", (unsigned long)image_store_generation(),
-               (unsigned)(g->block_size / 1024), u.blocks_used, u.blocks_total, u.used_percent,
-               u.images);
-        image_record_t *list = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*list),
-                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        int n = list ? image_store_list(list, IMG_MAX_RECORDS) : 0;
-        for (int i = 0; i < n; i++) {
-            char title[IMG_TITLE_SIZE];
-            image_store_title(&list[i], title);
-            printf("  #%-3u id %-4u %-10s %-40.40s %8lu bytes, blocks", list[i].sequence,
-                   list[i].id, list[i].status == IMG_VALID ? "valid" : "incomplete", title,
-                   (unsigned long)list[i].original_size);
-            /* Block list as ranges, e.g. 1-6,20-26 (diagnostics only). */
-            for (int b = 0; b < list[i].block_count; b++) {
-                int e = b;
-                while (e + 1 < list[i].block_count && list[i].blocks[e + 1] == list[i].blocks[e] + 1) {
-                    e++;
-                }
-                printf("%s%u", b ? "," : " ", list[i].blocks[b]);
-                if (e > b) {
-                    printf("-%u", list[i].blocks[e]);
-                }
-                b = e;
-            }
-            printf("\n");
+    for (size_t i = 0; i < sizeof(addrs) / sizeof(addrs[0]) && !found; i++) {
+        uint32_t m = 0;
+        ext_flash_read(addrs[i], &m, sizeof(m));
+        for (size_t k = 0; k < sizeof(magics) / sizeof(magics[0]); k++) {
+            found |= m == magics[k];
         }
-        free(list);
-        break;
     }
-    case STORE_OLD_FORMAT:
-        printf("Image library: external flash holds an OLD RadioFloppy format - not used.\n"
-               "  Initialise it (all images are erased): POST /api/v1/storage/format\n");
-        break;
-    case STORE_INVALID:
-        printf("Image library: INVALID or unknown data in block 0 (or other flash size) - "
-               "not touched\n");
-        break;
-    default:
-        printf("Image library: not available\n");
-        break;
+    if (found) {
+        esp_err_t err = ext_flash_erase(RF_OLD_CATALOGS, RF_OLD_CATALOGS_SIZE);
+        printf("Flash: old image library erased%s (images live on the SD card now)\n",
+               err == ESP_OK ? "" : " - FAILED");
     }
 }
 
-/* ---- HFE: packed tracks, decompressed from the flash as a stream ------------- */
+static bool is_hfe_name(const char *path)
+{
+    size_t n = strlen(path);
+    return n >= 4 && strcasecmp(path + n - 4, ".hfe") == 0;
+}
+
+/* ---- HFE: packed tracks, read as a stream (SD card or the flash copy) -------- */
 
 typedef struct {
     hfe_stream_t stream;
     uint32_t crc;
-    uint32_t len;
-    uint32_t size;
 } hfe_load_t;
 
-static esp_err_t hfe_load_read(void *ctx, uint32_t off, uint8_t *buf, size_t len)
-{
-    return image_store_read(ctx, off, buf, (uint32_t)len);
-}
-
-static esp_err_t hfe_load_out(void *ctx, const uint8_t *data, size_t len)
+static bool hfe_feed(void *ctx, const uint8_t *data, uint32_t len)
 {
     hfe_load_t *l = ctx;
-    if (len > l->size - l->len) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    l->crc = image_store_crc32(l->crc, data, len);
-    l->len += (uint32_t)len;
-    return hfe_stream_feed(&l->stream, data, (uint32_t)len) == HFE_OK ? ESP_OK : ESP_FAIL;
+    l->crc = esp_rom_crc32_le(l->crc, data, len);
+    return hfe_stream_feed(&l->stream, data, len) == HFE_OK;
 }
 
-/* HFE library image info->image_id -> packed tracks in buf. */
-static esp_err_t build_hfe(uint8_t *buf, disk_info_t *info)
+/*
+ * The HFE file info->sd_path (from the card, or from the flash copy when
+ * from_copy) -> packed tracks in buf. Fills in size, CRC and geometry.
+ * ESP_ERR_NOT_FOUND: no card or the card cannot be read (the copy may help).
+ */
+static esp_err_t build_hfe_from(uint8_t *buf, disk_info_t *info, bool from_copy)
 {
-    image_record_t r;
-    if (!image_store_get(info->image_id, &r) || !image_store_is_valid(&r) ||
-        r.storage_format != IMG_STORE_DEFLATE) {
-        return ESP_FAIL;
+    static uint8_t chunk[8192];
+    disk_copy_info_t ci;
+    uint32_t size = 0;
+    bool dir = false;
+
+    if (from_copy) {
+        if (!disk_copy_get(&ci)) {
+            return ESP_FAIL;
+        }
+        size = ci.size;
+    } else {
+        sd_result_t r = sd_card_stat(info->sd_path, &dir, &size);
+        if (r != SD_OK || dir) {
+            return r == SD_NO_CARD || r == SD_IO ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+        }
     }
     hfe_load_t *l = heap_caps_malloc(sizeof(*l), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *region = heap_caps_malloc(HFE_REGION_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -327,30 +301,58 @@ static esp_err_t build_hfe(uint8_t *buf, disk_info_t *info)
     int64_t t0 = esp_timer_get_time();
     hfe_pack_t pack;
     hfe_pack_init(&pack, buf, DISK_TRACKS_BYTES);
-    hfe_stream_init(&l->stream, r.original_size, region, &pack);
+    hfe_stream_init(&l->stream, size, region, &pack);
     l->crc = 0;
-    l->len = 0;
-    l->size = r.original_size;
-    esp_err_t err = img_inflate_stream(r.stored_size, hfe_load_read, &r, hfe_load_out, l, NULL);
+    esp_err_t err = ESP_OK;
+    if (from_copy) {
+        for (uint32_t off = 0; off < size && err == ESP_OK; off += sizeof(chunk)) {
+            uint32_t n = size - off < sizeof(chunk) ? size - off : sizeof(chunk);
+            err = disk_copy_read(off, chunk, n);
+            if (err == ESP_OK && !hfe_feed(l, chunk, n)) {
+                err = ESP_FAIL;
+            }
+        }
+        if (err == ESP_OK && l->crc != ci.crc) {
+            err = ESP_ERR_INVALID_CRC;
+        }
+    } else {
+        /* Piece by piece: the card is free for others in between. */
+        sd_reader_t *rd = NULL;
+        uint32_t got = 0, n = 0;
+        sd_result_t r = sd_card_reader_open(info->sd_path, size, &rd, &n);
+        if (r != SD_OK || n != size) {
+            err = r == SD_NO_CARD || r == SD_IO ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+        }
+        for (uint32_t off = 0; err == ESP_OK && off < size; off += got) {
+            uint32_t want = size - off < sizeof(chunk) ? size - off : sizeof(chunk);
+            if (sd_card_reader_read(rd, chunk, want, &got) != SD_OK) {
+                err = ESP_ERR_NOT_FOUND;        /* card taken out */
+            } else if (!hfe_feed(l, chunk, got)) {
+                err = ESP_FAIL;
+            }
+        }
+        sd_card_reader_close(rd);
+    }
     hfe_result_t hr = hfe_stream_end(&l->stream);
     const hfe_info_t *hi = hfe_stream_info(&l->stream);
-    if (err == ESP_OK && (l->len != r.original_size || l->crc != r.crc32)) {
-        err = ESP_ERR_INVALID_CRC;
-    }
     if (err == ESP_OK && hr != HFE_OK) {
         err = ESP_FAIL;
     }
     if (err == ESP_OK) {
+        info->size = size;
+        info->crc32 = l->crc;
         info->cylinders = hi->cylinders;
         info->heads = hi->sides;
         info->sectors = 0;
         info->hfe = true;
+        info->sd_copy = from_copy;
         prepared_kind = DISK_TRACKS_HFE;
         prepared_cells = MFM_TRACK_CELLS;   /* what the ST encoder would read: in bounds */
-        printf("HFE tracks: %s, %lu KiB of track buffer, %lld ms\n", hi->detail,
-               (unsigned long)(hi->bytes_needed / 1024), (esp_timer_get_time() - t0) / 1000);
+        printf("HFE tracks: %s, %lu KiB of track buffer, %lld ms%s\n", hi->detail,
+               (unsigned long)(hi->bytes_needed / 1024), (esp_timer_get_time() - t0) / 1000,
+               from_copy ? " (from the copy in the flash)" : "");
     } else {
-        printf("ERROR: HFE image %u: %s (%s)\n", info->image_id, esp_err_to_name(err),
+        printf("ERROR: HFE %s: %s (%s)\n", info->sd_path, esp_err_to_name(err),
                hr != HFE_OK ? hi->detail : "data");
     }
     free(region);
@@ -358,7 +360,10 @@ static esp_err_t build_hfe(uint8_t *buf, disk_info_t *info)
     return err;
 }
 
-/* The start-up disk from the SD card (sd_card_init ran before). */
+/* ---- Start-up disk -------------------------------------------------------------- */
+
+/* The start-up .ST from the SD card. ESP_ERR_NOT_FOUND: no card or the
+ * card cannot be read (the copy may help); ESP_FAIL: not usable. */
 static esp_err_t load_boot_sd(const char *path, uint8_t **raw, disk_info_t *info)
 {
     uint8_t *buf;
@@ -369,8 +374,7 @@ static esp_err_t load_boot_sd(const char *path, uint8_t **raw, disk_info_t *info
     sd_result_t r = sd_card_load(path, ST_MAX_SIZE, &buf, &size);
     if (r != SD_OK) {
         printf("Last disk: %s on the SD card: %s\n", path, sd_result_name(r));
-        /* No card, or it cannot be read: its copy in the flash may help. A
-         * card without the file means it was deleted: then not. */
+        /* A card without the file means it was deleted: then no copy either. */
         return r == SD_NO_CARD || r == SD_IO ? ESP_ERR_NOT_FOUND : ESP_FAIL;
     }
     if (st_check_image(buf, size, &st) != ST_OK) {
@@ -378,129 +382,89 @@ static esp_err_t load_boot_sd(const char *path, uint8_t **raw, disk_info_t *info
         free(buf);
         return ESP_FAIL;
     }
-    *info = (disk_info_t) { .source = DISK_SRC_SD, .size = size,
-                            .crc32 = image_store_crc32(0, buf, size) };
-    const char *name = strrchr(path, '/');
-    disk_title_from_filename(name ? name + 1 : path, info->name);
-    snprintf(info->sd_path, sizeof(info->sd_path), "%s", path);
+    info->size = size;
+    info->crc32 = esp_rom_crc32_le(0, buf, size);
     printf("Last disk: %s (SD card, %lu bytes, CRC32 %08lx, read in %lld ms)\n", path,
            (unsigned long)size, (unsigned long)info->crc32, (esp_timer_get_time() - t0) / 1000);
     *raw = buf;
     return ESP_OK;
 }
 
-/* The start-up disk from the SD card, read from its copy in the flash. */
-static esp_err_t load_boot_sd_copy(const settings_t *cfg, uint8_t **raw, disk_info_t *info)
+/* The start-up .ST from its copy in the flash. */
+static esp_err_t load_boot_copy(uint8_t **raw, disk_info_t *info)
 {
-    image_record_t r;
+    disk_copy_info_t ci;
 
-    if (!image_store_sd_copy(&r) || r.crc32 != cfg->last_sd_crc) {
-        printf("Last disk: no copy of it in the flash\n");
+    if (!disk_copy_get(&ci) || ci.hfe) {
         return ESP_FAIL;
     }
-    uint8_t *buf = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *buf = heap_caps_malloc(ci.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) {
         return ESP_ERR_NO_MEM;
     }
-    if (image_store_load(r.id, buf) != ESP_OK) {            /* checks the CRC */
+    if (disk_copy_read(0, buf, ci.size) != ESP_OK || esp_rom_crc32_le(0, buf, ci.size) != ci.crc) {
         printf("Last disk: its copy in the flash cannot be read\n");
         free(buf);
         return ESP_FAIL;
     }
-    *info = (disk_info_t) { .source = DISK_SRC_SD, .size = r.original_size, .crc32 = r.crc32,
-                            .sd_copy = true };
-    const char *name = strrchr(cfg->last_sd, '/');
-    disk_title_from_filename(name ? name + 1 : cfg->last_sd, info->name);
-    snprintf(info->sd_path, sizeof(info->sd_path), "%s", cfg->last_sd);
-    printf("Last disk: %s from its copy in the flash (SD card not available)\n", cfg->last_sd);
+    info->size = ci.size;
+    info->crc32 = ci.crc;
+    info->sd_copy = true;
     *raw = buf;
     return ESP_OK;
 }
 
-/* Start-up image: the one active at power-off (SD card or library), else
- * by name, else the first valid image in sequence order. */
-static esp_err_t load_boot_image(uint8_t **raw, disk_info_t *info)
+/* Does the flash copy belong to the remembered disk? */
+static bool copy_matches(const settings_t *cfg)
 {
-    esp_err_t err = ext_flash_init();
-    if (err != ESP_OK) {
-        return err;
-    }
+    disk_copy_info_t ci;
+    return disk_copy_get(&ci) && strcmp(ci.path, cfg->last_sd) == 0 && ci.crc == cfg->last_sd_crc;
+}
 
-    store_state_t st = image_store_open(ext_flash_size());
-    report_store(st);
-
+/*
+ * Start-up disk: the one active at power-off (settings last_sd), from the
+ * SD card; without the card (or when it cannot be read) from its copy in
+ * the flash. An HFE disk is built into buf at once (*hfe true); an .ST
+ * comes back as *raw. Nothing remembered: no disk.
+ */
+static esp_err_t load_boot(uint8_t *buf, uint8_t **raw, disk_info_t *info, bool *hfe)
+{
     settings_t cfg;
-    image_record_t last;
-    settings_get(&cfg);
-    if (cfg.last_sd[0]) {
-        esp_err_t err = load_boot_sd(cfg.last_sd, raw, info);
-        if (err == ESP_OK) {
-            return ESP_OK;
-        }
-        if (err == ESP_ERR_NOT_FOUND && load_boot_sd_copy(&cfg, raw, info) == ESP_OK) {
-            return ESP_OK;
-        }
-    }
-    uint16_t id = 0;
-    if (cfg.last_image_id && image_store_get(cfg.last_image_id, &last) &&
-        image_store_is_valid(&last)) {
-        id = cfg.last_image_id;
-        printf("Last disk: image %u (active at power-off)\n", id);
-    }
-    if (!id) {
-        id = image_store_find_name(DISK_BOOT_IMAGE);
-    }
-    if (!id) {
-        image_record_t *list = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*list),
-                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        int n = list ? image_store_list(list, IMG_MAX_RECORDS) : 0;
-        for (int i = 0; i < n && !id; i++) {
-            if (list[i].status == IMG_VALID) {
-                id = list[i].id;
-            }
-        }
-        free(list);
-    }
-    image_record_t r;
-    if (!id || !image_store_get(id, &r)) {
-        printf("No image on the external flash.\n");
+
+    *raw = NULL;
+    *hfe = false;
+    if (ext_flash_init() != ESP_OK) {
         return ESP_ERR_NOT_FOUND;
     }
-    char title[IMG_TITLE_SIZE];
-    image_store_title(&r, title);
-    printf("Selected image: %s\n", title);
-    printf("Source: EXTERNAL SPI FLASH, image id %u, %u block(s)\n", r.id, r.block_count);
+    erase_old_library();
+    settings_get(&cfg);
+    if (!cfg.last_sd[0]) {
+        printf("No disk remembered - insert one from the SD card through the web page.\n");
+        return ESP_ERR_NOT_FOUND;
+    }
+    *info = (disk_info_t) { .source = DISK_SRC_SD };
+    const char *name = strrchr(cfg.last_sd, '/');
+    disk_title_from_filename(name ? name + 1 : cfg.last_sd, info->name);
+    snprintf(info->sd_path, sizeof(info->sd_path), "%s", cfg.last_sd);
 
-    if (image_format(&r) == IMG_FMT_HFE || image_format(&r) == IMG_FMT_HFE3) {
-        /* Tracks straight from the flash (disk_image_init): no raw image. */
-        *info = (disk_info_t) { .source = DISK_SRC_FLASH, .image_id = id,
-                                .size = r.original_size, .crc32 = r.crc32, .hfe = true };
-        memcpy(info->name, title, sizeof(info->name));
-        *raw = NULL;
-        return ESP_OK;
-    }
-    uint8_t *buf = heap_caps_malloc(r.original_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        return ESP_ERR_NO_MEM;
-    }
-    int64_t t0 = esp_timer_get_time();
-    err = image_store_load(id, buf);        /* reads through the block list, checks the CRC */
-    if (err != ESP_OK) {
-        printf("ERROR: reading the image failed: %s\n",
-               err == ESP_ERR_INVALID_CRC ? "CRC mismatch" : esp_err_to_name(err));
-        free(buf);
+    esp_err_t err;
+    if (is_hfe_name(cfg.last_sd)) {
+        err = build_hfe_from(buf, info, false);
+        if (err == ESP_ERR_NOT_FOUND && copy_matches(&cfg)) {
+            printf("Last disk: %s from its copy in the flash (SD card not available)\n", cfg.last_sd);
+            err = build_hfe_from(buf, info, true);
+        }
+        *hfe = err == ESP_OK;
         return err;
     }
-    printf("Image size: %lu bytes\n", (unsigned long)r.original_size);
-    printf("Image CRC: OK (%08lx, read in %lld ms)\n", (unsigned long)r.crc32,
-           (esp_timer_get_time() - t0) / 1000);
-    *info = (disk_info_t) { .source = DISK_SRC_FLASH, .image_id = id,
-                            .size = r.original_size, .crc32 = r.crc32,
-                            .keep_sectors = image_read_write(&r) &&
-                                            image_format(&r) == IMG_FMT_ST };
-    memcpy(info->name, title, sizeof(info->name));
-    *raw = buf;
-    return ESP_OK;
+    err = load_boot_sd(cfg.last_sd, raw, info);
+    if (err == ESP_ERR_NOT_FOUND && copy_matches(&cfg)) {
+        err = load_boot_copy(raw, info);
+        if (err == ESP_OK) {
+            printf("Last disk: %s from its copy in the flash (SD card not available)\n", cfg.last_sd);
+        }
+    }
+    return err;
 }
 
 /* Runs under the drive lock: buffer and track length change together. */
@@ -532,14 +496,11 @@ esp_err_t disk_image_init(void)
     disk_info_t info = { .source = DISK_SRC_NONE };
     st_info_t st = { 0 };
     bool hfe = false;
-    if (load_boot_image(&raw, &info) == ESP_OK) {
-        if (info.hfe) {
-            hfe = build_hfe(track_buf[0], &info) == ESP_OK;
-        } else if (st_check_image(raw, info.size, &st) != ST_OK) {
-            printf("ERROR: start-up image not supported: %s\n", st.detail);
-            free(raw);
-            raw = NULL;
-        }
+    if (load_boot(track_buf[0], &raw, &info, &hfe) == ESP_OK && raw &&
+        st_check_image(raw, info.size, &st) != ST_OK) {
+        printf("ERROR: start-up image not supported: %s\n", st.detail);
+        free(raw);
+        raw = NULL;
     }
     if (hfe) {
         int idx = 0;
@@ -553,7 +514,7 @@ esp_err_t disk_image_init(void)
     if (!raw) {
         info = (disk_info_t) { .source = DISK_SRC_NONE };
         strcpy(info.name, "(no disk)");
-        printf("No disk inserted - upload or activate one through the API.\n");
+        printf("No disk inserted - insert one through the web page or the API.\n");
     }
     info.cylinders = raw ? st.cylinders : 0;
     info.heads = raw ? st.heads : 0;
@@ -590,12 +551,12 @@ esp_err_t disk_image_init(void)
 
 esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info)
 {
-    /* Library images: keep a copy of the sectors, so the disk can be
-     * written. Not needed (and not affordable) for the PSRAM image. */
+    /* Writable disks: keep a copy of the sectors, so the disk can be
+     * written (none for now). */
     xSemaphoreTake(raw_lock, portMAX_DELAY);
     free(prepared_raw);
     prepared_raw = NULL;
-    if (raw && info->source == DISK_SRC_FLASH && info->keep_sectors) {
+    if (raw && info->keep_sectors) {
         prepared_raw = heap_caps_malloc(info->size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (prepared_raw) {
             memcpy(prepared_raw, raw, info->size);
@@ -617,7 +578,7 @@ esp_err_t disk_prepare_hfe(disk_info_t *info)
     prepared_raw = NULL;
     xSemaphoreGive(raw_lock);
     verify_stop();
-    return build_hfe(track_buf[active_buf ^ 1], info);
+    return build_hfe_from(track_buf[active_buf ^ 1], info, false);
 }
 
 void disk_verify_active(const uint8_t *raw, const disk_info_t *info)
@@ -659,8 +620,8 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
      * before anybody may overwrite that buffer. */
     vTaskDelay(pdMS_TO_TICKS(20));
     printf("Active disk: %s (%s%s)%s\n", info->name,
-           info->source == DISK_SRC_PSRAM ? "PSRAM" : info->source == DISK_SRC_SD ? "SD card"
-           : "image library", info->hfe ? ", HFE" : "",
+           info->source == DISK_SRC_PSRAM ? "PSRAM" : info->sd_copy ? "flash copy" : "SD card",
+           info->hfe ? ", HFE" : "",
            how == DRIVE_SWAP_SELECTED ? " - changed while the drive was selected" : "");
     return ESP_OK;
 }
@@ -669,7 +630,7 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms)
 
 bool disk_writable_data(void)
 {
-    return active_raw != NULL && active_geo.source == DISK_SRC_FLASH;
+    return active_raw != NULL && active_geo.keep_sectors;
 }
 
 esp_err_t disk_write_sector(uint32_t gen, int cyl, int head, int sector, const uint8_t *data)
@@ -694,10 +655,9 @@ esp_err_t disk_write_sector(uint32_t gen, int cyl, int head, int sector, const u
     } else {
         size_t off = ((size_t)(cyl * g->heads + head) * g->sectors + (sector - 1)) * MFM_SECTOR_SIZE;
         memcpy(active_raw + off, data, MFM_SECTOR_SIZE);
-        uint32_t bs = image_store_geometry()->block_size;
-        dirty_mask |= 1u << (off / bs);
-        if ((off + MFM_SECTOR_SIZE - 1) / bs != off / bs) {
-            dirty_mask |= 1u << ((off + MFM_SECTOR_SIZE - 1) / bs);
+        dirty_mask |= 1u << (off / DIRTY_REGION);
+        if ((off + MFM_SECTOR_SIZE - 1) / DIRTY_REGION != off / DIRTY_REGION) {
+            dirty_mask |= 1u << ((off + MFM_SECTOR_SIZE - 1) / DIRTY_REGION);
         }
         /* The same encoder as for reading: the track now carries the new
          * sector. Only that sector's bytes differ from what is playing. */
@@ -706,35 +666,6 @@ esp_err_t disk_write_sector(uint32_t gen, int cyl, int head, int sector, const u
         memcpy(track_ptr(track_buf[active_buf], cyl, head), work, layout.cells / 8);
     }
     xSemaphoreGive(raw_lock);
-    return err;
-}
-
-esp_err_t disk_keep_sectors(void)
-{
-    xSemaphoreTake(raw_lock, portMAX_DELAY);
-    disk_info_t g = active_geo;
-    uint32_t gen = disk_media_gen;
-    bool have = active_raw != NULL;
-    xSemaphoreGive(raw_lock);
-    if (have) {
-        return ESP_OK;
-    }
-    if (g.source != DISK_SRC_FLASH || !g.size) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    uint8_t *buf = heap_caps_malloc(g.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        return ESP_ERR_NO_MEM;
-    }
-    /* The library image is what is playing (it has not been written yet). */
-    esp_err_t err = image_store_load(g.image_id, buf);
-    xSemaphoreTake(raw_lock, portMAX_DELAY);
-    if (err == ESP_OK && gen == disk_media_gen && !active_raw) {
-        active_raw = buf;
-        buf = NULL;
-    }
-    xSemaphoreGive(raw_lock);
-    free(buf);
     return err;
 }
 
@@ -759,7 +690,6 @@ esp_err_t disk_snapshot(disk_snapshot_t *snap)
     memcpy(snap->data, active_raw, active_geo.size);
     snap->size = active_geo.size;
     snap->mask = dirty_mask;
-    snap->image_id = active_geo.image_id;
     snap->gen = disk_media_gen;
     dirty_mask = 0;
     xSemaphoreGive(raw_lock);

@@ -5,13 +5,12 @@ End-to-end tests for the RadioFloppy HTTP API against a real device.
     RADIOFLOPPY_HOST=192.168.x.y [RADIOFLOPPY_TOKEN=...] tests/api/api_test.py
 
 Uses only the Python standard library. RADIOFLOPPY_TOKEN is only needed
-when the device has a token configured. The image library must be usable
-(state "valid") and have room for at least 30 blocks. Images that are
-stored when the test starts are left alone (same ids, order and data): the
-test adds its own images, deletes exactly those, and ends with the first
-original image active (if there is one).
+when the device has a token configured. Needs an SD card in RadioFloppy
+(the SD card part is skipped without one). Files on the card are left
+alone: the test works in its own folder "RF API test" below the root
+directory and removes it again. At the end the disk that was inserted
+when the test started is inserted again (if it came from the SD card).
 """
-import atexit
 import http.client
 import json
 import os
@@ -25,6 +24,7 @@ HOST = os.environ.get("RADIOFLOPPY_HOST")
 TOKEN = os.environ.get("RADIOFLOPPY_TOKEN")
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES = os.path.join(HERE, "..", "..", "images")
+T = "RF API test"
 
 failures = 0
 
@@ -62,6 +62,10 @@ def err(r):
     return r[1].get("error", {}).get("code") if isinstance(r[1], dict) else None
 
 
+def q(**kw):
+    return "?" + urllib.parse.urlencode(kw, quote_via=urllib.parse.quote)
+
+
 def upload(data, name, **opts):
     """Two-step upload; returns (create response, data response)."""
     body = {"filename": name, "size": len(data)}
@@ -72,48 +76,31 @@ def upload(data, name, **opts):
     return c, call("PUT", c[1]["upload_url"], raw=data)
 
 
+def sd_upload(data, name, **opts):
+    """Upload to the SD card; returns the last response."""
+    body = {"filename": name, "size": len(data), "destination": "sd", "crc32": crc(data)}
+    body.update(opts)
+    c = call("POST", "/api/v1/uploads", body)
+    return c if c[0] != 201 else call("PUT", c[1]["upload_url"], raw=data)
+
+
 def current():
     return call("GET", "/api/v1/current")[1]
-
-
-def library():
-    d = call("GET", "/api/v1/images")[1]
-    return d["images"], d["storage"]
-
-
-def synthetic(size, seed):
-    """Deterministic test image (no BPB: accepted with a remark)."""
-    out = bytearray()
-    block = seed.to_bytes(4, "little")
-    while len(out) < size:
-        block = zlib.compress(block + len(out).to_bytes(4, "little"))[-64:]
-        out += block
-    return bytes(out[:size])
 
 
 def crc(data):
     return "%08x" % (zlib.crc32(data) & 0xffffffff)
 
 
-def sd_tests(cc, big):
-    """The SD card API, in a test folder below the root directory (removed again)."""
-    sd = call("GET", "/api/v1/settings")[1].get("sd", {})
-    if not sd.get("present"):
-        print("        (no SD card: skipped)")
-        return
-    q = lambda **kw: "?" + urllib.parse.urlencode(kw, quote_via=urllib.parse.quote)
-    T = "RF API test"
-
-    def sd_upload(data, name, **opts):
-        body = {"filename": name, "size": len(data), "destination": "sd", "crc32": crc(data)}
-        body.update(opts)
-        c = call("POST", "/api/v1/uploads", body)
-        return c if c[0] != 201 else call("PUT", c[1]["upload_url"], raw=data)
-
-    r = call("GET", "/api/v1/sd/files" + q(path=T))
-    if r[0] == 200:     # left over from an aborted run
+def sd_tests(cc):
+    """The SD card: folders, uploads, inserting, new disks (in folder T, removed again)."""
+    if call("GET", "/api/v1/sd/files" + q(path=T))[0] == 200:     # left over from an aborted run
         call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true", confirm=T))
-    check(call("GET", "/api/v1/sd/files")[0] == 200, "list the root directory")
+    root = call("GET", "/api/v1/sd/files")
+    check(root[0] == 200, "list the root directory")
+    root_hfe = [e["name"] for e in root[1].get("entries", []) if e["name"].lower().endswith(".hfe")]
+
+    print("SD card: folders")
     r = call("POST", "/api/v1/sd/folders", {"path": T + "/L"})
     check(r[0] == 201, "create a nested folder")
     r = call("POST", "/api/v1/sd/folders", {"path": T + "/L"})
@@ -123,6 +110,8 @@ def sd_tests(cc, big):
         check(r[0] == 400 and err(r) == "INVALID_PATH", "folder %r refused" % bad)
     check(call("GET", "/api/v1/sd/files" + q(path="../"))[0] == 400, "list ../ refused")
     check(call("GET", "/api/v1/sd/files" + q(path="nope " + T))[0] == 404, "list a missing folder: 404")
+
+    print("SD card: uploads")
     name = "Crystal Castles [test].st"
     r = sd_upload(cc, name, path=T + "/L")
     check(r[0] == 200 and r[1]["state"] == "done", "upload .ST into a subfolder")
@@ -131,37 +120,57 @@ def sd_tests(cc, big):
     r = call("POST", "/api/v1/uploads", {"filename": name, "size": len(cc), "destination": "sd", "path": T + "/L"})
     check(r[0] == 409 and err(r) == "FILE_EXISTS", "same name again: FILE_EXISTS")
     check(sd_upload(cc, name, path=T + "/L", overwrite=True)[0] == 200, "overwrite: true replaces it")
-    hfe_files = [os.path.join(IMAGES, f) for f in os.listdir(IMAGES) if f.lower().endswith(".hfe")]
-    if hfe_files:
-        check(sd_upload(open(hfe_files[0], "rb").read(), "test.hfe", path=T)[0] == 200, "upload .HFE")
     check(sd_upload(b"x" * 1000, "tiny.st", path=T)[0] in (413, 422), "not an image: refused")
     check(sd_upload(cc, "wrong.hfe", path=T)[0] == 422, ".ST content named .hfe: refused")
     r = sd_upload(cc, "bad?name.st", path=T)
     check(r[0] == 422 and err(r) == "INVALID_NAME", "name with '?': refused")
     r = sd_upload(cc, "x.msa", path=T)
     check(r[0] == 422 and err(r) == "UNSUPPORTED_FORMAT", ".msa: refused")
-    check(sd_upload(cc, "x.st", path=T, activate=True)[0] == 400, "activate from the SD card: not yet")
+    check(sd_upload(cc, "x.st", path=T, activate=True)[0] == 400, "activate with the upload: refused")
     c = call("POST", "/api/v1/uploads", {"filename": "crc.st", "size": len(cc), "destination": "sd",
                                          "path": T, "crc32": "00000000"})
     r = call("PUT", c[1]["upload_url"], raw=cc)
     check(r[0] == 422 and err(r) == "CHECKSUM_MISMATCH", "wrong CRC: refused")
     names = sorted(e["name"] for e in call("GET", "/api/v1/sd/files" + q(path=T))[1]["entries"])
-    check(names == sorted(["L"] + (["test.hfe"] if hfe_files else [])), "only the good uploads are there: %s" % names)
-    r = call("PUT", "/api/v1/current", {"sd_path": T + "/L/" + name})
-    check(r[0] == 200 and r[1]["source"] == "sd" and r[1]["sd_path"] == T + "/L/" + name and
+    check(names == ["L"], "only the good uploads are there: %s" % names)
+
+    print("SD card: inserting")
+    path = T + "/L/" + name
+    r = call("PUT", "/api/v1/current", {"sd_path": path})
+    check(r[0] == 200 and r[1]["source"] == "sd" and r[1]["sd_path"] == path and
           r[1]["crc32"] == crc(cc) and not r[1]["image_changed_since"], "insert the .ST from the SD card")
-    check(r[0] == 200 and r[1]["write"]["state"] == "read_only", "a disk from the SD card is write-protected")
-    for bad, code in [("nope.st", 404), ("../x.st", 400)]:
+    check(r[0] == 200 and r[1]["write"]["state"] == "read_only", "write-protected")
+    for bad, code in [("nope.st", 404), ("../x.st", 400), (T + "/L", 422)]:
         check(call("PUT", "/api/v1/current", {"sd_path": bad})[0] == code, "insert %r: %d" % (bad, code))
-    if hfe_files:
-        r = call("PUT", "/api/v1/current", {"sd_path": T + "/test.hfe"})
-        check(r[0] == 422 and err(r) == "UNSUPPORTED_FORMAT", "insert .HFE from the SD card: not yet")
-    check(call("DELETE", "/api/v1/sd/files" + q(path=T + "/L/" + name))[0] == 200, "delete a file")
+    check(call("PUT", "/api/v1/current", {})[0] == 400, "insert without sd_path: 400")
+    check(call("PUT", "/api/v1/current", {"image_id": 1})[0] == 400, "image_id (old library): 400")
+    if root_hfe:
+        r = call("PUT", "/api/v1/current", {"sd_path": root_hfe[0]})
+        check(r[0] == 200 and r[1]["source"] == "sd" and r[1]["sides"] in (1, 2) and r[1]["cylinders"] > 0,
+              "insert .HFE from the SD card (%s)" % root_hfe[0])
+    else:
+        print("        (no .HFE file in the root directory: HFE insert skipped)")
+    r = call("PUT", "/api/v1/current", {"sd_path": path})
+    check(r[0] == 200, "insert the .ST again")
+    check(call("DELETE", "/api/v1/sd/files" + q(path=path))[0] == 200, "delete the inserted file")
     check(current()["image_changed_since"], "deleting the active file: flagged as changed")
-    check(call("DELETE", "/api/v1/sd/files" + q(path=T + "/L/" + name))[0] == 404, "delete it again: 404")
-    if hfe_files:
-        r = call("DELETE", "/api/v1/sd/folders" + q(path=T))
-        check(r[0] == 409 and err(r) == "FOLDER_NOT_EMPTY", "folder with contents: FOLDER_NOT_EMPTY")
+    check(call("DELETE", "/api/v1/sd/files" + q(path=path))[0] == 404, "delete it again: 404")
+
+    print("SD card: new disk")
+    r = call("POST", "/api/v1/sd/disks", {"path": T, "name": "Save games"})
+    check(r[0] == 201 and r[1]["path"] == T + "/Save games.st" and r[1]["size"] == 737280,
+          "new disk Save games.st (720 KiB)")
+    r = call("POST", "/api/v1/sd/disks", {"path": T, "name": "Save games.st"})
+    check(r[0] == 409 and err(r) == "FILE_EXISTS", "same name again: FILE_EXISTS")
+    check(call("POST", "/api/v1/sd/disks", {"path": T, "name": "a/b"})[0] == 422, "name with '/': refused")
+    check(call("POST", "/api/v1/sd/disks", {"path": "nope " + T, "name": "x"})[0] == 404, "missing folder: 404")
+    r = call("PUT", "/api/v1/current", {"sd_path": T + "/Save games.st"})
+    check(r[0] == 200 and r[1]["sides"] == 2 and r[1]["sectors"] == 9 and r[1]["cylinders"] == 80,
+          "the new disk can be inserted (80/2/9)")
+
+    print("SD card: deleting folders")
+    r = call("DELETE", "/api/v1/sd/folders" + q(path=T))
+    check(r[0] == 409 and err(r) == "FOLDER_NOT_EMPTY", "folder with contents: FOLDER_NOT_EMPTY")
     r = call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true"))
     check(r[0] == 400 and err(r) == "CONFIRMATION_REQUIRED", "with contents, no confirm: refused")
     check(call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true", confirm="x"))[0] == 400,
@@ -171,6 +180,7 @@ def sd_tests(cc, big):
     check(call("DELETE", "/api/v1/sd/folders" + q(path=T, recursive="true", confirm=T))[0] == 200,
           "with contents and confirm: deleted")
     check(T not in [e["name"] for e in call("GET", "/api/v1/sd/files")[1]["entries"]], "test folder gone")
+    check(current()["image_changed_since"], "the inserted disk's folder deleted: flagged as changed")
 
 
 def main():
@@ -178,27 +188,14 @@ def main():
         sys.exit("set RADIOFLOPPY_HOST (and RADIOFLOPPY_TOKEN if the device has one)")
     cc = open(os.path.join(IMAGES, "CRYSTAL_CASTLES.ST"), "rb").read()
     rl = open(os.path.join(IMAGES, "RETROLOFT_TEST_720K.ST"), "rb").read()
-    big = synthetic(901120, 1)          # 80/2/11: more than the old 800 KiB slots
 
-    print("status / images / storage")
+    print("status")
     s = call("GET", "/api/v1/status")
-    check(s[0] == 200 and s[1]["storage"]["state"] == "valid", "GET /status: storage valid")
-    # Block counts below assume uncompressed storage; compression gets
-    # its own section. The device setting is restored at exit.
-    compression = call("GET", "/api/v1/settings")[1]["compression"]
-    atexit.register(lambda: call("PUT", "/api/v1/settings", {"compression": compression}))
-    r = call("PUT", "/api/v1/settings", {"compression": False})
-    check(r[0] == 200 and not r[1]["compression"], "compression off for the block checks")
-    orig, st0 = library()
-    check(st0["block_size"] >= 65536 and st0["blocks_total"] <= 255, "geometry: %d KiB blocks, %d data blocks"
-          % (st0["block_size"] // 1024, st0["blocks_total"]))
-    check((st0["blocks_total"] + 1) * st0["block_size"] <= st0["capacity"], "blocks inside the detected flash")
-    check(st0["max_image_size"] == 1572864, "max image size 1.5 MiB")
-    check(call("GET", "/api/v1/storage")[1] == st0, "GET /storage = storage of /images")
-    check(all(orig[i]["sequence"] <= orig[i + 1]["sequence"] for i in range(len(orig) - 1)),
-          "images sorted by sequence")
-    check(all("blocks" not in im for im in orig), "no block numbers exposed")
-    orig_ids = [im["id"] for im in orig]
+    check(s[0] == 200 and "sd" in s[1] and "storage" not in s[1], "GET /status: sd block, no flash storage")
+    have_sd = s[1].get("sd", {}).get("present", False)
+    start = current()
+    for old in ["/api/v1/images", "/api/v1/storage", "/api/v1/images/1"]:
+        check(call("GET", old)[0] in (404, 405), "old library path %s is gone" % old)
 
     auth = s[1].get("auth_required", False)
     if auth:
@@ -206,10 +203,10 @@ def main():
         r = call("POST", "/api/v1/uploads", {"filename": "x.st", "size": len(cc),
                                             "destination": "psram"}, token=False)
         check(r[0] == 401 and err(r) == "UNAUTHORIZED", "upload without token refused")
-        r = call("DELETE", "/api/v1/images/1", token=False)
-        check(r[0] == 401, "delete without token refused")
-        r = call("PUT", "/api/v1/current", {"image_id": 1}, token=False)
-        check(r[0] == 401, "activate without token refused")
+        r = call("POST", "/api/v1/sd/folders", {"path": "x"}, token=False)
+        check(r[0] == 401, "creating a folder without token refused")
+        r = call("PUT", "/api/v1/current", {"sd_path": "x.st"}, token=False)
+        check(r[0] == 401, "inserting without token refused")
     else:
         print("open API (no token configured)")
         r = call("POST", "/api/v1/uploads", {"filename": "x.st", "size": 1572865,
@@ -219,36 +216,23 @@ def main():
              "destination": "psram"}).encode(), headers={})
     check(r[0] == 415 and err(r) == "UNSUPPORTED_MEDIA_TYPE",
           "JSON sent as octet-stream: 415 (no cross-site requests)")
-    check(call("GET", "/api/v1/slots")[0] in (404, 405), "old /slots path is gone")
 
     print("invalid requests")
-    r = call("POST", "/api/v1/uploads", {"filename": "big.st", "size": 1572865, "destination": "flash"})
+    r = call("POST", "/api/v1/uploads", {"filename": "big.st", "size": 1572865, "destination": "psram"})
     check(r[0] == 413 and err(r) == "IMAGE_TOO_LARGE", "1 572 865 bytes (> 1.5 MiB): IMAGE_TOO_LARGE")
-    r = call("POST", "/api/v1/uploads", {"filename": "hd.st", "size": 1474560, "destination": "flash"})
+    r = call("POST", "/api/v1/uploads", {"filename": "hd.st", "size": 1474560, "destination": "psram"})
     check(r[0] == 422 and err(r) == "UNSUPPORTED_GEOMETRY", "HD 80/2/18: UNSUPPORTED_GEOMETRY")
-    r = call("POST", "/api/v1/uploads", {"filename": "seventy.st", "size": 645120, "destination": "flash"})
+    r = call("POST", "/api/v1/uploads", {"filename": "seventy.st", "size": 645120, "destination": "psram"})
     check(r[0] == 422 and err(r) == "UNSUPPORTED_GEOMETRY", "70/2/9 size: UNSUPPORTED_GEOMETRY")
-    r = call("POST", "/api/v1/uploads", {"filename": "odd.st", "size": 1000, "destination": "flash"})
+    r = call("POST", "/api/v1/uploads", {"filename": "odd.st", "size": 1000, "destination": "psram"})
     check(r[0] == 422 and err(r) == "INVALID_IMAGE", "1000 bytes: INVALID_IMAGE")
-    r = call("POST", "/api/v1/uploads", {"filename": "a.st", "size": len(cc),
-                                        "destination": "flash", "replace": 65000})
-    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "replace unknown image: IMAGE_NOT_FOUND")
-    r = call("POST", "/api/v1/uploads", {"filename": "a.st", "size": len(cc),
-                                        "destination": "psram", "replace": 1})
-    check(r[0] == 400, "replace with a PSRAM upload refused")
+    r = call("POST", "/api/v1/uploads", {"filename": "a.st", "size": len(cc), "destination": "flash"})
+    check(r[0] == 400 and err(r) == "INVALID_REQUEST", "destination flash (old library): refused")
     r = call("POST", "/api/v1/uploads", {"filename": "a.st", "size": len(cc),
                                         "destination": "psram", "activate": False})
     check(r[0] == 400, "psram with activate:false refused")
-    r = call("PUT", "/api/v1/current", {"image_id": 0})
-    check(r[0] == 400 and err(r) == "INVALID_REQUEST", "activate image 0: INVALID_REQUEST")
-    r = call("PUT", "/api/v1/current", {"image_id": 65000})
-    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "activate unknown image: IMAGE_NOT_FOUND")
-    r = call("DELETE", "/api/v1/images/abc")
-    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "delete image abc: IMAGE_NOT_FOUND")
-    r = call("PUT", "/api/v1/images/65000", {"sequence": 1})
-    check(r[0] == 404, "move unknown image: 404")
-    r = call("POST", "/api/v1/storage/format", {})
-    check(r[0] == 400 and err(r) == "CONFIRMATION_REQUIRED", "format without confirmation refused")
+    r = call("POST", "/api/v1/uploads", {"filename": "a.hfe", "size": 2000000, "destination": "psram"})
+    check(r[0] == 422 and err(r) == "UNSUPPORTED_FORMAT", "HFE to PSRAM: UNSUPPORTED_FORMAT")
 
     print("content checks")
     bad = bytearray(cc)
@@ -259,14 +243,13 @@ def main():
     c, d = upload(bytes(bad), "Wrong BPB.st", destination="psram")
     check(d and d[0] == 200 and current()["sides"] == 1,
           "BPB contradicts the size: accepted, geometry from the size (1 side)")
-    c, d = upload(cc, "CRC.st", destination="flash", crc32="00000000")
+    c, d = upload(cc, "CRC.st", destination="psram", crc32="00000000")
     check(d and d[0] == 422 and d[1]["error"]["code"] == "CHECKSUM_MISMATCH",
           "wrong crc32: CHECKSUM_MISMATCH")
-    check(library()[1]["blocks_used"] == st0["blocks_used"], "no blocks used by refused uploads")
 
     print("concurrent upload")
-    c1 = call("POST", "/api/v1/uploads", {"filename": "one.st", "size": len(cc), "destination": "flash"})
-    c2 = call("POST", "/api/v1/uploads", {"filename": "two.st", "size": len(cc), "destination": "flash"})
+    c1 = call("POST", "/api/v1/uploads", {"filename": "one.st", "size": len(cc), "destination": "psram"})
+    c2 = call("POST", "/api/v1/uploads", {"filename": "two.st", "size": len(cc), "destination": "psram"})
     check(c1[0] == 201 and c2[0] == 409 and err(c2) == "UPLOAD_BUSY", "second upload: UPLOAD_BUSY")
 
     print("interrupted upload")
@@ -285,10 +268,7 @@ def main():
         time.sleep(1)
     check(st and st["state"] == "failed" and st["error"]["code"] == "UPLOAD_INCOMPLETE",
           "aborted after 100000 bytes: UPLOAD_INCOMPLETE")
-    imgs, stg = library()
-    check([im["id"] for im in imgs] == orig_ids and stg["blocks_used"] == st0["blocks_used"],
-          "no image and no blocks added by the aborted upload")
-    check(current() == before, "active disk unchanged by aborted upload")
+    check(current() == before, "active disk unchanged by the aborted upload")
 
     print("upload to PSRAM")
     c, d = upload(rl, "Retroloft test.st", destination="psram")
@@ -296,125 +276,16 @@ def main():
     cur = current()
     check(cur["source"] == "psram" and cur["name"] == "Retroloft test" and cur["sides"] == 2,
           "current: psram, Retroloft test, 2 sides")
-    check(library()[1]["blocks_used"] == st0["blocks_used"], "PSRAM upload uses no flash blocks")
+    check(cur["write"]["state"] == "read_only", "a temporary disk is write-protected")
 
-    mine = []
-    bs = st0["block_size"]
-    blocks = lambda n: (n + bs - 1) // bs
+    if have_sd:
+        sd_tests(cc)
+    else:
+        print("SD card\n        (no SD card: skipped)")
 
-    print("add images")
-    c, d = upload(cc, "Castles copy.st", destination="flash")
-    check(d and d[0] == 200 and d[1].get("image_id") and not d[1]["active"], "added, not activated")
-    a = d[1]["image_id"]
-    mine.append(a)
-    imgs, stg = library()
-    check(imgs[-1]["id"] == a and imgs[-1]["sequence"] > max([im["sequence"] for im in orig] or [0]),
-          "new image at the end of the order")
-    check(stg["blocks_used"] == st0["blocks_used"] + blocks(len(cc)), "uses %d blocks" % blocks(len(cc)))
-    check(current()["source"] == "psram", "active disk still the PSRAM image")
-    im = call("GET", "/api/v1/images/%d" % a)[1]
-    check(im["access"] == "READ_ONLY" and im["write_supported"], "new upload: READ_ONLY, ST may be written")
-    r = call("PUT", "/api/v1/images/%d" % a, {"access": "READ_WRITE"})
-    check(r[0] == 200 and r[1]["access"] == "READ_WRITE", "set to READ_WRITE")
-    check(call("GET", "/api/v1/images/%d" % a)[1]["access"] == "READ_WRITE", "READ_WRITE stored")
-    r = call("PUT", "/api/v1/images/%d" % a, {"access": "WRITE"})
-    check(r[0] == 400, "unknown access value refused")
-    c, d = upload(big, "Big 880K.st", destination="flash", activate=True)
-    check(d and d[0] == 200 and d[1]["active"], "901 120-byte image (80/2/11) stored and activated")
-    b = d[1]["image_id"]
-    mine.append(b)
-    cur = current()
-    check(cur["image_id"] == b and cur["crc32"] == crc(big) and cur["sectors"] == 11, "current: the big image")
-
-    print("sequence")
-    r = call("PUT", "/api/v1/images/%d" % b, {"sequence": 1})
-    check(r[0] == 200 and r[1]["sequence"] == 1, "moved to position 1")
-    imgs, _ = library()
-    check(imgs[0]["id"] == b and [im["sequence"] for im in imgs] == list(range(1, len(imgs) + 1)),
-          "first in the list, sequences renumbered 1..n")
-    check([im["id"] for im in imgs if im["id"] in orig_ids] == orig_ids, "original images keep their relative order")
-    r = call("PUT", "/api/v1/current", {"image_id": b})
-    check(r[0] == 200 and r[1]["crc32"] == crc(big), "data unchanged after the move (CRC)")
-    call("PUT", "/api/v1/images/%d" % b, {"sequence": 9999})
-    check(library()[0][-1]["id"] == b, "sequence 9999: moved to the end")
-
-    print("replace")
-    r = call("GET", "/api/v1/images/%d" % a)[1]
-    seq_a = r["sequence"]
-    c, d = upload(rl, "Replacement.st", destination="flash", replace=a)
-    check(d and d[0] == 200 and d[1]["image_id"] == a, "image %d replaced (same id)" % a)
-    r = call("GET", "/api/v1/images/%d" % a)[1]
-    check(r["name"] == "Replacement" and r["size"] == len(rl) and r["crc32"] == crc(rl) and
-          r["sequence"] == seq_a, "new name, size and CRC; same sequence")
-    r = call("PUT", "/api/v1/current", {"image_id": a})
-    check(r[0] == 200 and r[1]["crc32"] == crc(rl), "replacement activates with the right data")
-    c, d = upload(cc, "Replace active.st", destination="flash", replace=a, activate=True)
-    check(d and d[0] == 200 and d[1]["active"] and current()["crc32"] == crc(cc),
-          "replacing the active image with activate: new data active")
-
-    print("nearly full flash")
-    need = blocks(len(big))
-    fill = []
-    stg = library()[1]
-    while stg["blocks_free"] >= need:
-        c, d = upload(big, "Fill %d.st" % len(fill), destination="flash")
-        if not (d and d[0] == 200):
-            check(False, "fill upload failed: %s" % (d or c)[1])
-            break
-        fill.append(d[1]["image_id"])
-        stg = library()[1]
-    mine += fill
-    print("        filled with %d images, %d blocks free, %d%% used" % (len(fill), stg["blocks_free"], stg["used_percent"]))
-    r = call("POST", "/api/v1/uploads", {"filename": "nospace.st", "size": len(big), "destination": "flash"})
-    check(r[0] == 507 and err(r) == "NO_SPACE", "new %d-block image: NO_SPACE" % need)
-    if fill:
-        big2 = synthetic(len(big), 2)
-        c, d = upload(big2, "Replaced when full.st", destination="flash", replace=fill[0])
-        check(d and d[0] == 200 and d[1]["image_id"] == fill[0], "replacing works with the flash nearly full")
-        r = call("PUT", "/api/v1/current", {"image_id": fill[0]})
-        check(r[0] == 200 and r[1]["crc32"] == crc(big2), "replaced image reads back correctly")
-
-    print("compression")
-    for i in fill:                      # room again
-        call("DELETE", "/api/v1/images/%d" % i)
-        mine.remove(i)
-    r = call("PUT", "/api/v1/settings", {"compression": True})
-    check(r[0] == 200 and r[1]["compression"], "compression on")
-    before = library()[1]["blocks_used"]
-    c, d = upload(big, "Compressed.st", destination="flash")
-    check(d and d[0] == 200, "compressed upload stored")
-    if d and d[0] == 200:
-        z = d[1]["image_id"]
-        mine.append(z)
-        im = call("GET", "/api/v1/images/%d" % z)[1]
-        check(im["storage_format"] == "deflate" and im["stored_size"] < im["size"] == len(big),
-              "stored deflated: %d of %d bytes" % (im["stored_size"], im["size"]))
-        check(library()[1]["blocks_used"] == before + blocks(im["stored_size"]),
-              "uses %d blocks (compressed)" % blocks(im["stored_size"]))
-        r = call("GET", "/api/v1/images/%d/data" % z)
-        check(r[0] == 200 and r[1] == big, "download gives the uncompressed image")
-        r = call("PUT", "/api/v1/current", {"image_id": z})
-        check(r[0] == 200 and r[1]["crc32"] == crc(big), "compressed image activates with the right CRC")
-    r = call("PUT", "/api/v1/settings", {"compression": False})
-
-    print("SD card")
-    sd_tests(cc, big)
-
-    print("delete own images")
-    first = orig_ids[0] if orig_ids else None
-    if first:
-        r = call("PUT", "/api/v1/current", {"image_id": first})
-        check(r[0] == 200 and r[1]["image_id"] == first, "first original image activated")
-    for i in mine:
-        r = call("DELETE", "/api/v1/images/%d" % i)
-        check(r[0] == 200, "image %d deleted" % i)
-    r = call("DELETE", "/api/v1/images/%d" % mine[0])
-    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "deleting again: IMAGE_NOT_FOUND")
-    r = call("PUT", "/api/v1/current", {"image_id": mine[0]})
-    check(r[0] == 404 and err(r) == "IMAGE_NOT_FOUND", "activating a deleted image: IMAGE_NOT_FOUND")
-    imgs, stg = library()
-    check([im["id"] for im in imgs] == orig_ids and stg["blocks_used"] == st0["blocks_used"],
-          "end state: the original images, all own blocks free again")
+    if start.get("source") == "sd" and start.get("sd_path"):
+        r = call("PUT", "/api/v1/current", {"sd_path": start["sd_path"]})
+        check(r[0] == 200, "the disk of the start inserted again (%s)" % start["sd_path"])
 
     print("\n%s" % ("ALL API TESTS PASSED" if not failures else "%d FAILED" % failures))
     sys.exit(1 if failures else 0)

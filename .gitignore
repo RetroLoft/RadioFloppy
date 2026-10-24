@@ -16,7 +16,6 @@ images/*
 *.swp
 *~
 .DS_Store
-tests/host/test_image_store
 tests/host/test_st_image
 
 # Python
@@ -27,8 +26,8 @@ tests/host/test_settings
 tests/host/test_st_format
 tests/host/test_mfm_write
 tests/host/test_hfe
-tests/host/test_hfe_import
 tests/host/test_sd_path
+tests/host/test_disk_copy
 tests/host/*.exe
 
 # KiCad local files (backups, locks, autosave, caches, per-user view settings)

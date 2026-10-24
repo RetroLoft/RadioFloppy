@@ -67,11 +67,8 @@ static void do_switch(const button_t *b)
     printf("Button %s: %s disk...\n", b->name, b->dir < 0 ? "previous" : "next");
     if (disk_switch_step(b->dir, &e) == ESP_OK) {
         disk_get_current(&d);
-        if (d.source == DISK_SRC_PSRAM) {
-            printf("Button %s: disk 0 (PSRAM) \"%s\"\n", b->name, d.name);
-        } else {
-            printf("Button %s: image %u \"%s\"\n", b->name, d.image_id, d.name);
-        }
+        printf("Button %s: \"%s\" (%s)\n", b->name, d.name,
+               d.source == DISK_SRC_SD ? d.sd_path : "PSRAM");
     } else {
         printf("Button %s: not changed - %s (%s)\n", b->name, e.msg, e.code);
     }
@@ -164,7 +161,9 @@ static void buttons_config(void)
 void buttons_start(void)
 {
     buttons_config();
-    xTaskCreatePinnedToCore(buttons_task, "buttons", 4096, NULL, 3, NULL, 1);
+    /* A step lists the SD folder and loads the image (FAT, LFN, HFE): as
+     * much stack as the HTTP server task that does the same. */
+    xTaskCreatePinnedToCore(buttons_task, "buttons", 8192, NULL, 3, NULL, 1);
     printf("Buttons: LEFT (GPIO%d) = previous disk, RIGHT (GPIO%d) = next disk, "
            "both %d s = network info, both %d s = WiFi setup\n", PIN_BTN_NEXT, PIN_BTN_PREV,
            CHORD_MS / 1000, SETUP_MS / 1000);

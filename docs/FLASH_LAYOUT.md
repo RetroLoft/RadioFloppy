@@ -1,211 +1,116 @@
-# RadioFloppy external flash layout — block-based image library
+# RadioFloppy external flash layout
 
-Floppy images live on the external SPI NOR flash U2, separate from the
-ESP32-S3 firmware flash. No file system: the flash is divided into logical
-blocks; block 0 holds the catalog and the settings, all other blocks hold
-image data. An image is an ordered list of blocks, which do not have to be
-contiguous. All constants are in `main/flash_layout.h`, the code in
-`main/image_store.c` (host tests: `tests/host/test_image_store.c`).
+The floppy images live on the **SD card**. The external SPI NOR flash U2
+(separate from the ESP32-S3 firmware flash) only holds the device settings
+and a **copy of the last disk** inserted from the card, so RadioFloppy can
+also start without the card. No file system. All constants are in
+`main/flash_layout.h`.
 
 Fitted chip: Infineon/Cypress **S25FL128L** (JEDEC `01 60 18`), 16 MiB,
 4 KiB erase sectors, 64 KiB erase blocks, 256-byte pages, erased = `0xFF`.
 Driven by the ESP-IDF generic chip driver in single SPI mode
-(`main/ext_flash.c`). Nothing depends on this chip or on 16 MiB: the
-capacity is detected at run time (`esp_flash_get_size`, from the JEDEC ID).
+(`main/ext_flash.c`), on the SPI bus it shares with the SD card. Only the
+first 3.1 MiB are used, so a 4 MiB chip is enough; a later board can take
+a smaller one (8 MiB leaves room for a copy of a 3 MiB HD image as well).
 
-## Block geometry
+## Map
 
-Block numbers are stored as `uint8_t`, so there are at most **256 logical
-blocks**: block 0 (metadata) plus at most **255 data blocks** (1…255). The
-block size is the smallest power of two of at least 64 KiB for which the
-capacity needs at most 256 blocks:
+| Start      | End        | Size    | Use                                          |
+| ---------- | ---------- | ------- | -------------------------------------------- |
+| `0x000000` | `0x00BFFF` | 48 KiB  | Unused (the old image library's catalogs)    |
+| `0x00C000` | `0x00CFFF` | 4 KiB   | Settings copy A                              |
+| `0x00D000` | `0x00DFFF` | 4 KiB   | Settings copy B                              |
+| `0x00E000` | `0x00FFFF` | 8 KiB   | Unused                                       |
+| `0x010000` | `0x010FFF` | 4 KiB   | Disk copy: header                            |
+| `0x011000` | `0x01FFFF` | 60 KiB  | Unused                                       |
+| `0x020000` | `0x31FFFF` | 3 MiB   | Disk copy: data (64 KiB aligned)             |
+| `0x320000` | end        |         | Unused                                       |
 
-| Flash capacity | Block size | Data blocks | Blocks for 1.5 MiB |
-| -------------: | ---------: | ----------: | -----------------: |
-|          8 MiB |     64 KiB |         127 |                 24 |
-|         16 MiB |     64 KiB |         255 |                 24 |
-|         32 MiB |    128 KiB |         255 |                 12 |
-|         64 MiB |    256 KiB |         255 |                  6 |
-|        128 MiB |    512 KiB |         255 |                  3 |
+**The old image library.** Earlier firmware kept an image library on this
+flash (catalogs at `0x000000`–`0x00BFFF`, image data in 64 KiB blocks
+from `0x010000`). At start-up the firmware looks for its catalog magics
+(`RFIL`, `RFSL`, `RFCT` at `0x0000`, `0x1000`, `0x2000`, `0x3000` or
+`0x6000`); when one is found, `0x000000`–`0x00BFFF` is erased
+once (log: *Flash: old image library erased*). The old image data is not
+read any more and is overwritten by disk copies.
 
-Block *n* starts at `n × block_size`. A logical block is not an erase unit:
-it is erased in 4 KiB sectors / 64 KiB erase blocks as needed, and only as
-far as an image actually uses it.
+## Disk copy (`main/disk_copy.c`)
 
-The fitted 16 MiB chip: **64 KiB blocks, 255 data blocks** (blocks 1–255 =
-`0x010000`–`0xFFFFFF`).
+One copy of the disk last inserted from the SD card: the file itself
+(`.ST` or `.HFE`), byte for byte, up to 3 MiB. It is written by the
+*remember* task in `main/disk_switch.c` about 5 s after the last disk
+change, only when the copy in the flash is not already that file (same
+path and CRC-32). The file is streamed from the card in 8 KiB pieces; the
+SD card is locked per piece, so the API stays responsive (a 2 MB file
+takes about 17 s).
 
-## Block 0
+Header (at `0x010000`, little endian):
 
-Whatever the block size, only the first 64 KiB of block 0 are used:
+| Offset | Type      | Field      | Meaning                                         |
+| ------ | --------- | ---------- | ----------------------------------------------- |
+| 0      | u32       | magic      | `0x59504352` ("RCPY")                           |
+| 4      | u16       | version    | 2 (1 had its data at `0x011000`; not read)      |
+| 6      | u16       | hfe        | 1 = HFE file, 0 = .ST                           |
+| 8      | u32       | size       | File size in bytes, 1 … 3 MiB                   |
+| 12     | u32       | crc        | CRC-32 (IEEE, as zlib `crc32()`) of the data    |
+| 16     | char[201] | path       | The file, relative to the root directory, NUL terminated |
+| 217    | 3         | reserved   | 0                                               |
+| 220    | u32       | header_crc | CRC-32 of bytes 0–219                           |
+| 4092   | u32       | commit     | `0x21544D43` ("CMT!"), written last             |
 
-| Start      | End        | Size   | Use                 |
-| ---------- | ---------- | ------ | ------------------- |
-| `0x000000` | `0x005FFF` | 24 KiB | Catalog copy A      |
-| `0x006000` | `0x00BFFF` | 24 KiB | Catalog copy B      |
-| `0x00C000` | `0x00CFFF` | 4 KiB  | Settings copy A     |
-| `0x00D000` | `0x00DFFF` | 4 KiB  | Settings copy B     |
-| `0x00E000` | `0x00FFFF` | 8 KiB  | Reserved            |
+Writing a copy: erase the header sector (from now on there is no valid
+copy) → write the data, erasing each 64 KiB block when the write enters it
+(the last one only in the 4 KiB sectors it needs) → read all data back
+and check its CRC-32 → write the header → write the commit word. A power
+cut at any point leaves either no copy or a complete one.
 
-## Catalog (one 24 KiB copy, little endian)
-
-| Offset | Size     | Content                                               |
-| ------ | -------- | ----------------------------------------------------- |
-| 0      | 64       | Header                                                |
-| 64     | 255 × 96 | Image records (at most one image per data block)      |
-| 24 544 | 28       | Unused (`0xFF`)                                       |
-| 24 572 | 4        | Commit word `0x21544D43` ("CMT!"), written **last**   |
-
-Header:
-
-| Offset | Type | Field                | Value                                         |
-| ------ | ---- | -------------------- | --------------------------------------------- |
-| 0      | u32  | magic                | `0x4C494652` ("RFIL")                         |
-| 4      | u16  | version              | 3 (2 is still read and written as 3 at the next update; 1 was the 20-slot catalog "RFSL") |
-| 6      | u16  | header_size          | 64                                            |
-| 8      | u32  | generation           | +1 on every catalog write; highest valid wins |
-| 12     | u32  | crc32                | CRC-32 over header + records, this field = 0  |
-| 16     | u32  | capacity             | Flash size the catalog was made for           |
-| 20     | u32  | block_size           | Logical block size                            |
-| 24     | u16  | data_blocks          | Number of data blocks                         |
-| 26     | u16  | record_size          | 96                                            |
-| 28     | u16  | record_count         | 255                                           |
-| 30     | u8   | max_blocks_per_image | 24                                            |
-| 31     | u8   | reserved             | 0                                             |
-| 32     | u32  | max_image_size       | 1 572 864 (1.5 MiB): the most one image occupies in the blocks |
-| 36     | u16  | next_id              | Id for the next new image                     |
-| 38     | 26   | reserved             | 0                                             |
-
-Image record (96 bytes):
-
-| Offset | Type      | Field          | Meaning                                                     |
-| ------ | --------- | -------------- | ----------------------------------------------------------- |
-| 0      | u16       | id             | Image id 1–65535, fixed for the life of the image           |
-| 2      | u16       | sequence       | Display order; changing it never moves data                 |
-| 4      | u8        | status         | `0xFF` unused record, `0x01` valid, `0x02` incomplete       |
-| 5      | u8        | format         | bits 0–5: image format as recognised from the contents: `0x01` ST (the only one supported); `0x05` HFE (HFEv1) and `0x08` HFEv3, both always READ_ONLY (HFE playback is in development); reserved `0x02` MSA, `0x03` STX, `0x04` IPF, `0x06` ADF, `0x07` IMG. Bit 7: write setting, 1 = READ_WRITE, 0 = READ_ONLY (default; records from before this setting read as READ_ONLY). Bit 6: reserved, 0 |
-| 6      | u8        | storage_format | `0x00` RAW (the image itself), `0x01` DEFLATE (raw deflate, RFC 1951; also for writable disks, which are then saved as a whole) |
-| 7      | u8        | block_count    | Blocks used (0 when incomplete)                             |
-| 8      | u32       | original_size  | Image size in bytes (the logical size: for DEFLATE up to 3 MiB, see below) |
-| 12     | u32       | stored_size    | Bytes in the blocks (RAW: = original_size; DEFLATE: compressed size, ≤ `original_size + original_size/64 + 1024`) |
-| 16     | u32       | crc32          | CRC-32 (IEEE, as zlib `crc32()`) of the image               |
-| 20     | u8[24]    | blocks         | Block numbers in image byte order (unused entries 0)        |
-| 44     | char[52]  | name           | Title, NUL terminated when shorter than 52 characters       |
-
-Image byte *o* is in block `blocks[o / block_size]` at offset
-`o % block_size`. `main/image_store.c` (`image_store_read`) is the only code
-that turns image offsets into flash addresses; the MFM encoder gets the
-whole image from PSRAM and knows nothing about blocks.
-
-### Validation when loading
-
-A catalog copy is used only if magic, version, sizes, CRC and commit word
-are right, the geometry in the header equals the detected one, and every
-record is consistent:
-
-- status valid or incomplete (or unused); ids unique and not 0;
-- valid: RAW with `1 ≤ original_size ≤ 1.5 MiB` and `stored_size ==
-  original_size`, or DEFLATE with `1 ≤ original_size ≤ 3 MiB` (version 3;
-  1.5 MiB in a version 2 catalog) and `1 ≤ stored_size ≤ original_size +
-  original_size/64 + 1024` (the deflate worst case);
-  `block_count` = the blocks `stored_size` needs, at most 24 and at most
-  the blocks of 1.5 MiB at this block size;
-- every block number in 1…`data_blocks`, and no block used twice (across
-  all valid records);
-- incomplete: `block_count` 0.
-
-Otherwise the other copy is used; if neither is usable, nothing is written
-(see *States* below).
-
-### Updates
-
-A catalog update never touches the copy in use: the new catalog
-(generation + 1) is written to the other copy, read back and only then
-given its commit word. A power cut during an update leaves the previous
-generation in place.
-
-**New image:** size ≤ 1.5 MiB → pick free blocks (lowest numbers first,
-not necessarily contiguous; free = not in any valid record) → erase and
-program only those blocks (the last one only as far as needed) → read the
-image back through its block list and check the CRC-32 → catalog update
-with the record *valid*. A power cut before that leaves no record; the
-blocks count as free again.
-
-**Delete:** catalog update without the record. The blocks are free at
-once; they are erased only when reused.
-
-**Replace** (keeps id and sequence): first check that the old blocks plus
-the free blocks suffice (else nothing changes) → catalog update with the
-old record *incomplete* and without blocks → use the old blocks first, then
-free ones → erase, program, read back, CRC → catalog update with the record
-*valid*. Replacing therefore works on a nearly full flash. If it fails, the
-old image is lost, but the record stays *incomplete* and is never offered
-as a disk.
-
-**Order:** the image moves to a position and all sequences are renumbered
-1…n (catalog update only).
-
-**Compression** (setting *Compress new images*, off by default): a new
-image is deflated (ROM miniz), inflated again and CRC-checked before
-anything is stored; when that succeeds it is stored DEFLATE (also when it
-did not get smaller: at most `size + size/64 + 1024` bytes), else RAW.
-`crc32` is always that of the image itself; a load reads the stored
-bytes, inflates them and checks the CRC. Images already stored are never
-converted.
-
-**Written compressed disks** (`image_store_commit_image`): written sectors
-of a DEFLATE image (or of any image while compression is on) are saved by
-storing the whole image anew — compressed, to free blocks, read back — and
-one catalog update switching blocks, sizes, storage format and CRC.
-
-**Sectors written by the computer** (`image_store_commit_blocks`, RAW
-images with compression off): every
-changed block of the image is written to a *free* block and read back;
-then the whole image (unchanged blocks from the flash plus the new ones)
-is checked against the new CRC-32, and one catalog update puts the new
-block numbers and the CRC in the record. The old blocks become free. A
-power cut before that update leaves the previous version intact. This is
-why an image is only offered writable while at least as many blocks are
-free as it has.
-
-### States
-
-| State        | Condition                                                     | Action                          |
-| ------------ | ------------------------------------------------------------- | ------------------------------- |
-| `valid`      | A usable catalog copy                                         | —                               |
-| `blank`      | Both catalog copies erased                                    | Empty catalog written at once   |
-| `old_format` | 20-slot catalog ("RFSL" at `0x2000`/`0x3000`) or first catalog ("RFCT" at `0x0000`/`0x1000`) | Not read; `POST /api/v1/storage/format` |
-| `invalid`    | Unknown/damaged data, or a catalog for another flash size     | Not touched; format on request only |
-
-Formatting erases both catalog copies and writes an empty catalog
-(generation 1) to copy A; image data is not erased (its blocks are free and
-get erased when reused). There is no migration from the 20-slot format.
+Using the copy at start-up (`main/disk_image.c`): the last disk
+(`last_sd` in the settings) is read from the card. Only when there is no
+card or it cannot be read, the copy is used, and only when its path and
+CRC-32 match `last_sd` and `last_sd_crc`; its data is checked against the
+CRC again while it is read. A card without the file: the drive starts
+empty (the copy is not used).
 
 ## Settings (one 4 KiB sector per copy, little endian)
 
-Device settings (`main/settings.c`): same scheme as the catalog. A save
-erases and writes the copy *not* in use (generation + 1), reads it back and
-only then writes the commit word; the valid copy with the highest generation
-wins. Until anything is saved, the firmware uses its menuconfig defaults.
+Device settings (`main/settings.c`). A save erases and writes the copy
+*not* in use (generation + 1), reads it back and only then writes the
+commit word; the valid copy with the highest generation wins. Until
+anything is saved, the firmware uses its menuconfig defaults.
 
-| Offset | Type     | Field          | Meaning                                         |
-| ------ | -------- | -------------- | ----------------------------------------------- |
-| 0      | u32      | magic          | `0x54534652` ("RFST")                           |
-| 4      | u16      | version        | 5 (older versions are still read: 4 = without compress, that byte 0; 3 = 152 bytes without machine → Atari; 2 = also without buzzer_off/last_image_id, those bytes 0; 1 = 148 bytes, read as DS1) |
-| 6      | u16      | size           | record size in bytes (156)                      |
-| 8      | u32      | generation     | +1 on every save                                |
-| 12     | u32      | crc32          | CRC-32 over the record with this field = 0      |
-| 16     | char[33] | hostname       | NUL terminated                                  |
-| 49     | char[33] | wifi_ssid      | NUL terminated, empty = no network              |
-| 82     | char[65] | wifi_pass      | NUL terminated (plain text)                     |
-| 147    | u8       | wifi_security  | 0 WPA2/WPA3, 1 WPA3 only, 2 WPA/WPA2, 3 open    |
-| 148    | u8       | drive_select   | 0 = DS0 (drive A:), 1 = DS1 (drive B:)          |
-| 149    | u8       | buzzer_off     | 0 = buzzer on (default), 1 = off                |
-| 150    | u16      | last_image_id  | Image active at power-off (0 = none); written 5 s after the last disk change, only when it differs |
-| 152    | u8       | machine        | 0 = Atari 16-bit (default), 1 = Commodore Amiga, 2 = IBM PC / DOS (only 0 supported yet) |
-| 153    | u8       | compress       | 1 = store new read-only images compressed (default 0) |
-| 154    | 2        | padding        | 0                                               |
-| 4092   | u32      | commit         | `0x21544D43` ("CMT!"), written last             |
+| Offset | Type      | Field          | Meaning                                         |
+| ------ | --------- | -------------- | ----------------------------------------------- |
+| 0      | u32       | magic          | `0x54534652` ("RFST")                           |
+| 4      | u16       | version        | 9 (older versions are still read, see below)    |
+| 6      | u16       | size           | record size in bytes (468)                      |
+| 8      | u32       | generation     | +1 on every save                                |
+| 12     | u32       | crc32          | CRC-32 over the record with this field = 0      |
+| 16     | char[33]  | hostname       | NUL terminated                                  |
+| 49     | char[33]  | wifi_ssid      | NUL terminated, empty = no network              |
+| 82     | char[65]  | wifi_pass      | NUL terminated (plain text)                     |
+| 147    | u8        | wifi_security  | 0 WPA2/WPA3, 1 WPA3 only, 2 WPA/WPA2, 3 open    |
+| 148    | u8        | drive_select   | 0 = DS0 (drive A:), 1 = DS1 (drive B:)          |
+| 149    | u8        | buzzer_off     | 0 = buzzer on (default), 1 = off                |
+| 150    | u16       | last_image_id  | Unused (the old library's last image)           |
+| 152    | u8        | machine        | 0 = Atari 16-bit (default), 1 = Commodore Amiga, 2 = IBM PC / DOS (only 0 supported yet) |
+| 153    | u8        | compress       | Unused (the old library's compression setting)  |
+| 154    | u8        | leds           | 1 or 2 LEDs on J4 (default 1)                   |
+| 155    | u8        | reserved       | 0                                               |
+| 156    | char[101] | root_dir       | SD card root directory, NUL terminated, `""` = card root |
+| 257    | 3         | reserved       | 0                                               |
+| 260    | char[201] | last_sd        | Last disk from the SD card (below the root directory), `""` = none |
+| 461    | 3         | reserved       | 0                                               |
+| 464    | u32       | last_sd_crc    | CRC-32 of that file when it was inserted        |
+| 4092   | u32       | commit         | `0x21544D43` ("CMT!"), written last             |
+
+Older versions (1–8, `version_size()` in `main/settings.c` has their
+sizes) are still read, and written as version 9 at the next save; the
+fields they lack get their defaults (DS1, buzzer on, Atari, 1 LED, no
+root directory, no last disk).
+
+`last_sd` and `last_sd_crc` are written about 5 s after the last disk
+change, and only when they differ, so stepping through disks with the
+buttons writes the flash once.
 
 The WiFi password is stored in plain text: anyone with the board in hand can
 read the flash chip.

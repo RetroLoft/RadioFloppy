@@ -2,9 +2,11 @@
  * Changing the active disk: the one place that does it, for the HTTP API
  * and the push buttons alike (serialised by one mutex).
  *
- * The disk list for the buttons: position 0 is the PSRAM image (if there
- * is one), then every valid library image in sequence order. Left = -1,
- * right = +1, wrapping around.
+ * Disks come from the SD card (.ST and HFE files below the root directory)
+ * or are a temporary upload in PSRAM. The buttons step through the image
+ * files of the folder of the disk chosen last (through the API or the web
+ * page), in the order the web page shows them; at the first or the last
+ * file that button does nothing.
  */
 #pragma once
 
@@ -25,28 +27,25 @@ void disk_switch_init(void);
  * MACHINE_NOT_SUPPORTED and the drive is never touched. */
 void disk_switch_set_enabled(bool on);
 
-/* Make a stored library image the active disk. */
-esp_err_t disk_switch_image(uint16_t image_id, switch_error_t *e);
-
-/* Activate raw (a validated image) described by info (flash upload). */
+/* Make raw (a validated .ST image in PSRAM, geometry in info) the active disk. */
 esp_err_t disk_switch_raw(const uint8_t *raw, const disk_info_t *info, switch_error_t *e);
 
-/*
- * Activate raw as the PSRAM image. On success the module takes ownership
- * of raw (heap, PSRAM) and frees the previous PSRAM image; on failure the
- * caller keeps it.
- */
+/* The same for a temporary upload: on success raw is kept (owned here) as
+ * the PSRAM disk, the previous one is freed. */
 esp_err_t disk_switch_psram_upload(uint8_t *raw, const disk_info_t *info, switch_error_t *e);
 
-/* Step through the disk list (dir -1 / +1). */
+/* Info of the kept PSRAM disk; false if there is none. */
+bool disk_switch_psram_info(disk_info_t *info);
+
 /*
- * Insert the .ST file path (below the SD card's root directory, sd_path.h
- * rules) as a read-only disk. Errors as above, plus SD_NOT_PRESENT,
- * FILE_NOT_FOUND, INVALID_IMAGE, UNSUPPORTED_FORMAT (not .ST), SD_ERROR.
+ * Insert the .ST or .HFE file path (below the SD card's root directory,
+ * sd_path.h rules), write-protected. Its folder becomes the one the
+ * buttons step through. Errors: SD_NOT_PRESENT, FILE_NOT_FOUND,
+ * INVALID_IMAGE, UNSUPPORTED_GEOMETRY, UNSUPPORTED_FORMAT, SD_ERROR,
+ * INSUFFICIENT_MEMORY, DRIVE_BUSY, MACHINE_NOT_SUPPORTED.
  */
 esp_err_t disk_switch_sd(const char *path, switch_error_t *e);
 
+/* Buttons: dir +1 = the next image file in that folder, -1 = the previous
+ * one. At the end of the list: ESP_ERR_INVALID_STATE (code "END"). */
 esp_err_t disk_switch_step(int dir, switch_error_t *e);
-
-/* Info of the kept PSRAM image; false if there is none. */
-bool disk_switch_psram_info(disk_info_t *info);

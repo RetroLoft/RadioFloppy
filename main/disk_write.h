@@ -1,5 +1,5 @@
 /*
- * Writing to the emulated floppy (Atari, .ST images set to READ_WRITE).
+ * Writing to the emulated floppy (Atari, .ST images).
  *
  * Receive: WDATA is sampled by an RMT RX channel with DMA (0.1 us); one
  * WGATE period (a sector) ends when WDATA stays quiet for 16 us. No GPIO
@@ -9,21 +9,16 @@
  * when WGATE was asserted (time since the INDEX pulse), i.e. the ID field
  * that has just passed, on the cylinder and side of that moment.
  * Apply: the sector goes into the kept image in PSRAM, its track is
- * encoded again (reads return the new data at once), its storage block is
+ * encoded again (reads return the new data at once), its 64 KiB region is
  * marked changed.
  * Save: when the MOTOR line has been off for SAVE_DELAY_MS (one save per
  * disk operation; at the latest a minute after the last write if the
- * motor keeps running) the changed blocks are stored
- * copy-on-write and switched in with one catalog update
- * (image_store_commit_blocks): after a power cut the image on the flash is
- * the previous or the new saved version, never a mix. Changes not saved
- * yet (those of the running disk operation, plus SAVE_DELAY_MS and the
- * save time) are lost then.
+ * motor keeps running).
  *
- * Write protection is released only when all of this holds: machine
- * ATARI, a library .ST image set to READ_WRITE, its sectors kept in PSRAM,
- * the image library usable, at least as many free blocks as the image has
- * (so every save fits), no unresolved save error, the receiver running.
+ * For now no disk is writable: images live on the SD card and saving to
+ * it comes in a next version, so the drive always reports write
+ * protection (machine ATARI, receiver running, a disk whose sectors are
+ * kept: none yet).
  */
 #pragma once
 

@@ -96,4 +96,15 @@ void sd_card_writer_abort(sd_writer_t *w);                           /* NULL is 
  */
 sd_result_t sd_card_load(const char *rel, uint32_t max, uint8_t **buf, uint32_t *size);
 
+/*
+ * Reading a file in pieces without holding the card for the whole file:
+ * the lock is taken per piece, so other card users (the web page, the
+ * API) are served in between. SD_INVALID also when it is larger than max
+ * or a folder. *size: the file's length.
+ */
+typedef struct sd_reader sd_reader_t;
+sd_result_t sd_card_reader_open(const char *rel, uint32_t max, sd_reader_t **r, uint32_t *size);
+sd_result_t sd_card_reader_read(sd_reader_t *r, void *buf, uint32_t len, uint32_t *got);
+void sd_card_reader_close(sd_reader_t *r);          /* NULL is fine */
+
 const char *sd_result_name(sd_result_t r);

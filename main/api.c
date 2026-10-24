@@ -27,6 +27,7 @@
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_rom_crc.h"
 #include "esp_system.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
@@ -45,9 +46,6 @@
 #include "settings.h"
 #include "step_sound.h"
 #include "hfe.h"
-#include "hfe_import.h"
-#include "image_store.h"
-#include "img_codec.h"
 #include "st_format.h"
 #include "st_image.h"
 #include "wifi_net.h"
@@ -55,13 +53,6 @@
 #define API_BODY_MAX        1024        /* JSON request bodies */
 #define RECV_CHUNK          4096
 #define UPLOAD_TIMEOUT_MS   60000       /* created but no data: expires */
-
-/* HFE uploads are checked and stored as a stream; they are kept (made an
- * image) only once the HFE player exists, so no image is listed that
- * cannot be inserted. 0: everything runs, then the result is discarded. */
-#ifndef HFE_PLAYBACK
-#define HFE_PLAYBACK        1
-#endif
 
 typedef enum {
     UP_NONE,
@@ -81,9 +72,7 @@ typedef struct {
     upload_state_t state;
     char name[DISK_TITLE_SIZE];
     uint32_t size;
-    bool to_flash;
-    uint16_t replace_id;    /* flash: image to replace, 0 = new image */
-    bool hfe;               /* .hfe: stored as a stream (hfe_import) */
+    bool hfe;               /* .hfe (to the SD card only) */
     bool to_sd;             /* destination "sd": a file below the root directory */
     char sd_folder[SD_REL_MAX + 1];
     char sd_name[SD_NAME_MAX + 1];
@@ -93,7 +82,6 @@ typedef struct {
     uint32_t expected_crc;
     uint32_t received;
     uint32_t crc32;
-    uint16_t result_id;     /* image stored, 0 = none */
     bool activated;
     int64_t touched_us;
     const char *err_code;
@@ -236,21 +224,6 @@ static cJSON *read_json(httpd_req_t *req)
     return root;
 }
 
-/* Image id 1..65535 from a path segment; 0 if invalid. */
-static uint16_t parse_image_id(const char *s)
-{
-    char *end;
-    long n = strtol(s, &end, 10);
-    return (end != s && *end == 0 && n >= 1 && n <= 65535) ? (uint16_t)n : 0;
-}
-
-/* Image id from a JSON number; 0 if missing or invalid. */
-static uint16_t json_image_id(const cJSON *j)
-{
-    return cJSON_IsNumber(j) && j->valuedouble == (int)j->valuedouble && j->valueint >= 1 &&
-           j->valueint <= 65535 ? (uint16_t)j->valueint : 0;
-}
-
 static void fail_upload(const char *code, const char *fmt, ...)
 {
     va_list ap;
@@ -275,78 +248,6 @@ static bool upload_in_progress(void)
 {
     expire_upload();
     return up.state == UP_READY || up.state == UP_RECEIVING || up.state == UP_PROCESSING;
-}
-
-static cJSON *storage_json(void)
-{
-    const rf_geometry_t *g = image_store_geometry();
-    store_usage_t u;
-    char id[8];
-
-    image_store_usage(&u);
-    cJSON *s = cJSON_CreateObject();
-    cJSON_AddStringToObject(s, "state", image_store_state_name(image_store_state()));
-    cJSON_AddBoolToObject(s, "flash_detected", ext_flash_ready());
-    snprintf(id, sizeof(id), "%06lx", (unsigned long)ext_flash_jedec_id());
-    cJSON_AddStringToObject(s, "jedec_id", id);
-    cJSON_AddNumberToObject(s, "capacity", ext_flash_size());
-    cJSON_AddNumberToObject(s, "block_size", g->block_size);
-    cJSON_AddNumberToObject(s, "blocks_total", u.blocks_total);
-    cJSON_AddNumberToObject(s, "blocks_used", u.blocks_used);
-    cJSON_AddNumberToObject(s, "blocks_free", u.blocks_free);
-    cJSON_AddNumberToObject(s, "used_percent", u.used_percent);
-    cJSON_AddNumberToObject(s, "images", u.images);
-    cJSON_AddNumberToObject(s, "max_image_size", RF_MAX_IMAGE_SIZE);
-    cJSON_AddNumberToObject(s, "free_bytes", (double)u.blocks_free * g->block_size);
-    return s;
-}
-
-static cJSON *image_json(const image_record_t *r, const disk_info_t *cur)
-{
-    char crc[9], title[IMG_TITLE_SIZE];
-    cJSON *o = cJSON_CreateObject();
-
-    image_store_title(r, title);
-    cJSON_AddNumberToObject(o, "id", r->id);
-    cJSON_AddNumberToObject(o, "sequence", r->sequence);
-    cJSON_AddStringToObject(o, "status", r->status == IMG_VALID ? "valid" : "incomplete");
-    cJSON_AddStringToObject(o, "name", title);
-    if (r->status == IMG_VALID) {
-        hex32(crc, r->crc32);
-        cJSON_AddStringToObject(o, "format", image_format_name(image_format(r)));
-        cJSON_AddNumberToObject(o, "size", r->original_size);
-        cJSON_AddNumberToObject(o, "stored_size", r->stored_size);
-        cJSON_AddStringToObject(o, "storage_format",
-                                r->storage_format == IMG_STORE_DEFLATE ? "deflate" : "raw");
-        cJSON_AddStringToObject(o, "crc32", crc);
-        cJSON_AddNumberToObject(o, "blocks_used", r->block_count);
-        cJSON_AddStringToObject(o, "access", image_read_write(r) ? "READ_WRITE" : "READ_ONLY");
-        cJSON_AddBoolToObject(o, "write_supported", image_format_writable(image_format(r)));
-    }
-    cJSON_AddBoolToObject(o, "active", cur->source == DISK_SRC_FLASH && cur->image_id == r->id &&
-                                       !cur->image_changed);
-    return o;
-}
-
-/* Storage must be usable for changes; else an error has been sent. */
-static bool storage_ready(httpd_req_t *req)
-{
-    if (image_store_state() == STORE_VALID) {
-        return true;
-    }
-    send_error(req, HTTP_503, "STORAGE_NOT_READY", "image library not usable (%s)%s",
-               image_store_state_name(image_store_state()),
-               image_store_state() == STORE_OLD_FORMAT ? " - initialise it with "
-               "POST /api/v1/storage/format" : "");
-    return false;
-}
-
-/* The inserted disk is image id and has written sectors not saved yet. */
-static bool active_unsaved(uint16_t id)
-{
-    disk_info_t d;
-    disk_get_current(&d);
-    return disk_write_unsaved() && d.source == DISK_SRC_FLASH && d.image_id == id;
 }
 
 static cJSON *write_json(void)
@@ -376,13 +277,8 @@ static cJSON *current_json(void)
     disk_get_current(&d);
     cJSON *c = cJSON_CreateObject();
     cJSON_AddBoolToObject(c, "inserted", d.source != DISK_SRC_NONE);
-    cJSON_AddStringToObject(c, "source", d.source == DISK_SRC_FLASH ? "flash"
-                                        : d.source == DISK_SRC_PSRAM ? "psram"
+    cJSON_AddStringToObject(c, "source", d.source == DISK_SRC_PSRAM ? "psram"
                                         : d.source == DISK_SRC_SD ? "sd" : "none");
-    if (d.source == DISK_SRC_FLASH && d.image_id) {
-        cJSON_AddNumberToObject(c, "image_id", d.image_id);
-        cJSON_AddBoolToObject(c, "image_changed_since", d.image_changed);
-    }
     if (d.source == DISK_SRC_SD) {
         cJSON_AddStringToObject(c, "sd_path", d.sd_path);
         cJSON_AddBoolToObject(c, "sd_copy", d.sd_copy);
@@ -413,13 +309,10 @@ static cJSON *upload_json(void)
     cJSON_AddStringToObject(u, "name", up.name);
     cJSON_AddNumberToObject(u, "size", up.size);
     cJSON_AddNumberToObject(u, "received", up.received);
-    cJSON_AddStringToObject(u, "destination", up.to_sd ? "sd" : up.to_flash ? "flash" : "psram");
+    cJSON_AddStringToObject(u, "destination", up.to_sd ? "sd" : "psram");
     if (up.to_sd) {
         cJSON_AddStringToObject(u, "path", up.sd_folder);
         cJSON_AddStringToObject(u, "file", up.sd_name);
-    }
-    if (up.to_flash && up.replace_id) {
-        cJSON_AddNumberToObject(u, "replace", up.replace_id);
     }
     cJSON_AddBoolToObject(u, "activate", up.activate);
     if (up.state == UP_READY) {
@@ -430,18 +323,12 @@ static cJSON *upload_json(void)
     if (up.state == UP_DONE) {
         hex32(crc, up.crc32);
         cJSON_AddStringToObject(u, "crc32", crc);
-        if (up.result_id) {
-            cJSON_AddNumberToObject(u, "image_id", up.result_id);
-        }
         cJSON_AddBoolToObject(u, "active", up.activated);
     }
     if (up.state == UP_FAILED) {
         cJSON *e = cJSON_AddObjectToObject(u, "error");
         cJSON_AddStringToObject(e, "code", up.err_code);
         cJSON_AddStringToObject(e, "message", up.err_msg);
-        if (up.result_id) {
-            cJSON_AddNumberToObject(u, "image_id", up.result_id);
-        }
     }
     return u;
 }
@@ -472,9 +359,8 @@ static const char *status_for(const char *code)
 
 /* ---- Storing and activating (with api_lock held) ------------------------ */
 
-/* Validate and store/activate a completely received upload. */
+/* Validate and activate a completely received temporary (PSRAM) upload. */
 /* *raw: the received image; set to NULL when it is kept as the PSRAM disk. */
-/* HFE files (.hfe) do not come here: receive_hfe stores them as a stream. */
 static void process_upload(uint8_t **rawp)
 {
     const uint8_t *raw = *rawp;
@@ -493,200 +379,25 @@ static void process_upload(uint8_t **rawp)
     if (st.detail[0]) {
         printf("API: note on \"%s\": %s\n", up.name, st.detail);
     }
-    up.crc32 = image_store_crc32(0, raw, up.size);
+    up.crc32 = esp_rom_crc32_le(0, raw, up.size);
     if (up.have_crc && up.crc32 != up.expected_crc) {
         fail_upload("CHECKSUM_MISMATCH", "received data has CRC-32 %08lx, expected %08lx",
                     (unsigned long)up.crc32, (unsigned long)up.expected_crc);
         return;
     }
 
-    disk_info_t info = { .source = up.to_flash ? DISK_SRC_FLASH : DISK_SRC_PSRAM,
-                         .size = up.size, .crc32 = up.crc32,
+    disk_info_t info = { .source = DISK_SRC_PSRAM, .size = up.size, .crc32 = up.crc32,
                          .cylinders = st.cylinders, .heads = st.heads, .sectors = st.sectors };
     memcpy(info.name, up.name, sizeof(info.name));
-
-    if (up.to_flash) {
-        uint16_t id = 0;
-        settings_t cfg;
-        settings_get(&cfg);
-        if (cfg.compress) {
-            disk_verify_cancel();
-        }
-        int64_t t0 = esp_timer_get_time();
-        esp_err_t err = image_store_save_ex(up.replace_id, up.name, IMG_FMT_ST, raw, up.size,
-                                            cfg.compress, &id);
-        int64_t store_ms = (esp_timer_get_time() - t0) / 1000;
-        if (up.replace_id) {
-            disk_note_image_changed(up.replace_id);     /* old image gone, also on failure */
-        }
-        if (err != ESP_OK) {
-            if (err == ESP_ERR_NO_MEM) {
-                fail_upload("NO_SPACE", "not enough free storage: %lu blocks needed",
-                            (unsigned long)image_store_blocks_needed(up.size));
-            } else if (err == ESP_ERR_NOT_FOUND) {
-                fail_upload("IMAGE_NOT_FOUND", "image %u to replace does not exist", up.replace_id);
-            } else {
-                fail_upload("FLASH_ERROR", "storing the image failed (%s)%s", esp_err_to_name(err),
-                            up.replace_id ? "; the replaced image is lost" : "; nothing stored");
-            }
-            return;
-        }
-        up.result_id = id;
-        info.image_id = id;
-        image_record_t rec;
-        image_store_get(id, &rec);
-        printf("API: \"%s\" %s image %u (%lu bytes, stored %s %lu bytes = %lu%%, %u block(s), "
-               "CRC32 %08lx, %lld ms)\n", up.name, up.replace_id ? "replaced" : "stored as", id,
-               (unsigned long)up.size, rec.storage_format == IMG_STORE_DEFLATE ? "compressed" : "raw",
-               (unsigned long)rec.stored_size, (unsigned long)(rec.stored_size * 100ull / up.size),
-               rec.block_count, (unsigned long)up.crc32, store_ms);
+    switch_error_t e;
+    if (disk_switch_psram_upload(*rawp, &info, &e) != ESP_OK) {
+        fail_upload(e.code, "%s", e.msg);
+        return;
     }
-
-    if (up.activate) {
-        switch_error_t e;
-        esp_err_t err = up.to_flash ? disk_switch_raw(raw, &info, &e)
-                                    : disk_switch_psram_upload(*rawp, &info, &e);
-        if (err != ESP_OK) {
-            fail_upload(e.code, "%s%s", e.msg, up.to_flash ? " (the image is stored)" : "");
-            return;
-        }
-        if (!up.to_flash) {
-            *rawp = NULL;           /* now owned by disk_switch as the PSRAM disk */
-        }
-        up.activated = true;
-    }
+    *rawp = NULL;                   /* now owned by disk_switch as the PSRAM disk */
+    up.activated = true;
     up.state = UP_DONE;
     up.touched_us = esp_timer_get_time();
-}
-
-/* ---- HFE uploads: a stream into the library ---------------------------------- */
-
-/* API error for a failed HFE import. */
-static void fail_hfe(hfe_import_error_t e, const hfe_import_t *imp)
-{
-    const hfe_info_t *hi = imp ? hfe_import_info(imp) : NULL;
-    hfe_result_t hr = imp ? hfe_import_result(imp) : HFE_OK;
-
-    switch (e) {
-    case HFE_IMPORT_FORMAT:
-        fail_upload(hr == HFE_V2 || hr == HFE_UNSUPPORTED || hr == HFE_BAD_LAYOUT ? "UNSUPPORTED_FORMAT"
-                    : hr == HFE_TOO_LARGE ? "IMAGE_TOO_LARGE" : "INVALID_IMAGE",
-                    "%s", hi && hi->detail[0] ? hi->detail : "not a valid HFE file");
-        break;
-    case HFE_IMPORT_STORED_TOO_LARGE:
-        fail_upload("IMAGE_TOO_LARGE", "compressed, it needs more than the %u KiB one image may "
-                    "occupy", (unsigned)(RF_MAX_IMAGE_SIZE / 1024));
-        break;
-    case HFE_IMPORT_NO_SPACE:
-        fail_upload("NO_SPACE", "not enough free storage for the compressed image");
-        break;
-    case HFE_IMPORT_NO_MEMORY:
-        fail_upload("INSUFFICIENT_MEMORY", "no memory to store the image");
-        break;
-    case HFE_IMPORT_BUSY:
-        fail_upload("UPLOAD_BUSY", "another image is being written");
-        break;
-    default:
-        fail_upload("FLASH_ERROR", "storing the image failed (%s); nothing stored",
-                    hfe_import_error_name(e));
-        break;
-    }
-}
-
-/*
- * PUT data of an .hfe upload: received in pieces, compressed into the
- * library while it arrives and verified afterwards (hfe_import). A bad
- * file is recognised early; the rest of its data is then only drained.
- */
-static esp_err_t receive_hfe(httpd_req_t *req)
-{
-    hfe_import_t *imp = NULL;
-    hfe_import_error_t e;
-    uint8_t *chunk = heap_caps_malloc(RECV_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    int64_t t0 = esp_timer_get_time(), t_recv = 0;
-
-    disk_verify_cancel();               /* its copy of the active disk: PSRAM */
-    e = chunk ? hfe_import_begin(up.size, DISK_TRACKS_BYTES, &imp) : HFE_IMPORT_NO_MEMORY;
-    if (e != HFE_IMPORT_OK) {
-        fail_hfe(e, NULL);
-    } else {
-        up.state = UP_RECEIVING;
-    }
-    up.touched_us = esp_timer_get_time();
-    while (up.received < up.size && chunk) {
-        uint32_t want = up.size - up.received < RECV_CHUNK ? up.size - up.received : RECV_CHUNK;
-        int n = httpd_req_recv(req, (char *)chunk, want);
-        if (n <= 0) {
-            break;      /* closed or timed out (recv_wait_timeout) */
-        }
-        up.received += n;
-        up.touched_us = esp_timer_get_time();
-        if (up.state == UP_RECEIVING && (e = hfe_import_write(imp, chunk, n)) != HFE_IMPORT_OK) {
-            fail_hfe(e, imp);           /* refused early: drain the rest */
-            hfe_import_abort(imp);
-            imp = NULL;
-        }
-    }
-    free(chunk);
-    t_recv = esp_timer_get_time();
-
-    uint32_t crc = 0;
-    if (up.state == UP_RECEIVING && up.received != up.size) {
-        fail_upload("UPLOAD_INCOMPLETE", "received %lu of %lu bytes",
-                    (unsigned long)up.received, (unsigned long)up.size);
-    }
-    if (up.state == UP_RECEIVING) {
-        up.state = UP_PROCESSING;
-        e = hfe_import_end(imp, &crc);
-        up.crc32 = crc;
-        if (e != HFE_IMPORT_OK) {
-            fail_hfe(e, imp);
-        } else if (up.have_crc && crc != up.expected_crc) {
-            fail_upload("CHECKSUM_MISMATCH", "received data has CRC-32 %08lx, expected %08lx",
-                        (unsigned long)crc, (unsigned long)up.expected_crc);
-        } else if (!HFE_PLAYBACK) {
-            const hfe_info_t *hi = hfe_import_info(imp);
-            printf("API: HFE \"%s\" checked and stored in %lld + %lld ms (%lu -> %lu bytes), "
-                   "then discarded: playback not built in\n", up.name, (t_recv - t0) / 1000,
-                   (esp_timer_get_time() - t_recv) / 1000, (unsigned long)up.size,
-                   (unsigned long)hfe_import_stored(imp));
-            fail_upload("UNSUPPORTED_FORMAT", "%s: HFE playback is still in development", hi->detail);
-        } else {
-            hfe_info_t hi = *hfe_import_info(imp);
-            uint32_t stored = hfe_import_stored(imp);
-            uint16_t id = 0;
-            e = hfe_import_commit(imp, up.replace_id, up.name, &id);
-            imp = NULL;
-            if (e != HFE_IMPORT_OK) {
-                fail_hfe(e, NULL);
-            } else {
-                if (up.replace_id) {
-                    disk_note_image_changed(up.replace_id);
-                }
-                up.result_id = id;
-                printf("API: \"%s\" %s image %u (%s, %lu bytes, stored compressed %lu bytes = %lu%%, "
-                       "CRC32 %08lx, receive %lld ms, verify %lld ms)\n", up.name,
-                       up.replace_id ? "replaced" : "stored as", id, hi.detail,
-                       (unsigned long)up.size, (unsigned long)stored,
-                       (unsigned long)(stored * 100ull / up.size), (unsigned long)crc,
-                       (t_recv - t0) / 1000, (esp_timer_get_time() - t_recv) / 1000);
-                switch_error_t se;
-                if (up.activate && disk_switch_image(id, &se) != ESP_OK) {
-                    fail_upload(se.code, "%s (the image is stored)", se.msg);
-                } else {
-                    up.activated = up.activate;
-                    up.state = UP_DONE;
-                    up.touched_us = esp_timer_get_time();
-                }
-            }
-        }
-    }
-    hfe_import_abort(imp);
-    const char *status = up.state == UP_DONE ? "200 OK" : status_for(up.err_code);
-    if (up.state == UP_FAILED) {
-        printf("API: upload %lu failed: %s - %s\n", (unsigned long)up.id, up.err_code, up.err_msg);
-    }
-    return send_json(req, status, upload_json());
 }
 
 /* ---- SD card: files below the root directory ------------------------------------- */
@@ -882,8 +593,8 @@ static esp_err_t post_upload_sd(httpd_req_t *req, const cJSON *body)
                           "are optional");
     }
     if (cJSON_IsTrue(jact)) {
-        return send_error(req, HTTP_400, "INVALID_REQUEST", "inserting an image from the SD card "
-                          "is not available yet: \"activate\" must be false");
+        return send_error(req, HTTP_400, "INVALID_REQUEST", "an upload to the SD card is not "
+                          "inserted: \"activate\" must be false; insert it with PUT /api/v1/current");
     }
     const char *name = jfn->valuestring, *folder = jpath ? jpath->valuestring : "";
     if (!sd_name_valid(name)) {
@@ -1019,7 +730,7 @@ static esp_err_t receive_sd(httpd_req_t *req)
         if (up.state != UP_RECEIVING) {
             continue;   /* refused early: drain the rest */
         }
-        crc = image_store_crc32(crc, chunk, n);
+        crc = esp_rom_crc32_le(crc, chunk, n);
         if (head_n < sizeof(head)) {
             uint32_t k = sizeof(head) - head_n < (uint32_t)n ? sizeof(head) - head_n : (uint32_t)n;
             memcpy(head + head_n, chunk, k);
@@ -1107,7 +818,14 @@ static esp_err_t get_status(httpd_req_t *req)
     cJSON_AddStringToObject(wifi, "ip", w.ip);
     cJSON_AddNumberToObject(wifi, "rssi", w.rssi);
 
-    cJSON_AddItemToObject(root, "storage", storage_json());
+    sd_status_t sd;
+    sd_card_status(&sd);
+    cJSON *jsd = cJSON_AddObjectToObject(root, "sd");
+    cJSON_AddBoolToObject(jsd, "present", sd.present);
+    if (sd.present) {
+        cJSON_AddNumberToObject(jsd, "size_mb", sd.size_mb);
+        cJSON_AddBoolToObject(jsd, "root_exists", sd.root_exists);
+    }
     const machine_profile_t *mp = machine_profile(machine_active());
     cJSON *mach = cJSON_AddObjectToObject(root, "machine");
     cJSON_AddStringToObject(mach, "id", mp->id);
@@ -1148,346 +866,12 @@ static esp_err_t get_status(httpd_req_t *req)
     return send_json(req, "200 OK", root);
 }
 
-static image_record_t *list_buf(void)
-{
-    static image_record_t *buf;         /* 24 KiB, PSRAM; httpd handles one request at a time */
-    if (!buf) {
-        buf = heap_caps_malloc(IMG_MAX_RECORDS * sizeof(*buf), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    }
-    return buf;
-}
-
-/* GET /api/v1/images: all images in sequence order, plus the storage use. */
-static esp_err_t get_images(httpd_req_t *req)
-{
-    disk_info_t d;
-    image_record_t *recs = list_buf();
-
-    if (!recs) {
-        return send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no memory for the list");
-    }
-    disk_get_current(&d);
-    int n = image_store_list(recs, IMG_MAX_RECORDS);
-    cJSON *root = cJSON_CreateObject();
-    cJSON *arr = cJSON_AddArrayToObject(root, "images");
-    for (int i = 0; i < n; i++) {
-        cJSON_AddItemToArray(arr, image_json(&recs[i], &d));
-    }
-    cJSON_AddItemToObject(root, "storage", storage_json());
-    return send_json(req, "200 OK", root);
-}
-
-static esp_err_t get_storage(httpd_req_t *req)
-{
-    return send_json(req, "200 OK", storage_json());
-}
-
-/* ---- Downloads: the image streamed from the flash ------------------------------ */
-
-typedef struct {
-    const image_record_t *r;
-    httpd_req_t *req;           /* NULL: only compute the CRC */
-    uint32_t crc;
-    uint32_t len;
-} download_t;
-
-static esp_err_t download_out(void *ctx, const uint8_t *data, size_t len)
-{
-    download_t *dl = ctx;
-    if (len > dl->r->original_size - dl->len) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    dl->crc = image_store_crc32(dl->crc, data, len);
-    dl->len += (uint32_t)len;
-    return dl->req ? httpd_resp_send_chunk(dl->req, (const char *)data, len) : ESP_OK;
-}
-
-static esp_err_t download_read(void *ctx, uint32_t off, uint8_t *buf, size_t len)
-{
-    return image_store_read(ctx, off, buf, (uint32_t)len);
-}
-
-/* The image once through out (decompressed if needed); OK only if the
- * length and CRC-32 are those of the record. */
-static esp_err_t download_pass(const image_record_t *r, httpd_req_t *req)
-{
-    download_t dl = { .r = r, .req = req };
-    esp_err_t err;
-
-    if (r->storage_format == IMG_STORE_DEFLATE) {
-        err = img_inflate_stream(r->stored_size, download_read, (void *)r, download_out, &dl, NULL);
-    } else {
-        uint8_t *buf = heap_caps_malloc(RECV_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        err = buf ? ESP_OK : ESP_ERR_NO_MEM;
-        for (uint32_t off = 0; err == ESP_OK && off < r->original_size; off += RECV_CHUNK) {
-            uint32_t n = r->original_size - off < RECV_CHUNK ? r->original_size - off : RECV_CHUNK;
-            if ((err = image_store_read(r, off, buf, n)) == ESP_OK) {
-                err = download_out(&dl, buf, n);
-            }
-        }
-        free(buf);
-    }
-    if (err == ESP_OK && (dl.len != r->original_size || dl.crc != r->crc32)) {
-        err = ESP_ERR_INVALID_CRC;
-    }
-    return err;
-}
-
 /*
- * GET /api/v1/images/{id}/data: the image itself (uncompressed, as it was
- * uploaded or as the computer wrote it), as a file download. Streamed:
- * first checked once without sending (so a damaged image gets an error
- * status), then sent. Never whole in memory.
+ * POST /api/v1/sd/disks {"path": "<folder>", "name": "<name>"}: a new,
+ * empty, formatted 720 KiB .ST disk as <name>.st in that folder of the
+ * SD card (Atari only).
  */
-static esp_err_t get_image_data(httpd_req_t *req, uint16_t id)
-{
-    image_record_t r;
-    char title[IMG_TITLE_SIZE], fname[IMG_TITLE_SIZE + 8], hdr[IMG_TITLE_SIZE + 40];
-
-    if (!id || !image_store_get(id, &r) || !image_store_is_valid(&r)) {
-        return send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no valid image with this id");
-    }
-    if (active_unsaved(id)) {
-        return send_error(req, HTTP_409, "UNSAVED_CHANGES", "the computer wrote to this disk and "
-                          "the changes are not saved yet; download it once they are");
-    }
-    esp_err_t err = download_pass(&r, NULL);
-    if (err == ESP_ERR_NO_MEM) {
-        return send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no memory for the download");
-    }
-    if (err != ESP_OK) {
-        return send_error(req, HTTP_500, "FLASH_ERROR", "reading the image failed (%s)",
-                          esp_err_to_name(err));
-    }
-    /* File name: the title, characters a file system dislikes replaced. */
-    image_store_title(&r, title);
-    size_t n = 0;
-    for (const char *p = title; *p && n < sizeof(title) - 1; p++) {
-        fname[n++] = strchr("\\/:*?\"<>|", *p) ? '_' : *p;
-    }
-    if (!n) {
-        fname[n++] = 'd';
-    }
-    /* Extension from the format ("st", "hfe"; HFEv3 is also .hfe). */
-    uint8_t fmt = image_format(&r);
-    snprintf(fname + n, sizeof(fname) - n, ".%s",
-             fmt == IMG_FMT_HFE3 ? "hfe" : image_format_name(fmt));
-    snprintf(hdr, sizeof(hdr), "attachment; filename=\"%s\"", fname);
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Content-Disposition", hdr);
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    /* Checked again while sending: if the data changed meanwhile, the
-     * download is cut off instead of completed with wrong data. */
-    if ((err = download_pass(&r, req)) != ESP_OK) {
-        printf("API: download of image %u stopped (%s)\n", id, esp_err_to_name(err));
-        return ESP_FAIL;                /* closes the connection: incomplete */
-    }
-    return httpd_resp_send_chunk(req, NULL, 0);
-}
-
-/* GET /api/v1/images/{id} and GET /api/v1/images/{id}/data */
-static esp_err_t get_image(httpd_req_t *req)
-{
-    disk_info_t d;
-    image_record_t r;
-    char seg[16];
-    const char *p = req->uri + strlen("/api/v1/images/");
-    const char *slash = strchr(p, '/');
-
-    if (slash && strcmp(slash, "/data") == 0 && (size_t)(slash - p) < sizeof(seg)) {
-        memcpy(seg, p, slash - p);
-        seg[slash - p] = 0;
-        return get_image_data(req, parse_image_id(seg));
-    }
-    uint16_t id = parse_image_id(p);
-    if (!id || !image_store_get(id, &r)) {
-        return send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no image with this id");
-    }
-    disk_get_current(&d);
-    return send_json(req, "200 OK", image_json(&r, &d));
-}
-
-/*
- * PUT /api/v1/images/{id}: change {"sequence": n} (move to position n,
- * 1 = first) and/or {"access": "READ_ONLY" | "READ_WRITE"} (metadata only:
- * the drive stays write-protected for the computer).
- */
-static esp_err_t put_image(httpd_req_t *req)
-{
-    if (!authorized(req) || !storage_ready(req)) {
-        return ESP_OK;
-    }
-    uint16_t id = parse_image_id(req->uri + strlen("/api/v1/images/"));
-    cJSON *body = read_json(req);
-    if (!body) {
-        return ESP_OK;
-    }
-    const cJSON *js = cJSON_GetObjectItem(body, "sequence");
-    const cJSON *ja = cJSON_GetObjectItem(body, "access");
-    int pos = cJSON_IsNumber(js) && js->valuedouble == (int)js->valuedouble ? js->valueint : 0;
-    int rw = !cJSON_IsString(ja) ? -1 : strcmp(ja->valuestring, "READ_WRITE") == 0 ? 1
-             : strcmp(ja->valuestring, "READ_ONLY") == 0 ? 0 : -2;
-    cJSON_Delete(body);
-    if ((!js && !ja) || (js && pos < 1) || (ja && rw < 0)) {
-        return send_error(req, HTTP_400, "INVALID_REQUEST",
-                          "send \"sequence\" (a number >= 1) and/or \"access\" "
-                          "(\"READ_ONLY\" or \"READ_WRITE\")");
-    }
-
-    xSemaphoreTake(api_lock, portMAX_DELAY);
-    esp_err_t ret;
-    image_record_t r;
-    esp_err_t err = id && image_store_get(id, &r) ? ESP_OK : ESP_ERR_NOT_FOUND;
-    if (err == ESP_OK && ja) {
-        err = image_store_set_read_write(id, rw == 1);
-        disk_write_refresh();           /* write protection of the inserted disk */
-    }
-    if (err == ESP_OK && js) {
-        err = image_store_set_position(id, pos);
-    }
-    if (err == ESP_ERR_NOT_FOUND) {
-        ret = send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no valid image with this id");
-    } else if (err == ESP_ERR_NOT_SUPPORTED) {
-        ret = send_error(req, HTTP_422, "FORMAT_NOT_WRITABLE",
-                         "this image format does not support writing");
-
-    } else if (err != ESP_OK || !image_store_get(id, &r)) {
-        ret = send_error(req, HTTP_500, "FLASH_ERROR", "catalog update failed");
-    } else {
-        if (ja) {
-            printf("API: image %u set to %s\n", id, rw ? "READ_WRITE" : "READ_ONLY");
-        }
-        disk_info_t d;
-        disk_get_current(&d);
-        ret = send_json(req, "200 OK", image_json(&r, &d));
-    }
-    xSemaphoreGive(api_lock);
-    return ret;
-}
-
-/*
- * POST /api/v1/images {"name": "..."}: create a new, empty, formatted disk
- * in the library for the configured computer (READ_WRITE). Atari: .ST,
- * 720 KiB (80 x 2 x 9). Other computers: not supported yet.
- */
-static esp_err_t post_image(httpd_req_t *req)
-{
-    if (!authorized(req) || !storage_ready(req)) {
-        return ESP_OK;
-    }
-    cJSON *body = read_json(req);
-    if (!body) {
-        return ESP_OK;
-    }
-    const cJSON *jn = cJSON_GetObjectItem(body, "name");
-    char name[IMG_TITLE_SIZE] = "";
-    bool name_ok = cJSON_IsString(jn);
-    if (name_ok) {
-        const char *s = jn->valuestring, *e;
-        while (*s == ' ') {
-            s++;
-        }
-        e = s + strlen(s);
-        while (e > s && e[-1] == ' ') {
-            e--;
-        }
-        name_ok = e > s && e - s <= IMG_NAME_LEN;
-        for (const char *p = s; name_ok && p < e; p++) {
-            name_ok = *p >= 0x20 && *p <= 0x7e;
-        }
-        if (name_ok) {
-            memcpy(name, s, e - s);
-            name[e - s] = 0;
-        }
-    }
-    cJSON_Delete(body);
-    if (!name_ok) {
-        return send_error(req, HTTP_400, "INVALID_NAME",
-                          "\"name\": 1 to %d printable characters", IMG_NAME_LEN);
-    }
-
-    settings_t cfg;
-    settings_get(&cfg);
-    const machine_profile_t *mp = machine_profile(cfg.machine);
-    if (cfg.machine != MACHINE_ATARI) {
-        return send_error(req, HTTP_409, "MACHINE_NOT_SUPPORTED",
-                          "creating a new disk is not supported yet for %s", mp->name);
-    }
-
-    xSemaphoreTake(api_lock, portMAX_DELAY);
-    esp_err_t ret;
-    uint8_t *raw = NULL;
-    if (upload_in_progress()) {
-        ret = send_error(req, HTTP_409, "UPLOAD_BUSY", "an upload is in progress");
-    } else if (!image_store_fits(ST_BLANK_SIZE, 0)) {
-        ret = send_error(req, HTTP_507, "NO_SPACE", "not enough free storage: %lu blocks needed",
-                         (unsigned long)image_store_blocks_needed(ST_BLANK_SIZE));
-    } else if (!(raw = heap_caps_malloc(ST_BLANK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))) {
-        ret = send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no PSRAM for the new disk");
-    } else {
-        st_format_blank(raw, esp_random() & 0xffffff);
-        uint16_t id = 0;
-        if (cfg.compress) {
-            disk_verify_cancel();
-        }
-        esp_err_t err = image_store_save_ex(0, name, IMG_FMT_ST | IMG_FLAG_READ_WRITE, raw,
-                                            ST_BLANK_SIZE, cfg.compress, &id);
-        image_record_t r;
-        if (err == ESP_ERR_NO_MEM) {
-            ret = send_error(req, HTTP_507, "NO_SPACE", "not enough free storage");
-        } else if (err != ESP_OK || !image_store_get(id, &r)) {
-            ret = send_error(req, HTTP_500, "FLASH_ERROR", "storing the new disk failed (%s)",
-                             esp_err_to_name(err));
-        } else {
-            printf("API: new disk \"%s\" created as image %u (720 KiB .ST, read-write)\n",
-                   name, id);
-            disk_info_t d;
-            disk_get_current(&d);
-            ret = send_json(req, "201 Created", image_json(&r, &d));
-        }
-    }
-    free(raw);
-    xSemaphoreGive(api_lock);
-    return ret;
-}
-
-/* DELETE /api/v1/images/{id} */
-static esp_err_t delete_image(httpd_req_t *req)
-{
-    if (!authorized(req) || !storage_ready(req)) {
-        return ESP_OK;
-    }
-    uint16_t id = parse_image_id(req->uri + strlen("/api/v1/images/"));
-
-    xSemaphoreTake(api_lock, portMAX_DELAY);
-    esp_err_t ret;
-    image_record_t r;
-    if (upload_in_progress() && up.to_flash && up.replace_id == id) {
-        ret = send_error(req, HTTP_409, "UPLOAD_BUSY", "an upload replacing image %u is in progress",
-                         id);
-    } else if (!id || !image_store_get(id, &r)) {
-        ret = send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "no image with this id");
-    } else if (active_unsaved(id)) {
-        ret = send_error(req, HTTP_409, "UNSAVED_CHANGES",
-                         "the computer wrote to this disk and the changes are not saved yet");
-    } else if (image_store_delete(id) != ESP_OK) {
-        ret = send_error(req, HTTP_500, "FLASH_ERROR", "catalog update failed");
-    } else {
-        disk_note_image_changed(id);
-        disk_write_refresh();
-        printf("API: image %u deleted (%u block(s) free again)\n", id, r.block_count);
-        cJSON *root = cJSON_CreateObject();
-        cJSON_AddNumberToObject(root, "id", id);
-        cJSON_AddStringToObject(root, "status", "deleted");
-        cJSON_AddItemToObject(root, "storage", storage_json());
-        ret = send_json(req, "200 OK", root);
-    }
-    xSemaphoreGive(api_lock);
-    return ret;
-}
-
-/* POST /api/v1/storage/format {"confirm": "ERASE ALL IMAGES"} */
-static esp_err_t post_format(httpd_req_t *req)
+static esp_err_t post_sd_disk(httpd_req_t *req)
 {
     if (!authorized(req)) {
         return ESP_OK;
@@ -1496,33 +880,76 @@ static esp_err_t post_format(httpd_req_t *req)
     if (!body) {
         return ESP_OK;
     }
-    const cJSON *jc = cJSON_GetObjectItem(body, "confirm");
-    bool ok = cJSON_IsString(jc) && strcmp(jc->valuestring, "ERASE ALL IMAGES") == 0;
+    const cJSON *jp = cJSON_GetObjectItem(body, "path");
+    const cJSON *jn = cJSON_GetObjectItem(body, "name");
+    char folder[SD_REL_MAX + 1] = "", file[SD_NAME_MAX + 1] = "";
+    bool ok = (!jp || (cJSON_IsString(jp) && strlen(jp->valuestring) <= SD_REL_MAX)) &&
+              cJSON_IsString(jn);
+    if (ok) {
+        snprintf(folder, sizeof(folder), "%s", jp ? jp->valuestring : "");
+        /* The name without spaces around it; ".st" added unless it has it. */
+        const char *n = jn->valuestring, *e;
+        while (*n == ' ') {
+            n++;
+        }
+        e = n + strlen(n);
+        while (e > n && e[-1] == ' ') {
+            e--;
+        }
+        size_t len = (size_t)(e - n);
+        bool has_ext = len >= 3 && strncasecmp(e - 3, ".st", 3) == 0;
+        ok = len > 0 && len + (has_ext ? 0 : 3) <= SD_NAME_MAX;
+        if (ok) {
+            snprintf(file, sizeof(file), "%.*s%s", (int)len, n, has_ext ? "" : ".st");
+        }
+    }
     cJSON_Delete(body);
-    if (!ok) {
-        return send_error(req, HTTP_400, "CONFIRMATION_REQUIRED",
-                          "send {\"confirm\": \"ERASE ALL IMAGES\"}: every stored image is lost");
+    if (!ok || !sd_name_valid(file)) {
+        return send_error(req, HTTP_422, "INVALID_NAME", "\"name\": a file name (at most %d "
+                          "characters, none of \\ / : * ? \" < > |, not starting with '.'); "
+                          "\".st\" is added", SD_NAME_MAX - 3);
+    }
+    if (!sd_relpath_valid(folder)) {
+        return sd_error(req, SD_INVALID, true);
+    }
+    settings_t cfg;
+    settings_get(&cfg);
+    if (cfg.machine != MACHINE_ATARI) {
+        return send_error(req, HTTP_409, "MACHINE_NOT_SUPPORTED", "creating a new disk is not "
+                          "supported yet for %s", machine_profile(cfg.machine)->name);
     }
 
     xSemaphoreTake(api_lock, portMAX_DELAY);
     esp_err_t ret;
-    if (upload_in_progress()) {
-        ret = send_error(req, HTTP_409, "UPLOAD_BUSY", "an upload is in progress");
-    } else if (disk_write_unsaved()) {
-        ret = send_error(req, HTTP_409, "UNSAVED_CHANGES", "written sectors are not saved yet");
-    } else if (!ext_flash_ready() || image_store_state() == STORE_NO_FLASH) {
-        ret = send_error(req, HTTP_503, "STORAGE_NOT_READY", "no external flash");
-    } else if (image_store_format() != ESP_OK) {
-        ret = send_error(req, HTTP_500, "FLASH_ERROR", "initialising the image library failed");
+    sd_writer_t *w = NULL;
+    uint8_t *raw = heap_caps_malloc(ST_BLANK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    sd_result_t r;
+    if (!raw) {
+        ret = send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no PSRAM for the new disk");
+    } else if ((r = sd_card_writer_open(folder, file, false, &w)) != SD_OK) {
+        ret = sd_error(req, r, r != SD_EXISTS);
     } else {
-        disk_info_t d;
-        disk_get_current(&d);
-        if (d.source == DISK_SRC_FLASH) {
-            disk_note_image_changed(d.image_id);
+        st_format_blank(raw, esp_random() & 0xffffff);
+        uint32_t crc = esp_rom_crc32_le(0, raw, ST_BLANK_SIZE);
+        r = sd_card_writer_write(w, raw, ST_BLANK_SIZE);
+        if (r == SD_OK) {
+            r = sd_card_writer_commit(w, crc);
+        } else {
+            sd_card_writer_abort(w);
         }
-        printf("API: image library initialised (all images erased)\n");
-        ret = send_json(req, "200 OK", storage_json());
+        if (r != SD_OK) {
+            ret = sd_error(req, r, false);
+        } else {
+            char rel[SD_REL_MAX + SD_NAME_MAX + 2];
+            snprintf(rel, sizeof(rel), "%s%s%s", folder, folder[0] ? "/" : "", file);
+            printf("API: new disk %s created on the SD card (720 KiB .ST)\n", rel);
+            cJSON *root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "path", rel);
+            cJSON_AddNumberToObject(root, "size", ST_BLANK_SIZE);
+            ret = send_json(req, "201 Created", root);
+        }
     }
+    free(raw);
     xSemaphoreGive(api_lock);
     return ret;
 }
@@ -1532,7 +959,7 @@ static esp_err_t get_current(httpd_req_t *req)
     return send_json(req, "200 OK", current_json());
 }
 
-/* PUT /api/v1/current {"image_id": n}: activate a stored image. */
+/* PUT /api/v1/current {"sd_path": "..."}: insert a file from the SD card. */
 static esp_err_t put_current(httpd_req_t *req)
 {
     if (!authorized(req)) {
@@ -1552,17 +979,16 @@ static esp_err_t put_current(httpd_req_t *req)
         }
         snprintf(sd_path, sizeof(sd_path), "%s", jsd->valuestring);
     }
-    uint16_t id = json_image_id(cJSON_GetObjectItem(body, "image_id"));
     cJSON_Delete(body);
-    if (!id && !sd_path[0]) {
-        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"image_id\" (an image id) or "
-                          "\"sd_path\" (a file on the SD card) is required");
+    if (!sd_path[0]) {
+        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"sd_path\" (a file on the SD "
+                          "card, below the root directory) is required");
     }
 
     xSemaphoreTake(api_lock, portMAX_DELAY);
     switch_error_t e;
     esp_err_t ret;
-    if ((sd_path[0] ? disk_switch_sd(sd_path, &e) : disk_switch_image(id, &e)) == ESP_OK) {
+    if (disk_switch_sd(sd_path, &e) == ESP_OK) {
         ret = send_json(req, "200 OK", current_json());
     } else {
         ret = send_error(req, status_for(e.code), e.code, "%s", e.msg);
@@ -1585,7 +1011,6 @@ static esp_err_t post_upload(httpd_req_t *req)
     const cJSON *jfn = cJSON_GetObjectItem(body, "filename");
     const cJSON *jsize = cJSON_GetObjectItem(body, "size");
     const cJSON *jdest = cJSON_GetObjectItem(body, "destination");
-    const cJSON *jrepl = cJSON_GetObjectItem(body, "replace");
     const cJSON *jact = cJSON_GetObjectItem(body, "activate");
     const cJSON *jcrc = cJSON_GetObjectItem(body, "crc32");
     esp_err_t ret;
@@ -1606,30 +1031,15 @@ static esp_err_t post_upload(httpd_req_t *req)
         ret = post_upload_sd(req, body);
         goto out;
     }
-    bool to_flash = strcmp(jdest->valuestring, "flash") == 0;
-    if (!to_flash && strcmp(jdest->valuestring, "psram") != 0) {
+    if (strcmp(jdest->valuestring, "psram") != 0) {
         ret = send_error(req, HTTP_400, "INVALID_REQUEST",
-                         "\"destination\" must be \"psram\", \"flash\" or \"sd\"");
+                         "\"destination\" must be \"psram\" (temporary) or \"sd\" (the SD card)");
         goto out;
     }
-    if (jact && !cJSON_IsBool(jact)) {
-        ret = send_error(req, HTTP_400, "INVALID_REQUEST", "\"activate\" must be true or false");
-        goto out;
-    }
-    bool activate = jact ? cJSON_IsTrue(jact) : !to_flash;
-    if (!to_flash && !activate) {
+    if (jact && !cJSON_IsTrue(jact)) {
         ret = send_error(req, HTTP_400, "INVALID_REQUEST",
                          "a PSRAM upload is always activated; \"activate\": false is not supported");
         goto out;
-    }
-    uint16_t replace_id = 0;
-    if (jrepl) {
-        replace_id = json_image_id(jrepl);
-        if (!to_flash || !replace_id) {
-            ret = send_error(req, HTTP_400, "INVALID_REQUEST",
-                             "\"replace\" must be an image id, with \"destination\": \"flash\"");
-            goto out;
-        }
     }
     bool have_crc = false;
     uint32_t crc = 0;
@@ -1645,64 +1055,23 @@ static esp_err_t post_upload(httpd_req_t *req)
         }
         have_crc = true;
     }
-
+    size_t fl = strlen(jfn->valuestring);
+    if (fl >= 4 && strcasecmp(jfn->valuestring + fl - 4, ".hfe") == 0) {
+        ret = send_error(req, status_for("UNSUPPORTED_FORMAT"), "UNSUPPORTED_FORMAT",
+                         "HFE images cannot be loaded temporarily: store them on the SD card "
+                         "(\"destination\": \"sd\") and insert them from there");
+        goto out;
+    }
     uint32_t size = (uint32_t)jsize->valuedouble;
     st_info_t st;
-    /* The name only decides which size check comes first; the format is
-     * recognised from the content once it has arrived. */
-    size_t fl = strlen(jfn->valuestring);
-    bool maybe_hfe = fl >= 4 && strcasecmp(jfn->valuestring + fl - 4, ".hfe") == 0;
-    st_result_t r = maybe_hfe ? (size > RF_MAX_LOGICAL_SIZE ? ST_TOO_LARGE : ST_OK)
-                              : st_check_size(size, &st);
-    if (maybe_hfe && r != ST_OK) {
-        snprintf(st.detail, sizeof(st.detail), "%lu bytes, an HFE image may have at most %u",
-                 (unsigned long)size, RF_MAX_LOGICAL_SIZE);
-    }
+    st_result_t r = st_check_size(size, &st);
     if (r != ST_OK) {
         const char *code = r == ST_TOO_LARGE ? "IMAGE_TOO_LARGE"
                            : r == ST_UNSUPPORTED ? "UNSUPPORTED_GEOMETRY" : "INVALID_IMAGE";
         ret = send_error(req, status_for(code), code, "%s", st.detail);
         goto out;
     }
-    if (to_flash) {
-        image_record_t old;
-        if (image_store_state() != STORE_VALID) {
-            ret = send_error(req, HTTP_503, "STORAGE_NOT_READY", "image library not usable (%s)",
-                             image_store_state_name(image_store_state()));
-            goto out;
-        }
-        if (replace_id && !image_store_get(replace_id, &old)) {
-            ret = send_error(req, HTTP_404, "IMAGE_NOT_FOUND", "image %u does not exist",
-                             replace_id);
-            goto out;
-        }
-        if (replace_id && active_unsaved(replace_id)) {
-            ret = send_error(req, HTTP_409, "UNSAVED_CHANGES",
-                             "the computer wrote to this disk and the changes are not saved yet");
-            goto out;
-        }
-        settings_t cfg;
-        settings_get(&cfg);
-        /* With compression the stored size is known only after compressing:
-         * then the final check is done when storing (507 NO_SPACE). */
-        if (!cfg.compress && !maybe_hfe && !image_store_fits(size, replace_id)) {
-            store_usage_t u;
-            image_store_usage(&u);
-            ret = send_error(req, HTTP_507, "NO_SPACE",
-                             "not enough free storage: %lu blocks needed, %u free%s",
-                             (unsigned long)image_store_blocks_needed(size), u.blocks_free,
-                             replace_id ? " (plus those of the replaced image)" : "");
-            goto out;
-        }
-    }
-    if (maybe_hfe && !to_flash) {
-        ret = send_error(req, status_for("UNSUPPORTED_FORMAT"), "UNSUPPORTED_FORMAT",
-                         "HFE images are stored in the library (\"destination\": \"flash\"); "
-                         "the temporary PSRAM disk is for .ST images only");
-        goto out;
-    }
-    /* HFE is received as a stream: no buffer for the whole file. */
-    if (!maybe_hfe && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < size) {
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < size) {
         ret = send_error(req, HTTP_507, "INSUFFICIENT_MEMORY", "no PSRAM for a %lu byte upload",
                          (unsigned long)size);
         goto out;
@@ -1713,10 +1082,7 @@ static esp_err_t post_upload(httpd_req_t *req)
     up.state = UP_READY;
     disk_title_from_filename(jfn->valuestring, up.name);
     up.size = size;
-    up.to_flash = to_flash;
-    up.replace_id = replace_id;
-    up.hfe = maybe_hfe;
-    up.activate = activate;
+    up.activate = true;
     up.have_crc = have_crc;
     up.expected_crc = crc;
     up.touched_us = esp_timer_get_time();
@@ -1792,10 +1158,6 @@ static esp_err_t put_upload_data(httpd_req_t *req)
         ret = receive_sd(req);
         goto out;
     }
-    if (up.hfe) {
-        ret = receive_hfe(req);
-        goto out;
-    }
 
     uint8_t *raw = heap_caps_malloc(up.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *chunk = heap_caps_malloc(RECV_CHUNK, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -1867,7 +1229,6 @@ static cJSON *settings_json(void)
     cJSON_AddStringToObject(root, "drive_select", s.drive_select == 0 ? "DS0" : "DS1");
     cJSON_AddStringToObject(root, "drive_select_active", running_ds == 0 ? "DS0" : "DS1");
     cJSON_AddBoolToObject(root, "buzzer", s.buzzer);
-    cJSON_AddBoolToObject(root, "compression", s.compress);
     cJSON_AddNumberToObject(root, "leds", s.leds);
     cJSON_AddStringToObject(root, "root_dir", s.root_dir);
     sd_status_t sd;
@@ -1889,7 +1250,7 @@ static cJSON *settings_json(void)
         cJSON_AddBoolToObject(m, "supported", machine_profile(i)->supported);
         cJSON_AddItemToArray(ms, m);
     }
-    cJSON_AddNumberToObject(root, "last_image_id", s.last_image_id);
+    cJSON_AddStringToObject(root, "last_sd_path", s.last_sd);
     cJSON_AddBoolToObject(root, "restart_required", strcmp(s.hostname, w.hostname) != 0 ||
                                                    s.drive_select != running_ds ||
                                                    s.machine != machine_active() ||
@@ -1960,14 +1321,6 @@ static esp_err_t put_settings(httpd_req_t *req)
                               "machine: \"ATARI\", \"AMIGA\" or \"DOS\"");
         }
         s.machine = (uint8_t)m;
-    }
-    const cJSON *jc = cJSON_GetObjectItem(body, "compression");
-    if (jc) {
-        if (!cJSON_IsBool(jc)) {
-            cJSON_Delete(body);
-            return send_error(req, HTTP_400, "INVALID_REQUEST", "\"compression\" must be true or false");
-        }
-        s.compress = cJSON_IsTrue(jc);
     }
     const cJSON *jr = cJSON_GetObjectItem(body, "root_dir");
     if (jr) {
@@ -2121,13 +1474,7 @@ esp_err_t api_start(void)
 
     static const httpd_uri_t uris[] = {
         { .uri = "/api/v1/status",    .method = HTTP_GET,    .handler = get_status },
-        { .uri = "/api/v1/images",    .method = HTTP_GET,    .handler = get_images },
-        { .uri = "/api/v1/images",    .method = HTTP_POST,   .handler = post_image },
-        { .uri = "/api/v1/images/*",  .method = HTTP_GET,    .handler = get_image },
-        { .uri = "/api/v1/images/*",  .method = HTTP_PUT,    .handler = put_image },
-        { .uri = "/api/v1/images/*",  .method = HTTP_DELETE, .handler = delete_image },
-        { .uri = "/api/v1/storage",   .method = HTTP_GET,    .handler = get_storage },
-        { .uri = "/api/v1/storage/format", .method = HTTP_POST, .handler = post_format },
+        { .uri = "/api/v1/sd/disks",  .method = HTTP_POST,   .handler = post_sd_disk },
         { .uri = "/api/v1/current",   .method = HTTP_GET,    .handler = get_current },
         { .uri = "/api/v1/current",   .method = HTTP_PUT,    .handler = put_current },
         { .uri = "/api/v1/uploads",   .method = HTTP_POST,   .handler = post_upload },

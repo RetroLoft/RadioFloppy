@@ -582,3 +582,55 @@ sd_result_t sd_card_load(const char *rel, uint32_t max, uint8_t **buf, uint32_t 
     xSemaphoreGive(lock);
     return r;
 }
+
+struct sd_reader {
+    FILE *f;
+};
+
+sd_result_t sd_card_reader_open(const char *rel, uint32_t max, sd_reader_t **rp, uint32_t *size)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+
+    *rp = NULL;
+    *size = 0;
+    if (r != SD_OK) {
+        return r;
+    }
+    uint32_t n = 0;
+    sd_reader_t *rd = NULL;
+    if (!rel[0] || !is_file(path, &n)) {
+        r = is_dir(path) ? SD_INVALID : SD_NOT_FOUND;
+    } else if (n == 0 || n > max) {
+        r = SD_INVALID;
+    } else if (!(rd = calloc(1, sizeof(*rd))) || !(rd->f = fopen(path, "rb"))) {
+        free(rd);
+        rd = NULL;
+        r = SD_IO;
+    } else {
+        *size = n;
+    }
+    xSemaphoreGive(lock);
+    *rp = rd;
+    return r;
+}
+
+sd_result_t sd_card_reader_read(sd_reader_t *rd, void *buf, uint32_t len, uint32_t *got)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    size_t n = card ? fread(buf, 1, len, rd->f) : 0;
+    xSemaphoreGive(lock);
+    *got = (uint32_t)n;
+    return n > 0 ? SD_OK : SD_IO;
+}
+
+void sd_card_reader_close(sd_reader_t *rd)
+{
+    if (!rd) {
+        return;
+    }
+    xSemaphoreTake(lock, portMAX_DELAY);
+    fclose(rd->f);
+    xSemaphoreGive(lock);
+    free(rd);
+}

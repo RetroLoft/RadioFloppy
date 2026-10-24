@@ -8,10 +8,9 @@
  * to the disk (drive_swap_media). The flux stream reads the tracks through
  * disk_track_raw() and never waits for any of this.
  *
- * At start-up the image that was active at power-off (settings), else the
- * one named DISK_BOOT_IMAGE, else the first valid image in sequence order
- * is loaded from the external flash image library; with
- * none, the drive has no disk.
+ * At start-up the disk that was active at power-off (settings last_sd) is
+ * read from the SD card, or from its copy in the flash (disk_copy.h) when
+ * the card is not there; with none, the drive has no disk.
  */
 #pragma once
 
@@ -21,8 +20,6 @@
 #include "esp_err.h"
 #include "mfm_track.h"
 #include "sd_path.h"
-
-#define DISK_BOOT_IMAGE             "Crystal Castles"
 
 /*
  * DISK_BACKGROUND_VERIFY 1: after every disk change, decode the new tracks
@@ -38,22 +35,20 @@
 
 typedef enum {
     DISK_SRC_NONE,          /* no disk inserted */
-    DISK_SRC_FLASH,         /* from the image library (external flash) */
     DISK_SRC_PSRAM,         /* temporary upload, lost at reset */
     DISK_SRC_SD,            /* a file on the SD card (read-only for now) */
 } disk_source_t;
 
 typedef struct {
     disk_source_t source;
-    uint16_t image_id;      /* library image for DISK_SRC_FLASH, else 0 */
-    bool image_changed;     /* that image was replaced/deleted since */
+    bool image_changed;     /* its file was replaced/deleted since */
     char name[53];          /* title, up to 52 characters (IMG_TITLE_SIZE) */
     uint32_t size;
     uint32_t crc32;
     int cylinders;          /* geometry of the image */
     int heads;
     int sectors;            /* per track */
-    bool keep_sectors;      /* READ_WRITE .ST image: keep its sectors for writing */
+    bool keep_sectors;      /* writable .ST: keep its sectors for writing (none for now) */
     bool hfe;               /* HFE image: packed tracks (hfe.h), played in native timing */
     char sd_path[SD_REL_MAX + 1];   /* DISK_SRC_SD: the file, below the root directory */
     bool sd_copy;           /* DISK_SRC_SD read from its copy in the flash (card not there) */
@@ -76,7 +71,7 @@ static inline const uint8_t *disk_track_raw(int cyl, int head)
     return disk_tracks + (size_t)(cyl * DISK_MAX_HEADS + head) * MFM_MAX_BYTES;
 }
 
-/* External flash, image library, buffers and the start-up image. */
+/* External flash, buffers and the start-up disk. */
 esp_err_t disk_image_init(void);
 
 /* Copy of the current disk info. */
@@ -89,10 +84,10 @@ void disk_get_current(disk_info_t *info);
 esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info);
 
 /*
- * The same for an HFE library image (info->image_id): decompressed from the
- * flash straight into the inactive buffer as packed tracks, never whole in
- * memory; length and CRC checked. Fills in cylinders and heads.
- * ESP_ERR_NO_MEM, ESP_ERR_INVALID_CRC or ESP_FAIL (not a usable HFE).
+ * The same for the HFE file info->sd_path on the SD card: read straight
+ * into the inactive buffer as packed tracks, never whole in memory. Fills
+ * in size, CRC, cylinders and heads. ESP_ERR_NO_MEM, ESP_ERR_NOT_FOUND
+ * (no card), ESP_FAIL (not a usable HFE).
  */
 esp_err_t disk_prepare_hfe(disk_info_t *info);
 
@@ -121,9 +116,6 @@ esp_err_t disk_activate_prepared(const disk_info_t *info, uint32_t timeout_ms);
 /* Called (task context) after every change of the active disk. */
 void disk_set_change_callback(void (*cb)(void));
 
-/* A library image was replaced or deleted: flag the current disk if it came from there. */
-void disk_note_image_changed(uint16_t image_id);
-
 /* A file on the SD card was replaced or deleted (folder: everything in
  * folder path): flag the current disk if it came from there. */
 void disk_note_sd_changed(const char *path, bool folder);
@@ -133,12 +125,8 @@ void disk_note_sd_changed(const char *path, bool folder);
 /* +1 for every disk change; a write belongs to the disk of its generation. */
 extern volatile uint32_t disk_media_gen;
 
-/* The active disk is a library image whose sectors are kept (can be written). */
+/* The active disk's sectors are kept (it can be written). */
 bool disk_writable_data(void);
-
-/* The active disk was set to READ_WRITE after it was loaded: load and keep
- * its sectors now (ESP_ERR_NO_MEM when PSRAM is short). */
-esp_err_t disk_keep_sectors(void);
 
 /*
  * A sector written by the computer: patch the kept sectors, encode the
@@ -153,8 +141,7 @@ bool disk_dirty(void);
 typedef struct {
     uint8_t *data;          /* copy of the whole image (heap, caller frees) */
     uint32_t size;
-    uint32_t mask;          /* changed storage blocks */
-    uint16_t image_id;
+    uint32_t mask;          /* changed 64 KiB regions */
     uint32_t gen;
 } disk_snapshot_t;
 

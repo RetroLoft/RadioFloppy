@@ -353,7 +353,7 @@ void floppy_emu_run(void)
     disk_info_t disk;
     disk_get_current(&disk);
     printf("Floppy image: %s (%s)\n", disk.name,
-           disk.source == DISK_SRC_FLASH ? "EXTERNAL SPI FLASH" : "none");
+           disk.source == DISK_SRC_SD ? (disk.sd_copy ? "flash copy" : "SD card") : "none");
     if (disk.heads) {
         mfm_layout_t l = mfm_layout(disk.sectors);
         printf("Geometry: %d/%d/%d/%d%s\n", disk.cylinders, disk.heads, disk.sectors,

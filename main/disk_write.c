@@ -4,7 +4,11 @@
  * Two tasks on core 1 (away from the floppy ISRs and the flux stream on
  * core 0): the receive task (high priority) re-arms the RMT receiver,
  * decodes and applies sectors within a few milliseconds; the save task
- * (low priority) does the slow flash work and decides write protection.
+ * (low priority) does the slow storage work and decides write protection.
+ *
+ * For now no disk is writable: images live on the SD card, and saving
+ * written sectors to it comes in a next version (save_now() has nothing
+ * to save). Receiving and decoding stay in place for that.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,9 +28,7 @@
 #include "disk_write.h"
 #include "drive_emu.h"
 #include "flux_stream.h"
-#include "image_store.h"
 #include "machine.h"
-#include "settings.h"
 #include "mfm_track.h"
 
 #define RX_RESOLUTION_HZ    10000000    /* 0.1 us per tick */
@@ -56,7 +58,6 @@ static volatile int64_t last_write_us;
 static volatile bool save_error;
 static volatile bool saving;
 static int64_t last_try_us;
-static uint32_t keep_failed_gen = UINT32_MAX;   /* disk whose sectors could not be kept */
 
 static const rmt_receive_config_t rx_cfg = {
     .signal_range_min_ns = RX_MIN_NS,
@@ -80,8 +81,6 @@ const char *disk_write_state_name(write_state_t s)
 static const char *protect_reason(void)
 {
     disk_info_t d;
-    image_record_t r;
-    store_usage_t u;
 
     if (!rx_ready) {
         return "write receiver not available";
@@ -93,37 +92,11 @@ static const char *protect_reason(void)
     if (d.source == DISK_SRC_NONE) {
         return "no disk";
     }
-    if (d.source != DISK_SRC_FLASH) {
+    if (d.source == DISK_SRC_PSRAM) {
         return "temporary disk (PSRAM)";
     }
-    if (d.image_changed) {
-        return "image replaced or deleted since it was loaded";
-    }
-    if (!image_store_get(d.image_id, &r) || !image_store_is_valid(&r)) {
-        return "image not found";
-    }
-    if (!image_read_write(&r)) {
-        return "image is read-only";
-    }
-    if (image_format(&r) != IMG_FMT_ST) {
-        return "format cannot be written";
-    }
     if (!disk_writable_data()) {
-        /* Set to READ_WRITE after it was loaded: load its sectors, once per
-         * disk (again after disk_write_refresh()). */
-        if (keep_failed_gen == disk_media_gen || disk_keep_sectors() != ESP_OK) {
-            keep_failed_gen = disk_media_gen;
-            return "not enough memory to keep the sectors";
-        }
-    }
-    if (image_store_state() != STORE_VALID) {
-        return "image storage not usable";
-    }
-    image_store_usage(&u);
-    /* Every save must fit, also when the disk fills up with data that
-     * does not compress: room for the whole image, uncompressed or not. */
-    if (u.blocks_free < image_store_blocks_needed(IMG_DEFLATE_MAX(r.original_size))) {
-        return "not enough free storage to save changes";
+        return "writing to the SD card is not available yet";
     }
     if (save_error) {
         return "saving failed";
@@ -149,7 +122,6 @@ static void update_protection(void)
 
 void disk_write_refresh(void)
 {
-    keep_failed_gen = UINT32_MAX;       /* e.g. just set to READ_WRITE: try again */
     if (save_task) {
         xTaskNotify(save_task, 1, eSetBits);
     } else {
@@ -241,7 +213,7 @@ static void handle_write(size_t nsym)
         return;
     }
     disk_get_current(&d);
-    if (d.source != DISK_SRC_FLASH || !d.sectors) {
+    if (!disk_writable_data() || !d.sectors) {
         reject("no writable disk", &ws);
         return;
     }
@@ -319,31 +291,13 @@ static esp_err_t save_now(void)
     saving = true;
     last_try_us = esp_timer_get_time();
     if (err == ESP_OK) {
-        int64_t t0 = esp_timer_get_time();
-        uint32_t crc = esp_rom_crc32_le(0, snap.data, snap.size);
-        settings_t cfg;
-        image_record_t r;
-        settings_get(&cfg);
-        bool raw = image_store_get(snap.image_id, &r) && r.storage_format == IMG_STORE_RAW;
-        /* RAW and staying RAW: only the changed blocks. Compressed (or to
-         * become so): the whole image again, compressed when the setting
-         * is on. Both copy-on-write with one catalog update. */
-        if (raw && !cfg.compress) {
-            err = image_store_commit_blocks(snap.image_id, snap.mask, snap.data, snap.size, crc);
-        } else {
-            if (cfg.compress) {
-                disk_verify_cancel();
-            }
-            err = image_store_commit_image(snap.image_id, snap.data, snap.size, crc, cfg.compress);
-        }
+        /* No storage for written sectors yet (SD card writing comes later);
+         * no disk is writable, so this does not happen. */
+        printf("Write: %lu byte(s) of changes cannot be saved (writing to the SD card is "
+               "not available yet)\n", (unsigned long)snap.size);
         free(snap.data);
-        if (err == ESP_OK && image_store_get(snap.image_id, &r)) {
-            printf("Write: saved image %u (%s, %u block(s), %lld ms)\n", snap.image_id,
-                   r.storage_format == IMG_STORE_DEFLATE ? "compressed" : "raw", r.block_count,
-                   (esp_timer_get_time() - t0) / 1000);
-        } else {
-            disk_snapshot_failed(&snap);
-        }
+        err = ESP_ERR_NOT_SUPPORTED;
+        disk_snapshot_failed(&snap);
     }
     saving = false;
     portENTER_CRITICAL(&st_lock);
@@ -355,8 +309,8 @@ static esp_err_t save_now(void)
     portEXIT_CRITICAL(&st_lock);
     if (err != ESP_OK) {
         char msg[96];
-        snprintf(msg, sizeof(msg), "%s", err == ESP_ERR_NO_MEM ? "not enough free storage"
-                 : err == ESP_ERR_NOT_FOUND ? "image not found" : esp_err_to_name(err));
+        snprintf(msg, sizeof(msg), "%s", err == ESP_ERR_NOT_SUPPORTED ? "saving not available"
+                 : esp_err_to_name(err));
         portENTER_CRITICAL(&st_lock);
         memcpy(status.error, msg, sizeof(status.error));
         portEXIT_CRITICAL(&st_lock);

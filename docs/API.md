@@ -2,7 +2,7 @@
 
 RadioFloppy is a WiFi floppy drive emulator for the Atari ST. It replaces a
 real floppy drive (here: external drive **B:**) and plays `.ST` disk images
-to the Atari. This API lets you put disk images on the device and choose
+to the Atari. This API lets you put disk images on its SD card and choose
 which one the Atari sees — from a script, a web page or any HTTP client.
 
 - [Web interface](#web-interface)
@@ -22,33 +22,34 @@ which one the Atari sees — from a script, a web page or any HTTP client.
 Open `http://<device>/` in a browser (PC or phone). The page is served by
 the device itself, uses only this API and needs no internet access:
 
-- **Current Floppy** — the disk the Atari sees now, its origin (my floppy
-  images or temporary PSRAM image) and a warning when that image was
-  replaced or deleted since.
-- **Add a floppy** — upload a `.ST` file: temporarily (PSRAM), or add it to
-  my floppy images (loaded at once unless unticked).
+- **Current Floppy** — the disk the Atari sees now, its origin (the SD
+  card, its copy in the flash, or a temporary PSRAM image) and a warning
+  when its file was replaced or deleted since.
+- **Load a floppy temporarily** — upload a `.ST` file straight into the
+  drive (PSRAM, not stored).
 - **New disk** — a name and *Create*: an empty, formatted 720 KiB Atari
-  disk in my floppy images, read-write (only when the computer is set to
-  Atari 16-bit).
-- **My floppy images** — all stored images in their order (`sequence`),
-  each with **↑ ↓** (change the order), **Load**, **Replace…** (asks before
-  the old image is lost) and **Delete**; above the list the storage use,
-  e.g. *Storage: 61% used*.
+  disk as a file in the folder that is open in the SD card block (only
+  when the computer is set to Atari 16-bit).
+- **SD card** — your floppy images: the files below the root directory,
+  with a breadcrumb, folders first, then the files with their size;
+  **Insert** (.ST and .HFE), **Upload here…** (one or more files),
+  **New folder** and a delete button per file and folder.
 - **Admin access** — only shown when the device has a token; it is kept only in the open page.
-- **Settings** (gear icon, top right, `/#settings`) — connected computer, host name, floppy drive (A:/B:), buzzer on/off, compression, WiFi status,
+- **Settings** (gear icon, top right, `/#settings`) — connected computer, host name, floppy drive (A:/B:), buzzer on/off, front panel LEDs, SD card root directory, WiFi status,
   firmware version and a *Check for updates* button (not functional yet).
 
-The page polls `GET /current` every 3 s and `GET /images` every 15 s (and
-after changes), one request at a time, and pauses while it uploads or loads.
-Source: `web/index.html`, embedded in the firmware.
+The page polls `GET /current` every 3 s and the SD card folder every 15 s
+(and after changes), one request at a time, and pauses while it uploads
+or loads. Source: `web/index.html`, embedded in the firmware.
 
 ## Front panel buttons
 
-**Left** = previous disk, **right** = next disk, wrapping around. The list
-is: the PSRAM image (if there is one), then every valid image in
-`sequence` order. A press gives a click on the buzzer; the switch takes
-about 0.4 s (360 KB) to 0.9 s (880 KB) and follows the same rules as
-`PUT /current`.
+**Left** = previous disk, **right** = next disk: the image files (.ST and
+.HFE) of the folder of the disk inserted last (through the web page or
+the API), in the order the web page shows them (case-insensitive, numbers
+by value). At the first file the left button does nothing, at the last
+one the right button. A press gives a click on the buzzer; the switch
+follows the same rules as `PUT /current`.
 
 Both buttons held **3 s**: the display shows the host name and IP address
 for 10 s. Held on to **10 s**: RadioFloppy restarts in
@@ -58,12 +59,16 @@ leave it without changes.
 ## Quick start
 
 ```sh
-DEV=192.168.178.62            # the device address (see "Device configuration")
+DEV=192.168.178.35            # the device address (see "Device configuration")
 # What is the device doing?
 curl -s http://$DEV/api/v1/status
 
-# Which images are stored, and how full is the storage?
-curl -s http://$DEV/api/v1/images
+# Which images are on the SD card (root directory)?
+curl -s http://$DEV/api/v1/sd/files
+
+# Insert one of them
+curl -s -X PUT -H "Content-Type: application/json" \
+     -d '{"sd_path":"Bolo (1987)(Application Systems Heidelberg)(de-en).st"}' http://$DEV/api/v1/current
 
 # Put a game on the drive right now (temporary, not stored)
 F="Crystal Castles.st"
@@ -93,30 +98,24 @@ new version path.
 At any moment the drive holds at most one disk: the **active disk**. It is
 what the Atari reads from drive B:. It can come from
 
-- **my floppy images** — the images stored on RadioFloppy, or
-- **PSRAM** — one temporary image that is lost when the device restarts.
+- **the SD card** — a `.ST` or `.HFE` file below the root directory, or
+- **PSRAM** — one temporary `.ST` image that is lost when the device restarts.
 
-`GET /api/v1/current` tells you which one it is. After a restart the device
-inserts the library image that was active last (else the one named
-*Crystal Castles*, else the first valid image in `sequence` order); a PSRAM
-image is gone. A stored image is always
-read completely into PSRAM and prepared before the Atari sees it.
+`GET /api/v1/current` tells you which one it is. A disk from the SD card
+is remembered: after a restart it is read from the card again. A few
+seconds after inserting it, RadioFloppy also keeps a **copy in the
+flash**; when the card is missing or cannot be read at start-up, the disk
+is played from that copy. A PSRAM image is gone after a restart. A disk is
+always prepared completely in PSRAM before the Atari sees it.
 
-### My floppy images
+### My floppy images: the SD card
 
-Stored images are managed as **images**, never as storage places:
-
-| Field      | Meaning                                                                    |
-| ---------- | -------------------------------------------------------------------------- |
-| `id`       | Fixed number of the image (1–65535). Does not change when the order changes or the image is replaced; not reused while the image exists. |
-| `sequence` | Position in lists (1 = first). Changing it never moves image data.         |
-| `status`   | `valid`, or `incomplete`: replacing it failed or was interrupted — it holds no data; replace or delete it. |
-
-The flash is divided into equal blocks (64 KiB on a 16 MiB chip, larger on
-bigger chips; see `docs/FLASH_LAYOUT.md`); an image occupies as many blocks
-as it needs, anywhere on the flash. Clients never see or choose blocks; the
-storage use is reported as a percentage of all blocks (`used_percent`),
-plus the exact numbers.
+Your images are plain files on the SD card, below the **root directory**
+(setting `root_dir`, e.g. `My Floppies`), in any folders you like. You
+can fill the card on a PC as well, or through the API (see
+[SD card files](#sd-card-files)). The flash of RadioFloppy holds no
+images; only the settings and the copy of the last disk
+(`docs/FLASH_LAYOUT.md`).
 
 ### Supported images
 
@@ -127,7 +126,7 @@ Raw `.ST` images (sector dumps without header) with
 | Cylinders         | 79–84 (with 79, track 79 reads as unformatted) |
 | Sectors per track | 9, 10 or 11 (512 bytes)                        |
 | Sides             | 1 or 2                                         |
-| File size         | up to 946 176 bytes (84/2/11); the storage limit is 1.5 MiB |
+| File size         | up to 946 176 bytes (84/2/11)                  |
 
 Examples: 360 KiB (80/1/9), 400 KiB (80/1/10), 410 KiB (82/1/10, e.g.
 Nebulus), 440 KiB (80/1/11), 720 KiB (80/2/9), 800 KiB (80/2/10), 820 KiB
@@ -140,35 +139,28 @@ shorter than their file system — the missing tracks then read as
 unformatted, as they would from the real disk. Other geometries (8 sectors, 40 or 70
 cylinders, HD with 18 sectors, …) are recognised but not supported
 (`UNSUPPORTED_GEOMETRY`); anything above 1.5 MiB (1 572 864 bytes) is
-refused as `IMAGE_TOO_LARGE`. `.MSA` is not supported. The Atari may
-write to an image set to `READ_WRITE` (see *Writing*); otherwise the drive
-reports the disk as write-protected.
+refused as `IMAGE_TOO_LARGE`. `.MSA` is not supported. For now every disk
+is **write-protected** for the Atari (see [Writing](#writing)).
 
-HFE (HxC Floppy Emulator) files are uploaded with the `.hfe` extension,
-only to the library (`"destination": "flash"`; the temporary PSRAM disk is
-for `.ST` only). They are never whole in the device's memory: while the
-file arrives it is checked, CRC-summed and compressed straight into free
-storage blocks; afterwards the stored data is decompressed and checked
-again (HFE format, length and CRC-32). Only then does the image appear;
-an interrupted or refused upload leaves nothing behind. Checked are: HFEv1
-and HFEv3 by their header; ISO MFM, 250 kbit/s, 1 or 2 sides, at most 84
-cylinders, single step; the track table before the track data and the
-tracks in ascending order (as HxC tools write them; other layouts are
-refused with `UNSUPPORTED_FORMAT`); and that the decoded tracks fit the
-drive's track buffer (else `IMAGE_TOO_LARGE`), so every stored HFE image
-can be inserted. A file that is wrong from the start (e.g. HFEv2,
-"HXCPICFE" revision 1: convert it to HFEv1 or HFEv3) is refused as soon
-as its header has arrived; the rest of the data is still received but
-ignored. An HFE file may be up to 3 MiB; compressed it must fit in the
-blocks of one image (1.5 MiB), else `IMAGE_TOO_LARGE`. HFE images are
-always READ_ONLY.
+**HFE** (HxC Floppy Emulator) files (`.hfe`) are played from the SD card;
+they cannot be loaded temporarily. An upload to the card is checked as it
+arrives: HFEv1 and HFEv3 by their header; ISO MFM, 250 kbit/s, 1 or 2
+sides, at most 84 cylinders, single step; the track table before the
+track data and the tracks in ascending order (as HxC tools write them;
+other layouts are refused with `UNSUPPORTED_FORMAT`); and that the decoded
+tracks fit the drive's track buffer (else `IMAGE_TOO_LARGE`), so every
+HFE file on the card that came through the API can be inserted. HFEv2
+("HXCPICFE" revision 1) is refused: convert it to HFEv1 or HFEv3. An HFE
+file on the card may be up to 8 MiB (the track buffer decides); its copy
+in the flash only up to 3 MiB. Inserting reads the file straight into the
+track buffer (a 2 MB file takes about 5 s).
 
 HFE images are played in their own timing: every track at its own cell
 times, with the index pulse on the real start of the revolution. HFEv3
 timing changes (`BITRATE`) are played; files made from flux dumps, with
 thousands of tiny speed changes per track, are smoothed into zones that
 keep the exact duration of every revolution. Weak bits (`RAND`) are
-stored but not yet played as random data.
+not yet played as random data.
 
 The track layout follows FlashFloppy: GAP3 84 (9 sectors), 30 (10
 sectors) or 3 with interleave 2 (11 sectors). An 11-sector track is
@@ -213,26 +205,19 @@ web page asks for the token.
 
 | Method and path                 | Token | Purpose (token only if one is configured)   |
 | ------------------------------- | ----- | ------------------------------------------- |
-| `GET /api/v1/status`            |       | Device, WiFi, storage and drive status      |
-| `GET /api/v1/images`            |       | All images in `sequence` order + storage use |
-| `POST /api/v1/images`           | (yes) | Create a new, empty, formatted disk         |
-| `GET /api/v1/images/{id}`       |       | One image                                   |
-| `GET /api/v1/images/{id}/data`  |       | Download the image file (uncompressed)      |
-| `PUT /api/v1/images/{id}`       | (yes) | Change the position (`sequence`)            |
-| `DELETE /api/v1/images/{id}`    | (yes) | Delete an image                             |
-| `GET /api/v1/storage`           |       | Storage use and geometry                    |
-| `POST /api/v1/storage/format`   | (yes) | Initialise the storage (erases all images)  |
+| `GET /api/v1/status`            |       | Device, WiFi, SD card and drive status      |
 | `GET /api/v1/current`           |       | The active disk                             |
-| `PUT /api/v1/current`           | (yes) | Make a stored image the active disk         |
-| `POST /api/v1/uploads`          | (yes) | Start an upload (new, replacement or PSRAM) |
+| `PUT /api/v1/current`           | (yes) | Insert a file from the SD card              |
+| `POST /api/v1/uploads`          | (yes) | Start an upload (PSRAM or SD card)          |
 | `PUT /api/v1/uploads/{id}/data` | (yes) | Send the image bytes of an upload           |
 | `GET /api/v1/uploads/{id}`      |       | State of an upload                          |
 | `GET /api/v1/sd/files?path=`    |       | Contents of a folder on the SD card         |
 | `DELETE /api/v1/sd/files?path=` | (yes) | Delete a file on the SD card                |
 | `POST /api/v1/sd/folders`       | (yes) | Create a folder on the SD card              |
 | `DELETE /api/v1/sd/folders?path=` | (yes) | Delete a folder (with contents: confirm)  |
+| `POST /api/v1/sd/disks`         | (yes) | Create a new, empty, formatted disk file    |
 | `GET /api/v1/settings`          |       | Device settings, WiFi and firmware          |
-| `PUT /api/v1/settings`          | (yes) | Change settings (host name)                 |
+| `PUT /api/v1/settings`          | (yes) | Change settings                             |
 | `POST /api/v1/system/restart`   | (yes) | Restart the device                          |
 | `GET /api/v1/system/update`     |       | Check for firmware updates (placeholder)    |
 
@@ -249,10 +234,11 @@ Overall state of the device.
   "firmware": "1.0.0",
   "hostname": "RadioFloppy",
   "wifi": { "connected": true, "ssid": "MyNetwork", "ip": "192.168.178.62", "rssi": -38 },
-  "storage": { "state": "valid", "used_percent": 26, "...": "as GET /storage" },
+  "sd": { "present": true, "size_mb": 29818, "root_exists": true },
   "machine": { "id": "ATARI", "name": "Atari 16-bit", "supported": true },
   "drive": { "select_line": "DS1", "armed": true, "selected": false, "motor": false, "cylinder": 0 },
-  "current": { "inserted": true, "source": "flash", "image_id": 1, "image_changed_since": false,
+  "current": { "inserted": true, "source": "sd", "sd_path": "C/Crystal Castles.st",
+               "sd_copy": false, "image_changed_since": false,
                "name": "Crystal Castles", "size": 368640, "crc32": "42ce7eed", "sides": 1 },
   "psram_free": 3928064,
   "auth_required": false,
@@ -264,7 +250,7 @@ Overall state of the device.
 | Field                       | Meaning                                                           |
 | --------------------------- | ----------------------------------------------------------------- |
 | `wifi.rssi`                 | Signal strength in dBm                                            |
-| `storage`                   | Same object as [`GET /storage`](#get-apiv1storage)                |
+| `sd`                        | `present` (a card is mounted), with a card `size_mb` and `root_exists` (the root directory is there) |
 | `machine`                   | Machine profile in use; `supported: false` = floppy emulation off  |
 | `drive.select_line`         | Which drive-select line the emulator answers to (`DS1` = drive B:) |
 | `drive.armed`               | The emulator has seen the Atari powered on and answers to it      |
@@ -274,170 +260,8 @@ Overall state of the device.
 | `current`                   | Same object as [`GET /current`](#get-apiv1current)                |
 | `psram_free`                | Free PSRAM in bytes                                               |
 | `auth_required`             | A token is configured: changing calls need it                     |
-| `psram_image`               | The kept PSRAM image, if any (selectable with the buttons)        |
+| `psram_image`               | The kept temporary PSRAM image, if any                            |
 | `upload`                    | The latest upload, if any (same object as [`GET /uploads/{id}`](#get-apiv1uploadsid)) |
-
----
-
-### `GET /api/v1/images`
-
-All images in `sequence` order, and the storage use.
-
-```json
-{
-  "images": [
-    { "id": 6, "sequence": 1, "status": "valid", "name": "Weird Dreams", "format": "st",
-      "size": 839680, "stored_size": 839680, "storage_format": "raw", "crc32": "342b844d",
-      "blocks_used": 13, "access": "READ_ONLY", "write_supported": true, "active": true },
-    { "id": 3, "sequence": 2, "status": "incomplete", "name": "Leisure Suit Larry", "active": false }
-  ],
-  "storage": { "state": "valid", "used_percent": 26, "...": "as GET /storage" }
-}
-```
-
-| Field            | Meaning                                                             |
-| ---------------- | ------------------------------------------------------------------- |
-| `id`, `sequence`, `status` | See [My floppy images](#my-floppy-images)                 |
-| `name`           | Title (from the file name when it was uploaded)                     |
-| `size`           | Image size in bytes (only `valid`)                                  |
-| `stored_size`, `storage_format` | Bytes as stored and how: `raw` (= `size`) or `deflate` (compressed) |
-| `crc32`          | CRC-32 of the image as 8 hex digits (same as `zlib.crc32`, `crc32` command) |
-| `blocks_used`    | Number of storage blocks it occupies                                |
-| `access`         | `READ_ONLY` (default for every upload) or `READ_WRITE` — see below  |
-| `write_supported` | The image format may be set to `READ_WRITE` (only ST for now)      |
-| `active`         | This image is the active disk (and has not been replaced since it was activated) |
-
-`GET /api/v1/images/{id}` returns one such object (`404 IMAGE_NOT_FOUND`
-if there is none).
-
----
-
-### `POST /api/v1/images`
-
-Create a new, empty, formatted disk in my floppy images. Token required.
-
-```json
-{ "name": "Save games" }
-```
-
-- `name`: 1–52 printable ASCII characters (spaces around it are removed),
-  else `400 INVALID_NAME`. Becomes the title of the image.
-- The disk follows the **configured** computer (`machine` in the
-  settings). **Atari 16-bit** (the only one for now): always `.ST`,
-  720 KiB = 737 280 bytes, 80 tracks × 2 sides × 9 sectors × 512 bytes,
-  formatted as TOS does it (boot sector with BPB, not executable, random
-  serial number; two empty FATs; empty root directory for 112 entries;
-  711 free clusters of 1 KiB). Other computers: `409 MACHINE_NOT_SUPPORTED`,
-  nothing is created.
-- A new disk is **`READ_WRITE`** (uploads are `READ_ONLY`); writing itself
-  is not supported yet, see `PUT /images/{id}`.
-- It is stored like an upload (12 blocks of 64 KiB, verified) and appears
-  at the end of the list.
-
-Response `201`: the image object. Other errors: `409 UPLOAD_BUSY`,
-`503 STORAGE_NOT_READY`, `507 NO_SPACE`, `507 INSUFFICIENT_MEMORY`.
-
-### `PUT /api/v1/images/{id}`
-
-Change the order and/or the write setting. Token required. No image data
-is read or written.
-
-```json
-{ "sequence": 1, "access": "READ_WRITE" }
-```
-
-- `sequence`: move the image to this position (1 = first; larger than the
-  number of images = last); all images are renumbered 1…n.
-- `access`: `"READ_ONLY"` or `"READ_WRITE"`. Stored in the catalog, kept
-  after a restart. Only formats that can be written (ST for now; checked
-  on the recognised format, not the file name) accept `READ_WRITE`, else
-  `422 FORMAT_NOT_WRITABLE`. Uploads — also replacements — are always
-  `READ_ONLY`; disks created on the device (planned) will start as
-  `READ_WRITE`.
-
-**Writing:** a `READ_WRITE` .ST image is presented writable (WPROT
-released) when all of this holds: the computer is set to Atari 16-bit,
-the image comes from the library (not a temporary PSRAM image), its
-sectors could be kept in memory, the storage is usable, at least as many
-blocks are free as the image has (so every save fits), and no save failed.
-Otherwise the disk stays write-protected; `GET /current` → `write.reason`
-says why. See [Writing](#writing).
-
-Response `200`: the image object. Errors: `400 INVALID_REQUEST` (neither
-field, `sequence` < 1, or another `access` value), `404 IMAGE_NOT_FOUND`
-(also for an incomplete image), `422 FORMAT_NOT_WRITABLE`,
-`503 STORAGE_NOT_READY`.
-
----
-
-### `GET /api/v1/images/{id}/data`
-
-The image file itself, as uploaded or as the computer wrote it — always
-uncompressed, also when it is stored compressed (the CRC-32 is checked
-before sending). `Content-Type: application/octet-stream`,
-`Content-Disposition: attachment` with the title as file name and the
-format's extension (`.st`, `.hfe`).
-
-| Error                       | When                                                          |
-| --------------------------- | ------------------------------------------------------------- |
-| `404 IMAGE_NOT_FOUND`       | No valid image with this id                                   |
-| `409 UNSAVED_CHANGES`       | The active disk has writes that are not saved yet; try again once they are (a few seconds after the drive motor stops) |
-| `500 FLASH_ERROR`           | Reading or checking the stored image failed                   |
-| `507 INSUFFICIENT_MEMORY`   | No PSRAM for the image                                        |
-
----
-
-### `DELETE /api/v1/images/{id}`
-
-Delete an image. Token required. Its blocks are free at once (erased only
-when they are reused). If it is the active disk, the drive keeps playing it
-until another disk is activated.
-
-Response `200`:
-
-```json
-{ "id": 2, "status": "deleted", "storage": { "...": "as GET /storage" } }
-```
-
-| Error                   | When                                          |
-| ----------------------- | --------------------------------------------- |
-| `404 IMAGE_NOT_FOUND`   | No image with this id                         |
-| `409 UPLOAD_BUSY`       | An upload replacing this image is in progress |
-| `503 STORAGE_NOT_READY` | The storage is not usable                     |
-
----
-
-### `GET /api/v1/storage`
-
-```json
-{ "state": "valid", "flash_detected": true, "jedec_id": "016018", "capacity": 16777216,
-  "block_size": 65536, "blocks_total": 255, "blocks_used": 67, "blocks_free": 188,
-  "used_percent": 26, "images": 6, "max_image_size": 1572864, "free_bytes": 12320768 }
-```
-
-| Field              | Meaning                                                        |
-| ------------------ | -------------------------------------------------------------- |
-| `state`            | `valid`; `old_format` (an earlier RadioFloppy format — initialise it); `invalid` (unknown data or a different flash size — not touched); `no_flash` |
-| `capacity`         | Detected flash size in bytes                                   |
-| `block_size`       | Storage block size (64 KiB for 16 MiB, 128 KiB for 32 MiB, …)  |
-| `blocks_total`, `blocks_used`, `blocks_free` | Data blocks (at most 255)            |
-| `used_percent`     | `blocks_used / blocks_total`, rounded                          |
-| `images`           | Number of valid images                                         |
-| `free_bytes`       | `blocks_free × block_size`                                     |
-
-### `POST /api/v1/storage/format`
-
-Initialise the storage: **every stored image is lost**. Needed once when the
-flash still holds an older RadioFloppy format (`state: "old_format"`); a
-completely erased flash is initialised automatically. Token required.
-
-```json
-{ "confirm": "ERASE ALL IMAGES" }
-```
-
-Response `200`: the storage object. Without the exact confirmation:
-`400 CONFIRMATION_REQUIRED`. The disk in the drive stays loaded until
-another disk is activated or the device restarts.
 
 ---
 
@@ -446,65 +270,62 @@ another disk is activated or the device restarts.
 The active disk.
 
 ```json
-{ "inserted": true, "source": "flash", "image_id": 2, "image_changed_since": false,
-  "name": "Nebulus", "size": 419840, "crc32": "40881c6a", "sides": 1,
-  "cylinders": 82, "sectors": 10 }
+{ "inserted": true, "source": "sd", "sd_path": "N/Nebulus.st", "sd_copy": false,
+  "image_changed_since": false, "name": "Nebulus", "size": 419840, "crc32": "40881c6a",
+  "sides": 1, "cylinders": 82, "sectors": 10,
+  "write": { "state": "read_only", "writable": false, "reason": "...", "...": "..." } }
 ```
 
 | Field                 | Meaning                                                          |
 | --------------------- | ---------------------------------------------------------------- |
 | `inserted`            | `false`: no disk in the drive (then only `source: "none"`)       |
-| `source`              | `flash` (my floppy images), `psram`, `sd` (a file on the SD card) or `none` |
+| `source`              | `sd` (a file on the SD card), `psram` (temporary) or `none`      |
 | `sd_path`             | Only for `sd`: the file, relative to the root directory           |
 | `sd_copy`             | Only for `sd`: `true` when it was read from its copy in the flash (the card was not available at start-up) |
-| `image_id`            | Only for `flash`: the image it was loaded from                   |
-| `image_changed_since` | For `flash` and `sd`: that image (file) was replaced or deleted since; the drive still plays the disk as it was when activated |
-| `name`, `size`, `crc32` | The disk image                                                 |
-| `sides`, `cylinders`, `sectors` | Geometry: 1 or 2 sides, 79–84 cylinders, 9–11 sectors per track |
+| `image_changed_since` | Only for `sd`: the file was replaced or deleted since; the drive still plays the disk as it was when inserted |
+| `name`, `size`, `crc32` | The disk image (`name`: the file name without extension)      |
+| `sides`, `cylinders`, `sectors` | Geometry of an .ST image: 1 or 2 sides, 79–84 cylinders, 9–11 sectors per track |
 | `write`               | Write state of the inserted disk, see [Writing](#writing)        |
 
 ---
 
 ### `PUT /api/v1/current`
 
-Make a stored image the active disk. Token required.
-
-```json
-{ "image_id": 5 }
-```
-
-or a file on the SD card (relative to the root directory, see
-[SD card files](#sd-card-files)):
+Insert a file from the SD card (relative to the root directory, see
+[SD card files](#sd-card-files)). Token required.
 
 ```json
 { "sd_path": "Bolo (1987)(Application Systems Heidelberg)(de-en).st" }
 ```
 
-From the SD card only `.ST` images for now, and always write-protected.
-The disk is remembered like a library image: after a restart it is read
-from the card again. A few seconds after inserting it, RadioFloppy also
-keeps a **copy in the flash** (hidden: not listed or counted as an
-image; its blocks do count in the storage use; only one such copy,
-replaced by the next disk from the card; none when there is no room).
-When the card is missing or cannot be read at start-up, the disk is
-played from that copy (`sd_copy: true`); when the card is there but the
-file is gone, the start-up falls back to the library instead.
+`.ST` and `.HFE` files can be inserted; every disk is write-protected for
+now. The disk is remembered: after a restart it is read from the card
+again. About 5 s after the last disk change RadioFloppy also keeps a
+**copy in the flash** (one copy, of the last disk only; up to 3 MiB;
+written only when it differs from the copy already there). When the card
+is missing or cannot be read at start-up, the disk is played from that
+copy (`sd_copy: true`); when the card is there but the file is gone, the
+drive starts empty.
 
-Response `200`: the new [`current`](#get-apiv1current) object. Takes about
-0.4–0.9 s (the image is read through its blocks, its CRC checked, the
-tracks prepared).
+The folder of the file becomes the folder of the
+[front panel buttons](#front-panel-buttons).
+
+Response `200`: the new [`current`](#get-apiv1current) object. An .ST
+image is read and checked at once; an HFE file is decoded into the track
+buffer while it is read (a 2 MB file takes about 5 s).
 
 | Error                  | When                                             |
 | ---------------------- | ------------------------------------------------ |
-| `400 INVALID_REQUEST`  | neither `image_id` (1–65535) nor `sd_path`       |
+| `400 INVALID_REQUEST`  | no `sd_path`                                     |
 | `400 INVALID_PATH`     | `sd_path` breaks the path rules                  |
 | `404 FILE_NOT_FOUND`   | No such file on the SD card                      |
-| `422 UNSUPPORTED_FORMAT` | `sd_path` is not an `.ST` file (HFE from the card comes later) |
-| `422 INVALID_IMAGE` / `UNSUPPORTED_GEOMETRY` | The file is not a usable .ST image |
-| `503 SD_NOT_PRESENT`   | No SD card                                        |
-| `404 IMAGE_NOT_FOUND`  | No valid image with this id                      |
+| `422 UNSUPPORTED_FORMAT` | Not an `.ST` or `.HFE` file                    |
+| `422 INVALID_IMAGE` / `UNSUPPORTED_GEOMETRY` | The file is not a usable image |
+| `503 SD_NOT_PRESENT`   | No SD card                                       |
 | `409 DRIVE_BUSY`       | The Atari kept writing to drive B:; nothing changed |
-| `500 FLASH_ERROR`      | The stored image could not be read or its CRC is wrong |
+| `409 MACHINE_NOT_SUPPORTED` | Floppy emulation is off for this computer   |
+| `500 SD_ERROR`         | The card could not be read                       |
+| `507 INSUFFICIENT_MEMORY` | No memory to prepare the tracks              |
 
 ---
 
@@ -516,36 +337,35 @@ Request fields:
 
 | Field         | Type    | Required | Meaning                                                   |
 | ------------- | ------- | -------- | --------------------------------------------------------- |
-| `filename`    | string  | yes      | Original file name; becomes the title (TOSEC tags removed, max. 52 characters). Only used as a name. |
+| `filename`    | string  | yes      | Original file name. `psram`: becomes the title (TOSEC tags removed, max. 52 characters). `sd`: the file name on the card. |
 | `size`        | number  | yes      | Exact size of the file in bytes                           |
-| `destination` | string  | yes      | `"psram"` (temporary), `"flash"` (my floppy images) or `"sd"` (a file on the SD card, see [SD card files](#sd-card-files)) |
-| `replace`     | number  | no       | Only with `"flash"`: id of the image to **replace** (keeps its id and position). Leave out to add a new image at the end. |
-| `activate`    | boolean | no       | `"flash"`: make it the active disk afterwards (default `false`). `"psram"`: always activated; `false` is refused. |
+| `destination` | string  | yes      | `"psram"` (play now, temporary) or `"sd"` (a file on the SD card, see [SD card files](#sd-card-files)) |
+| `activate`    | boolean | no       | `"psram"`: always activated, `false` is refused. `"sd"`: must be `false` (insert the file with `PUT /current` afterwards). |
 | `crc32`       | string  | no       | CRC-32 of the file as hex, e.g. `"42ce7eed"`. If given, the received data must match. |
+
+A PSRAM upload takes `.ST` images only (`422 UNSUPPORTED_FORMAT` for
+`.hfe`: put an HFE file on the SD card instead).
 
 Response `201 Created`: an [upload object](#get-apiv1uploadsid) in state
 `ready`, with the `upload_url` to send the data to:
 
 ```json
 { "upload_id": "26", "state": "ready", "name": "Crystal Castles", "size": 368640,
-  "received": 0, "destination": "flash", "activate": false,
+  "received": 0, "destination": "psram", "activate": true,
   "upload_url": "/api/v1/uploads/26/data" }
 ```
 
-The size, geometry, image to replace and free space are checked here
-already, so a client learns about most problems before sending any data.
-When replacing, the blocks of the old image count as free.
+The size and geometry are checked here already, so a client learns about
+most problems before sending any data.
 
 | Error                        | When                                               |
 | ---------------------------- | -------------------------------------------------- |
-| `400 INVALID_REQUEST`        | Missing/wrong fields, `psram` with `activate: false`, `replace` with `psram` |
-| `404 IMAGE_NOT_FOUND`        | `replace` names no image                           |
+| `400 INVALID_REQUEST`        | Missing/wrong fields, `psram` with `activate: false`, `sd` with `activate: true` |
 | `409 UPLOAD_BUSY`            | Another upload is still in progress                |
-| `413 IMAGE_TOO_LARGE`        | `size` above 1 572 864 bytes (1.5 MiB)             |
+| `413 IMAGE_TOO_LARGE`        | `size` above the limit                             |
 | `422 INVALID_IMAGE`          | `size` cannot be a floppy image                    |
 | `422 UNSUPPORTED_GEOMETRY`   | `size` is a `.ST` geometry that is not supported   |
-| `503 STORAGE_NOT_READY`      | `flash`, but the storage is not usable             |
-| `507 NO_SPACE`               | Not enough free blocks                             |
+| `422 UNSUPPORTED_FORMAT`     | Not a supported file type for this destination     |
 | `507 INSUFFICIENT_MEMORY`    | Not enough memory for the upload                   |
 
 ---
@@ -556,14 +376,14 @@ Send the image bytes. Token required. Body: the complete file, nothing
 else; `Content-Type: application/octet-stream`; `Content-Length` must equal
 the announced `size`. Data can be sent only once per upload.
 
-The request returns when everything is finished — received, checked, stored
-and/or activated — typically 3–7 seconds. The response is the final
-[upload object](#get-apiv1uploadsid):
+The request returns when everything is finished — received, checked,
+stored and/or activated — typically a few seconds. The response is the
+final [upload object](#get-apiv1uploadsid):
 
 ```json
 { "upload_id": "26", "state": "done", "name": "Crystal Castles", "size": 368640,
-  "received": 368640, "destination": "flash", "activate": false,
-  "crc32": "42ce7eed", "image_id": 7, "active": false }
+  "received": 368640, "destination": "psram", "activate": true,
+  "crc32": "42ce7eed", "active": true }
 ```
 
 On failure the HTTP status matches the error, and the upload object has
@@ -571,7 +391,7 @@ On failure the HTTP status matches the error, and the upload object has
 
 ```json
 { "upload_id": "27", "state": "failed", "name": "Crystal Castles", "size": 368640,
-  "received": 100000, "destination": "flash", "activate": false,
+  "received": 100000, "destination": "psram", "activate": true,
   "error": { "code": "UPLOAD_INCOMPLETE", "message": "received 100000 of 368640 bytes" } }
 ```
 
@@ -580,13 +400,12 @@ On failure the HTTP status matches the error, and the upload object has
 | `400 UPLOAD_INCOMPLETE`    | `Content-Length` ≠ `size`, or the connection dropped        |
 | `404 UPLOAD_NOT_FOUND`     | Unknown or superseded upload id                             |
 | `409 UPLOAD_STATE`         | Data was already sent for this upload                       |
-| `409 DRIVE_BUSY`           | Stored (if `flash`) but not activated — see below           |
-| `422 INVALID_IMAGE` / `UNSUPPORTED_GEOMETRY` | The content is not a supported `.ST` image |
+| `409 DRIVE_BUSY`           | `psram`: not activated, nothing kept — see below            |
+| `422 INVALID_IMAGE` / `UNSUPPORTED_GEOMETRY` | The content is not a supported image      |
 | `422 CHECKSUM_MISMATCH`    | Data does not match the given `crc32`                       |
 | `422 UNSUPPORTED_FORMAT`   | A recognised but unplayable format (e.g. HFEv2)             |
-| `500 FLASH_ERROR`          | Writing or verifying failed (nothing stored; when replacing, the old image is lost) |
+| `500 SD_ERROR`             | `sd`: writing or reading back the file failed (nothing left behind) |
 | `500 PREPARE_FAILED`       | The disk could not be prepared for the drive                |
-| `507 NO_SPACE`             | Not enough free blocks any more                             |
 | `507 INSUFFICIENT_MEMORY`  | Not enough memory                                           |
 
 ---
@@ -602,22 +421,20 @@ State of an upload. Only the most recent upload is kept; older ids give
 | `state`          | always             | `ready`, `receiving`, `processing`, `done`, `failed` |
 | `name`           | always             | Title derived from `filename`                   |
 | `size`, `received` | always           | Announced and received byte count               |
-| `destination`    | always             | `psram`, `flash` or `sd`                        |
+| `destination`    | always             | `psram` or `sd`                                 |
 | `path`, `file`   | `sd`               | Folder (below the root directory) and file name |
-| `replace`        | when replacing     | The image being replaced                        |
 | `activate`       | always             | Whether it will be / was activated              |
 | `upload_url`     | state `ready`      | Where to `PUT` the data                         |
 | `crc32`          | state `done`       | CRC-32 of the received image                    |
-| `image_id`       | stored             | The stored image (also on `DRIVE_BUSY`)         |
 | `active`         | state `done`       | It is now the active disk                       |
 | `error`          | state `failed`     | `{ "code": ..., "message": ... }`               |
 
 ### SD card files
 
-The SD card (board revision 2) holds images as plain files below the
-**root directory** (setting `root_dir`, e.g. `My Floppies`). Every path in
-these calls is **relative to that root directory**: `""` is the root
-directory itself, `L` a folder in it, `L/Larry.st` a file in that folder.
+The SD card holds the images as plain files below the **root directory**
+(setting `root_dir`, e.g. `My Floppies`). Every path in these calls is
+**relative to that root directory**: `""` is the root directory itself,
+`L` a folder in it, `L/Larry.st` a file in that folder.
 
 Paths are checked strictly and only ever used below the root directory:
 names separated by single `/`, at most 200 characters in all; a name is
@@ -650,7 +467,22 @@ is already there.
 root directory itself cannot be deleted.
 
 `DELETE /api/v1/sd/files?path=L/Larry.st` — deletes a file
-(`404 FILE_NOT_FOUND`).
+(`404 FILE_NOT_FOUND`). Deleting the file of the active disk does not
+take the disk out of the drive (`image_changed_since` becomes `true`).
+
+`POST /api/v1/sd/disks` `{"path": "L", "name": "Save games"}` — creates
+a new, empty, formatted disk as a file in folder `path` (default `""`).
+`.st` is added to `name` unless it ends with it. The disk follows the
+**configured** computer (`machine` in the settings). **Atari 16-bit**
+(the only one for now): 720 KiB = 737 280 bytes, 80 tracks × 2 sides ×
+9 sectors × 512 bytes, formatted as TOS does it (boot sector with BPB, not
+executable, random serial number; two empty FATs; empty root directory
+for 112 entries; 711 free clusters of 1 KiB). It is written like an
+upload (temporary file, read back, then renamed) and not inserted.
+Response `201 {"path": "L/Save games.st", "size": 737280}`. Errors:
+`422 INVALID_NAME`, `400 INVALID_PATH`, `404 FOLDER_NOT_FOUND`,
+`409 FILE_EXISTS`, `409 MACHINE_NOT_SUPPORTED`, `503 SD_NOT_PRESENT`,
+`500 SD_ERROR`, `507 INSUFFICIENT_MEMORY`.
 
 **Uploading to the SD card:** `POST /api/v1/uploads` with
 `"destination": "sd"`, then the data as usual:
@@ -661,17 +493,16 @@ root directory itself cannot be deleted.
 | `size`      | Exact size: a supported .ST size, or an HFE file of at most 8 MiB    |
 | `path`      | Folder below the root directory (default `""`); must exist (`404 FOLDER_NOT_FOUND`) |
 | `overwrite` | `true`: replace a file of that name (default `false`: `409 FILE_EXISTS`) |
-| `crc32`     | Optional, as for the other destinations                              |
-| `activate`  | Must be `false`: inserting from the SD card is not available yet     |
+| `crc32`     | Optional, as for PSRAM uploads                                       |
+| `activate`  | Must be `false`: insert the file with `PUT /current` afterwards      |
 
-Only images that can be played are stored: the same checks as for the
-library (.ST geometry, HFE format and track buffer fit; an HFE file named
-`.st` or the other way round is refused). The data is written straight to
-a hidden temporary file in the target folder while it arrives; after the
-checks it is read back and compared (CRC-32), and only then it gets its
-name (replacing an older file only with `overwrite`). An interrupted or
-refused upload leaves nothing behind. Images are stored as they are (not
-compressed).
+Only images that can be played are stored (.ST geometry, HFE format and
+track buffer fit; an HFE file named `.st` or the other way round is
+refused). The data is written straight to a hidden temporary file in the
+target folder while it arrives; after the checks it is read back and
+compared (CRC-32), and only then it gets its name (replacing an older file
+only with `overwrite`). An interrupted or refused upload leaves nothing
+behind.
 
 ---
 
@@ -683,11 +514,10 @@ compressed).
   "drive_select": "DS1",
   "drive_select_active": "DS1",
   "buzzer": true,
-  "compression": false,
   "leds": 1,
   "root_dir": "My Floppies",
   "sd": { "present": true, "size_mb": 29818, "root_exists": true },
-  "last_image_id": 6,
+  "last_sd_path": "C/Crystal Castles.st",
   "machine": "ATARI",
   "machine_active": "ATARI",
   "machine_supported": true,
@@ -722,16 +552,6 @@ Body (`Content-Type: application/json`), every field optional:
   is the line in use until then.
 - `buzzer`: `true`/`false` — clicks for head steps and button presses.
   Takes effect at once.
-- `compression`: `true`/`false` (default `false`) — images added from now
-  on (uploads, new disks) are always stored compressed (raw deflate), and
-  a writable disk is stored compressed each time its written sectors are
-  saved. Checked before storing: the compressed data is inflated and must
-  give the image's CRC, else it is stored uncompressed. Stored images are
-  not converted. Typical results: 18–45% for game disks with free space,
-  70–85% for full ones, a few KiB for a new empty disk; activating takes
-  about the same time (0.5–1 s). A compressed writable disk is saved as a
-  whole (compress, write all its blocks, one catalog update): a save takes
-  a few seconds instead of about one.
 - `leds`: `1` or `2` (default `1`) — how many LEDs are fitted on J4.
   The LED on J4 pin 3 always shows disk activity (on while the drive is
   selected and its motor runs). The WiFi status (blinking while
@@ -756,16 +576,15 @@ Body (`Content-Type: application/json`), every field optional:
   the profile in use until then. **Only `ATARI` is supported for now.** With
   another profile RadioFloppy starts without floppy emulation: no drive
   interrupts, no flux stream, all floppy outputs released; the web page,
-  the API, the image library and WiFi setup keep working, activating a disk
+  the API, the SD card and WiFi setup keep working, activating a disk
   gives `409 MACHINE_NOT_SUPPORTED`, and `GET /status` reports
   `"machine": {"supported": false}`. Choose `ATARI` again and restart to
   get the drive back.
 
-`last_image_id` (read only) is the library image that is loaded at the next
-start-up. It is stored 5 s after the last disk change (so stepping through
-disks with the buttons writes the flash once) and only when it changed; a
-temporary PSRAM image is not remembered. If that image no longer exists,
-the start-up falls back to *Crystal Castles*, else the first image.
+`last_sd_path` (read only) is the SD card file that is inserted at the
+next start-up (`""`: none). It is stored about 5 s after the last disk
+change (so stepping through disks with the buttons writes the flash once)
+and only when it changed; a temporary PSRAM image is not remembered.
 
 Answer: the settings as with `GET`. The WiFi network is changed in
 [WiFi setup mode](#wifi-setup-mode), not here.
@@ -786,60 +605,25 @@ Placeholder for online updates; always answers:
 
 ## Writing
 
-The Atari can write to a library `.ST` image set to `READ_WRITE` (for
-example a disk made with *New disk*). What happens:
-
-1. **Receive** — WDATA is sampled by an RMT receive channel with DMA
-   (0.1 µs); a write ends when WDATA stays quiet for 16 µs.
-2. **Decode** — MFM: three A1 syncs, data mark, 512 bytes, CRC. Only a
-   complete sector with a correct CRC is used; anything else is ignored
-   and counted in `writes_rejected` (the image is not touched). Formatting
-   a track from the Atari is not supported.
-3. **Which sector** — the WD1772 writes only the data field. RadioFloppy
-   takes the rotation position when WGATE is asserted (time since the
-   INDEX pulse) and the cylinder and side of that moment: the sector whose
-   ID field just passed.
-4. **Apply** — the sector is patched into the image kept in PSRAM and its
-   track is encoded again, so the next read returns the new data.
-5. **Save** — when the drive motor has been off for 2 s (one save per disk
-   operation; at the latest a minute after the last write) the changed 64 KiB blocks are
-   written **copy-on-write** to free blocks, read back, the whole image is
-   checked against its new CRC, and **one** catalog update switches all of
-   them. After a power cut the image on the flash is the previously saved
-   or the newly saved version, never a mix of both.
+**For now every disk is write-protected.** Writing will come back as
+"write to the copy in the flash, then to the file on the SD card". The
+parts that receive and decode what the Atari writes are in place
+(`main/disk_write.c`): WDATA is sampled by an RMT receive channel with DMA
+(0.1 µs), MFM sectors with a correct CRC are found, and the sector is the
+one whose ID field passed just before WGATE. Saving them is not.
 
 `GET /api/v1/current` → `write`:
 
 ```json
-{ "state": "pending", "writable": true, "reason": "", "unsaved": true,
-  "sectors_written": 14, "writes_rejected": 0, "saves": 3 }
+{ "state": "read_only", "writable": false,
+  "reason": "writing to the SD card is not available yet", "unsaved": false,
+  "sectors_written": 0, "writes_rejected": 0, "saves": 0 }
 ```
 
-| `state`     | Meaning                                                                    |
-| ----------- | -------------------------------------------------------------------------- |
-| `read_only` | Write-protected; `reason` says why (read-only image, not enough free storage, …) |
-| `writable`  | Writes accepted, everything saved                                          |
-| `pending`   | Written sectors not saved yet (saved when the motor has been off for 2 s)  |
-| `saving`    | Being saved                                                                |
-| `error`     | Saving failed (`error`): the disk is write-protected, the changes stay in memory and are retried every 30 s (e.g. after storage was freed) |
-
-Guarantees and limits:
-
-- Changes are **not** lost by activating another disk, a restart through
-  the API or the buttons (WiFi setup): those save first; if saving fails,
-  they are refused with `409 UNSAVED_CHANGES`. Deleting, replacing or
-  formatting while the disk has unsaved changes is refused the same way.
-- A **power cut** loses the changes not saved yet: those of the disk
-  operation in progress, plus 2 seconds and the time the save takes
-  (about 1–4 s). What was saved
-  before stays intact. Wait until the page shows *Writable — all changes
-  saved* before switching off. Keeping the last seconds safe as well would
-  need a hold-up supply (a capacitor that keeps RadioFloppy running for
-  a few seconds) and power-fail detection — not on this hardware.
-- If a file operation is interrupted by a power cut, the disk is left as a
-  real floppy would be after a cut in the middle of writing: the saved
-  version is consistent at block level, but the file system may lack the
-  last sectors TOS wrote.
+`reason` says why the disk is write-protected: `no disk`, `temporary disk
+(PSRAM)`, `computer not supported`, or `writing to the SD card is not
+available yet`. The other states (`writable`, `pending`, `saving`,
+`error`) return with writing.
 
 ## Uploading images
 
@@ -851,57 +635,45 @@ An upload always takes two requests:
 ```
 ready ──PUT data──> receiving ──> processing ──> done
   │                     │              │
-  │ (60 s, no data)     │ (dropped)    │ (invalid, flash error, drive busy)
+  │ (60 s, no data)     │ (dropped)    │ (invalid, SD error, drive busy)
   └──> failed <─────────┴──────────────┘
 ```
 
-### Three kinds of upload
+### Two kinds of upload
 
 | You want to…                                   | Request body                                                       |
 | ---------------------------------------------- | ------------------------------------------------------------------ |
-| Play an image now, without storing it          | `{"filename": "Game.st", "size": 368640, "destination": "psram"}` |
-| Add an image to my floppy images               | `{"filename": "Game.st", "size": 368640, "destination": "flash"}` |
-| Replace image 5 and play the new version       | `{"filename": "Game.st", "size": 368640, "destination": "flash", "replace": 5, "activate": true}` |
+| Play an .ST image now, without storing it      | `{"filename": "Game.st", "size": 368640, "destination": "psram"}` |
+| Put an image on the SD card                    | `{"filename": "Game.st", "size": 368640, "destination": "sd", "path": "G"}` |
 
-Add `"activate": true` to the second form to also play a stored image at
-once.
+To play a file from the card afterwards: `PUT /api/v1/current`
+`{"sd_path": "G/Game.st"}`.
 
 ### Guarantees
 
-- The data is first received completely into memory. An image that is
-  incomplete, invalid or does not match its `crc32` never touches the
-  storage and never becomes the active disk.
-- A new image only goes into free blocks, is read back and checked, and
-  only then appears in the list. An interrupted store (also a power cut)
-  leaves no image behind, and its blocks are free again.
-- Without `replace`, a stored image is **never** overwritten.
-- With `replace`, the old image is given up first, so replacing also works
-  when the storage is nearly full (its blocks are reused first). **If the
-  upload then fails, or the power fails while writing, the old image is
-  lost** — the image shows `incomplete`, never a half image.
-- A PSRAM upload replaces the previous PSRAM image only once the new one is
-  complete and prepared. There is only one PSRAM image.
+- A PSRAM upload is received completely into memory first. An image that
+  is incomplete, invalid or does not match its `crc32` never becomes the
+  active disk. It replaces the previous PSRAM image only once it is
+  complete and prepared; there is only one PSRAM image.
+- An SD card upload goes to a hidden temporary file; only a complete,
+  checked and read-back file gets its name. An existing file is replaced
+  only with `overwrite: true`, and only by a complete new file.
 
 ### DRIVE_BUSY
 
 A new active disk is switched in right away while the Atari is not using
 drive B:, and after 0.3 s also while it is (reading only). A disk the Atari
-writes to is never changed under it: once the Atari has written to a
-writable disk since it selected drive B:, the disk only changes after the
-Atari releases the drive. The device waits up to 3 seconds for that. If
+writes to is never changed under it. The device waits up to 3 seconds; if
 the Atari keeps the drive busy longer, the request ends with
-`409 DRIVE_BUSY` and the old disk stays in the drive:
-
-- `flash` upload: the image *is* stored (`image_id`) — activate it later
-  with `PUT /api/v1/current`.
-- `psram` upload: nothing is kept — upload it again later.
+`409 DRIVE_BUSY` and the old disk stays in the drive (a PSRAM upload is
+then not kept — upload it again later).
 
 ## Errors
 
 Every error response has the same shape:
 
 ```json
-{ "error": { "code": "NO_SPACE", "message": "not enough free storage: 14 blocks needed, 9 free" } }
+{ "error": { "code": "FILE_NOT_FOUND", "message": "no such file" } }
 ```
 
 `code` is stable and meant for programs; `message` is for people and may
@@ -910,31 +682,32 @@ change. A failed upload carries the same `error` inside its upload object.
 | HTTP | Code                   | What to do                                             |
 | ---- | ---------------------- | ------------------------------------------------------ |
 | 400  | `INVALID_REQUEST`      | Fix the request                                        |
-| 400  | `CONFIRMATION_REQUIRED` | Send the exact confirmation text                      |
+| 400  | `INVALID_PATH`         | Follow the [path rules](#sd-card-files)                |
+| 400  | `CONFIRMATION_REQUIRED` | Repeat the path in `confirm`                          |
 | 400  | `UPLOAD_INCOMPLETE`    | Start a new upload and send the complete file          |
 | 401  | `UNAUTHORIZED`         | Send the correct token (only when one is configured)   |
 | 415  | `UNSUPPORTED_MEDIA_TYPE` | Send `Content-Type: application/json` / `application/octet-stream` |
-| 404  | `IMAGE_NOT_FOUND`      | Use an id from `GET /images`                           |
+| 404  | `FILE_NOT_FOUND`, `FOLDER_NOT_FOUND` | Use a path from `GET /sd/files`          |
 | 404  | `UPLOAD_NOT_FOUND`     | Start a new upload                                     |
+| 409  | `FILE_EXISTS`, `FOLDER_EXISTS` | Choose another name (or `overwrite: true`)     |
+| 409  | `FOLDER_NOT_EMPTY`     | Delete with `recursive=true&confirm=<path>`            |
 | 409  | `UPLOAD_BUSY`          | Wait for the running upload (or its 60 s timeout)      |
 | 409  | `UPLOAD_STATE`         | Start a new upload                                     |
 | 409  | `DRIVE_BUSY`           | Retry when the Atari is idle (see above)               |
-| 413  | `IMAGE_TOO_LARGE`      | Only images up to 1 572 864 bytes (1.5 MiB)            |
+| 409  | `MACHINE_NOT_SUPPORTED` | Floppy emulation is off for this computer — choose `ATARI` and restart |
+| 413  | `IMAGE_TOO_LARGE`      | .ST up to 1 572 864 bytes; HFE up to 8 MiB and the track buffer |
 | 422  | `INVALID_IMAGE`        | The file is not a floppy image                         |
 | 422  | `UNSUPPORTED_GEOMETRY` | Use an image with 79–84 tracks and 9–11 sectors        |
 | 422  | `CHECKSUM_MISMATCH`    | The file was damaged in transit — send it again        |
-| 422  | `UNSUPPORTED_FORMAT`   | A recognised format that cannot be played (yet), e.g. HFEv2 |
+| 422  | `UNSUPPORTED_FORMAT`   | A file type or format that cannot be played (yet), e.g. HFEv2 |
+| 422  | `INVALID_NAME`         | Follow the name rules                                  |
 | 422  | `INVALID_HOSTNAME`     | Use 1–32 letters, digits or `-`                        |
 | 422  | `INVALID_DRIVE_SELECT` | Use `"DS0"` or `"DS1"`                                 |
-| 400  | `INVALID_NAME`         | Use 1–52 printable characters                          |
-| 422  | `FORMAT_NOT_WRITABLE`  | Only ST images can be set to `READ_WRITE`              |
 | 422  | `INVALID_MACHINE`      | Use `"ATARI"`, `"AMIGA"` or `"DOS"`                    |
-| 409  | `UNSAVED_CHANGES`      | The Atari wrote to the disk and it is not saved yet — wait and retry |
-| 409  | `MACHINE_NOT_SUPPORTED` | Floppy emulation is off for this computer — choose `ATARI` and restart |
-| 500  | `FLASH_ERROR`          | Storage problem — retry; check the device log          |
+| 422  | `INVALID_ROOT_DIR`     | Follow the root directory rules                        |
+| 500  | `SD_ERROR`             | SD card problem — retry; check the card and the device log |
 | 500  | `PREPARE_FAILED`       | Internal problem — check the device log                |
-| 503  | `STORAGE_NOT_READY`    | Storage not usable (see `GET /storage`, maybe initialise it) |
-| 507  | `NO_SPACE`             | Delete an image, or replace one                        |
+| 503  | `SD_NOT_PRESENT`       | Insert an SD card                                      |
 | 507  | `INSUFFICIENT_MEMORY`  | Retry later / after a restart                          |
 
 ## Client examples
@@ -944,29 +717,28 @@ change. A failed upload carries the same `error` inside its upload object.
 ```sh
 DEV=192.168.178.62
 TOKEN=your-api-token
+H="Authorization: Bearer $TOKEN"
+J="Content-Type: application/json"
 
-# upload FILE DESTINATION [extra JSON, e.g. ',"replace":5,"activate":true']
+# upload FILE DESTINATION [extra JSON, e.g. ',"path":"G"']
 upload() {
     size=$(stat -c %s "$1")
-    url=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    url=$(curl -s -H "$H" -H "$J" \
           -d "{\"filename\":\"$(basename "$1")\",\"size\":$size,\"destination\":\"$2\"$3}" \
           http://$DEV/api/v1/uploads | sed -n 's/.*"upload_url":"\([^"]*\)".*/\1/p')
     [ -n "$url" ] || { echo "upload refused"; return 1; }
-    curl -s -X PUT -H "Authorization: Bearer $TOKEN" \
-         -H "Content-Type: application/octet-stream" \
+    curl -s -X PUT -H "$H" -H "Content-Type: application/octet-stream" \
          --data-binary @"$1" http://$DEV$url; echo
 }
 
-upload "Crystal Castles.st" psram                          # play now, not stored
-upload "Crystal Castles.st" flash                          # add to my floppy images
-upload "Crystal Castles.st" flash ',"replace":5,"activate":true'   # replace image 5, play it
+upload "Crystal Castles.st" psram                  # play now, not stored
+curl -s -X POST -H "$H" -H "$J" -d '{"path":"C"}' http://$DEV/api/v1/sd/folders
+upload "Crystal Castles.st" sd ',"path":"C"'       # put it on the card in folder C
 
-# Play image 1 / move image 3 to the top / delete image 5
-curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-     -d '{"image_id":1}' http://$DEV/api/v1/current
-curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-     -d '{"sequence":1}' http://$DEV/api/v1/images/3
-curl -s -X DELETE -H "Authorization: Bearer $TOKEN" http://$DEV/api/v1/images/5
+# Insert it / list folder C / delete it
+curl -s -X PUT -H "$H" -H "$J" -d '{"sd_path":"C/Crystal Castles.st"}' http://$DEV/api/v1/current
+curl -s "http://$DEV/api/v1/sd/files?path=C"
+curl -s -X DELETE -H "$H" "http://$DEV/api/v1/sd/files?path=C/Crystal%20Castles.st"
 ```
 
 (To see the full answer of the first step, run it without the `sed` part.)
@@ -991,7 +763,7 @@ def call(method, path, body=None, data=None):
     conn.close()
     return resp.status, result
 
-def upload(path, destination="flash", **options):
+def upload(path, destination="sd", **options):
     data = open(path, "rb").read()
     request = {"filename": os.path.basename(path), "size": len(data),
                "destination": destination, "crc32": "%08x" % zlib.crc32(data), **options}
@@ -1003,8 +775,8 @@ def upload(path, destination="flash", **options):
         raise RuntimeError(up.get("error", up))
     return up
 
-print(upload("Crystal Castles.st", "flash", activate=True))
-print(call("GET", "/api/v1/images")[1])
+print(upload("Crystal Castles.st", "sd", path=""))
+print(call("PUT", "/api/v1/current", {"sd_path": "Crystal Castles.st"})[1])
 ```
 
 A complete test suite that exercises every endpoint and error is in
@@ -1014,24 +786,26 @@ A complete test suite that exercises every endpoint and error is in
 
 | Item                          | Value                                             |
 | ----------------------------- | ------------------------------------------------- |
-| Image size / geometry         | 79–84 cyl, 9–11 sectors, 1–2 sides (up to 946 176 bytes); storage limit 1.5 MiB |
-| Stored images                 | as many as fit: 255 blocks (64 KiB each on 16 MiB), at least 1 block per image |
+| .ST size / geometry           | 79–84 cyl, 9–11 sectors, 1–2 sides (up to 946 176 bytes); upload limit 1.5 MiB |
+| HFE file                      | up to 8 MiB and what fits the track buffer; its flash copy up to 3 MiB |
 | PSRAM images                  | 1                                                 |
 | Uploads at the same time      | 1                                                 |
 | Upload without data expires   | after 60 s                                        |
 | Network timeout while sending | 10 s without data → `UPLOAD_INCOMPLETE`           |
 | Wait for drive to be idle     | 0.3 s, then changed anyway unless the Atari writes to it; up to 3 s → else `DRIVE_BUSY` |
 | Disk change signal to the Atari | 0.7 s "no disk"                                 |
-| Typical duration              | Activate an image: 360 KB ≈ 0.4 s, 880 KB ≈ 0.9 s; store 880 KB ≈ 7 s; PSRAM upload 720 KB ≈ 3 s |
-| Disk name                     | title from `filename` (TOSEC tags removed, `(Disk n/m)` kept), max. 52 characters |
+| Typical duration              | Insert a 2 MB HFE file ≈ 5 s; PSRAM upload 720 KB ≈ 3 s; flash copy of 2 MB ≈ 17 s (in the background) |
+| SD folder listing             | at most 400 entries                               |
 
 - The device handles one request at a time; a long upload delays other
-  requests until it is done.
+  requests until it is done. The flash copy runs in the background and
+  holds the SD card only per 8 KiB read.
 - The emulated drive keeps working while the API is used. Uploading or
   deleting never disturbs the disk the Atari is reading.
-- Restarting the device removes the PSRAM image and inserts the library
-  image that was active last (see `last_image_id`), else the image named
-  *Crystal Castles*, else the first valid image in `sequence` order.
+- Restarting the device removes the PSRAM image and inserts the SD card
+  file that was active last (`last_sd_path`): from the card, or from its
+  copy in the flash when the card cannot be read. Otherwise the drive
+  starts empty.
 
 ## Device configuration
 
@@ -1119,8 +893,8 @@ For firmware developers; clients do not need this.
 
 - Code: `main/api.c` (endpoints, uploads), `main/st_image.c` (image
   checks), `main/disk_image.c` (active disk, two PSRAM track buffers),
-  `main/image_store.c` (image library: blocks, catalog, the image reader;
-  see `docs/FLASH_LAYOUT.md`),
+  `main/sd_card.c` (SD card files), `main/disk_copy.c` (the copy of the
+  last disk in the flash; see `docs/FLASH_LAYOUT.md`),
   `main/wifi_net.c`, `main/settings.c` (settings on the external flash),
   `main/setup_mode.c` (setup access point, DNS, setup page `web/setup.html`).
 - WiFi, lwIP and the HTTP server run on core 1; the floppy interrupts and
