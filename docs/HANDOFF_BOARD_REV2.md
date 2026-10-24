@@ -27,7 +27,7 @@ Unchanged: all Shugart inputs and outputs, NOR flash (CS 10, MOSI 11,
 CLK 12, MISO 13, IO2 14, IO3 9), I2C (SDA 47, SCL 21), buttons (SW_PREV 8,
 SW_NEXT 19), UART0.
 
-## What the firmware does now (branch `wip/board-rev2`)
+## What the first rev 2 firmware did (branch `wip/board-rev2`, merged and deleted)
 
 - `main/board_pins.h`: rev 2 pin map; the SPI bus pins are named once
   (`PIN_SPI_*`) because the NOR flash and the SD card share them.
@@ -93,6 +93,9 @@ SW_NEXT 19), UART0.
 - Pull-ups on all Shugart inputs (about 1k to +5 V, jumper-selectable):
   some PC floppy controllers expect the termination at the drive end (a
   Gotek board has them).
+  MOTOR in particular: it reads as on while the ST is idle (probably
+  because this input has no pull-up), so the firmware cannot see the
+  motor go off.
 - A +5 V sense from J2 to a free GPIO (e.g. GPIO3 or GPIO35-37, unused)
   so the firmware knows whether the computer is powered.
 - Optionally read pin 2 as an input too (PC density select, Falcon HD
@@ -125,8 +128,14 @@ are erased once at start-up). Now:
   marks the copy synced. A pending copy is written to the card at the
   next start-up; when the file was replaced or deleted meanwhile, the
   changes go to `<name> (changes).st`. Tested on the ST: Bolo copied from
-  a real floppy onto a new disk and loaded from it (925 sectors, one
-  save). Not tested yet: a power cut during a save.
+  a real floppy onto a new disk and loaded from it (925 sectors). Power
+  cut test (test build with a 20 s pause between journal and card, ESP
+  RESET in the pause): the changes were written from the flash to the
+  card at start-up, the image checked on a PC (FAT and folders intact).
+- The MOTOR input reads as on all the time with the ST idle (seen
+  2026-10-25), so "motor off 2 s" never triggered a save (it came after
+  the 60 s fallback). A save now also starts when B: has not been
+  selected for 3 s.
 
 Tested on the board: inserting .ST and HFE from the card, the flash
 copy, the buttons (their task needs 8 KiB of stack for a step), and

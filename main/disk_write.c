@@ -48,6 +48,10 @@
 #define WRITE_OFFSET_MAX    1200
 #define RETRY_MS            30000       /* retry a failed save */
 #define SAVE_MAX_MS         60000       /* save even if the motor keeps running */
+#define SAVE_IDLE_MS        3000        /* save when the drive was not selected this long */
+#ifndef SAVE_TEST_PAUSE_MS
+#define SAVE_TEST_PAUSE_MS  0           /* test builds: pause between journal and card */
+#endif
 
 static rmt_channel_handle_t rx_chan;
 static rmt_symbol_word_t *rx_buf;       /* DMA target, internal RAM */
@@ -366,6 +370,12 @@ static esp_err_t save_journal(const disk_snapshot_t *snap, char *msg, size_t msz
         return err;
     }
     disk_note_saved(snap->gen, crc, d.file_crc);    /* safe in the journal */
+#if SAVE_TEST_PAUSE_MS
+    /* Test build only: time to cut the power between journal and card. */
+    printf("Write: TEST - changes are in the flash journal; pausing %d s before the SD card\n",
+           SAVE_TEST_PAUSE_MS / 1000);
+    vTaskDelay(pdMS_TO_TICKS(SAVE_TEST_PAUSE_MS));
+#endif
     int64_t t1 = esp_timer_get_time();
 
     /* 2. The file on the card: only when it still is the file the changes
@@ -463,6 +473,7 @@ static esp_err_t save_now(void)
 static void save_task_fn(void *arg)
 {
     int64_t motor_off_since = 0;        /* 0: motor on */
+    int64_t idle_since = 0;             /* 0: drive selected (or WGATE) */
 
     while (true) {
         xTaskNotifyWait(0, UINT32_MAX, NULL, pdMS_TO_TICKS(100));
@@ -474,11 +485,19 @@ static void save_task_fn(void *arg)
         } else if (!motor_off_since) {
             motor_off_since = now;
         }
+        if (ds.selected || ds.wgate) {
+            idle_since = 0;
+        } else if (!idle_since) {
+            idle_since = now;
+        }
         /* One save per disk operation: when the motor has been off for
          * SAVE_DELAY_MS (TOS switches it off about 2 s after the last
-         * access). Fallback for a drive that keeps running: SAVE_MAX_MS
-         * after the last write. */
-        bool quiet = motor_off_since && now - motor_off_since >= SAVE_DELAY_MS * 1000LL;
+         * access). The MOTOR line can read as on all the time (seen on the
+         * rev 2 board with the ST idle; the input has no pull-up), so also
+         * when the drive has not been selected for SAVE_IDLE_MS.
+         * Last resort: SAVE_MAX_MS after the last write. */
+        bool quiet = (motor_off_since && now - motor_off_since >= SAVE_DELAY_MS * 1000LL) ||
+                     (idle_since && now - idle_since >= SAVE_IDLE_MS * 1000LL);
         bool overdue = now - last_write_us >= SAVE_MAX_MS * 1000LL;
         if (disk_dirty() && !save_error && !ds.wgate && (quiet || overdue)) {
             save_now();

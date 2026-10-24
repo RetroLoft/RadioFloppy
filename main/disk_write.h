@@ -12,8 +12,8 @@
  * encoded again (reads return the new data at once), its 64 KiB region is
  * marked changed.
  * Save: when the MOTOR line has been off for SAVE_DELAY_MS (one save per
- * disk operation; at the latest a minute after the last write if the
- * motor keeps running).
+ * disk operation) or the drive has not been selected for SAVE_IDLE_MS;
+ * at the latest a minute after the last write.
  *
  * Save: into the copy of the disk in the flash (journal), then into the
  * file on the SD card (see disk_write.c). Writable: an .ST file on the

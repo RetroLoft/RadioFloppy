@@ -641,7 +641,9 @@ whose file was replaced or deleted since it was inserted. What happens:
 4. **Apply** — the sector is patched into the image kept in PSRAM and its
    track is encoded again, so the next read returns the new data.
 5. **Save** — when the drive motor has been off for 2 s (one save per disk
-   operation; at the latest a minute after the last write):
+   operation) or drive B: has not been selected for 3 s (the MOTOR line
+   can read as on all the time on board revision 2); at the latest a
+   minute after the last write:
    1. the changed 64 KiB blocks go into the **copy of the disk in the
       flash**, which is read back, checked against the new CRC-32 and
       marked *not on the card yet*;
@@ -670,7 +672,7 @@ PC), the changes are not written over it: they are stored next to it as
 | ----------- | -------------------------------------------------------------------------- |
 | `read_only` | Write-protected; `reason` says why (`the file is read-only`, `HFE image (always read-only)`, `temporary disk (PSRAM)`, `no SD card`, …) |
 | `writable`  | Writes accepted, everything saved                                          |
-| `pending`   | Written sectors not saved yet (saved when the motor has been off for 2 s)  |
+| `pending`   | Written sectors not saved yet (saved a few seconds after the last access)  |
 | `saving`    | Being saved                                                                |
 | `error`     | Saving failed (`error`): the disk is write-protected, the changes stay in memory (and in the flash once they got there) and are retried every 30 s (e.g. when the card is back) |
 
@@ -685,7 +687,7 @@ Guarantees and limits:
   directory or making the inserted file read-only while there are unsaved
   changes is refused the same way.
 - A **power cut** loses the changes not saved yet: those of the disk
-  operation in progress, plus 2 seconds and the time the save takes. Wait until the page shows *Writable — all
+  operation in progress, plus the few seconds before the save starts and the time it takes. Wait until the page shows *Writable — all
   changes saved* before switching off.
 - If a file operation is interrupted by a power cut, the disk is left as a
   real floppy would be after a cut in the middle of writing: the saved
