@@ -337,8 +337,10 @@ def main():
         check(b.wait("document.getElementById('msg').innerText.includes('1 file stored')", 60), "replacing asks and works")
         b.js("document.getElementById('newname').value = 'Save games'; "
              "document.getElementById('newform').requestSubmit()")
-        check(b.wait("document.getElementById('msg').innerText.includes('is created on the SD card')", 30),
-              "New disk: created in the open folder")
+        check(b.wait("document.getElementById('msg').innerText.includes('is created on the SD card and is now "
+                     "the active floppy')", 30), "New disk: created in the open folder and inserted")
+        check(b.wait("S.current && S.current.sd_path === %s && S.current.write.state === 'writable'"
+                     % json.dumps(T + "/Save games.st"), 10), "the new disk is the current floppy, writable")
         check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === 'Save games.st' && e.size === 737280)", 20),
               "New disk listed (Save games.st, 720 KiB)")
         b.js("[...document.querySelectorAll('#sdcrumbs a')][0].click()")

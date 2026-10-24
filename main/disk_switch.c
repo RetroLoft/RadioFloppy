@@ -79,11 +79,21 @@ static void copy_to_flash(const char *path, uint32_t crc, bool hfe)
     sd_reader_t *rd = NULL;
     uint32_t size, got, c = 0, done = 0;
 
-    if (disk_copy_get(&ci) && strcmp(ci.path, path) == 0 && ci.crc == crc) {
+    disk_copy_lock();                   /* not while written sectors are being saved */
+    bool have = disk_copy_get(&ci);
+    if (have && strcmp(ci.path, path) == 0 && ci.crc == crc) {
+        disk_copy_unlock();
         return;                         /* already there */
+    }
+    if (have && ci.pending) {           /* kept until a start-up with the card syncs it */
+        printf("Flash copy: %s not copied (the copy of %s has changes that are not on the "
+               "SD card yet)\n", path, ci.path);
+        disk_copy_unlock();
+        return;
     }
     sd_result_t r = sd_card_reader_open(path, RF_COPY_MAX, &rd, &size);
     if (r != SD_OK) {
+        disk_copy_unlock();
         printf("Flash copy: %s not copied (%s%s)\n", path, sd_result_name(r),
                r == SD_INVALID ? ", or larger than the copy area" : "");
         return;
@@ -104,15 +114,18 @@ static void copy_to_flash(const char *path, uint32_t crc, bool hfe)
     sd_card_reader_close(rd);
     if (err != ESP_OK) {
         printf("Flash copy: %s not copied (%s)\n", path, esp_err_to_name(err));
+        disk_copy_unlock();
         return;
     }
     if (c != crc) {
         printf("Flash copy: %s changed since it was inserted - no copy\n", path);
+        disk_copy_unlock();
         return;
     }
     ci = (disk_copy_info_t) { .size = size, .crc = crc, .hfe = hfe };
     snprintf(ci.path, sizeof(ci.path), "%s", path);
     err = disk_copy_commit(&ci);
+    disk_copy_unlock();
     printf("Flash copy: %s %s (%lu KiB, %lld ms)\n", path, err == ESP_OK ? "kept in the flash" : "FAILED",
            (unsigned long)(size / 1024), (esp_timer_get_time() - t0) / 1000);
 }
@@ -251,7 +264,9 @@ static esp_err_t sd_locked(const char *path, switch_error_t *e)
         snprintf(e->msg, sizeof(e->msg), "%s", st.detail);
     } else {
         info.size = size;
-        info.crc32 = esp_rom_crc32_le(0, raw, size);
+        info.crc32 = info.file_crc = esp_rom_crc32_le(0, raw, size);
+        info.keep_sectors = true;       /* written sectors go back to the file */
+        sd_card_get_read_only(path, &info.read_only);
         info.cylinders = st.cylinders;
         info.heads = st.heads;
         info.sectors = st.sectors;

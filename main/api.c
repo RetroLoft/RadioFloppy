@@ -263,6 +263,9 @@ static cJSON *write_json(void)
     if (w.error[0]) {
         cJSON_AddStringToObject(o, "error", w.error);
     }
+    if (w.note[0]) {
+        cJSON_AddStringToObject(o, "note", w.note);
+    }
     cJSON_AddNumberToObject(o, "sectors_written", w.sectors_written);
     cJSON_AddNumberToObject(o, "writes_rejected", w.writes_rejected);
     cJSON_AddNumberToObject(o, "saves", w.saves);
@@ -347,7 +350,7 @@ static const char *status_for(const char *code)
         { "UNSUPPORTED_FORMAT", HTTP_422 },   { "INVALID_NAME", HTTP_400 },
         { "UPLOAD_BUSY", HTTP_409 },        { "SD_ERROR", HTTP_500 },
         { "SD_NOT_PRESENT", HTTP_503 },    { "FOLDER_NOT_FOUND", HTTP_404 },
-        { "FILE_EXISTS", HTTP_409 },        { "FILE_NOT_FOUND", HTTP_404 },
+        { "FILE_EXISTS", HTTP_409 },    { "FILE_READ_ONLY", HTTP_409 },        { "FILE_NOT_FOUND", HTTP_404 },
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].code, code) == 0) {
@@ -423,6 +426,9 @@ static esp_err_t sd_error(httpd_req_t *req, sd_result_t r, bool folder)
     case SD_EXISTS:
         return send_error(req, HTTP_409, folder ? "FOLDER_EXISTS" : "FILE_EXISTS",
                           folder ? "a folder or file of that name exists" : "the file exists");
+    case SD_READ_ONLY:
+        return send_error(req, HTTP_409, "FILE_READ_ONLY", "the file is read-only; make it "
+                          "writable first (PUT /api/v1/sd/files {\"read_only\": false})");
     case SD_NOT_EMPTY:
         return send_error(req, HTTP_409, "FOLDER_NOT_EMPTY", "the folder is not empty; delete it "
                           "with recursive=true&confirm=<its path> to remove its contents too");
@@ -458,6 +464,7 @@ static void list_entry(void *ctx, const sd_entry_t *e)
     cJSON_AddStringToObject(o, "type", e->is_dir ? "folder" : "file");
     if (!e->is_dir) {
         cJSON_AddNumberToObject(o, "size", e->size);
+        cJSON_AddBoolToObject(o, "read_only", e->read_only);
     }
     cJSON_AddItemToArray(ctx, o);
 }
@@ -503,6 +510,7 @@ static esp_err_t delete_sd_file(httpd_req_t *req)
     xSemaphoreGive(api_lock);
     if (r == SD_OK) {
         disk_note_sd_changed(path, false);
+        disk_write_refresh();
     }
     if (r != SD_OK) {
         return sd_error(req, r, false);
@@ -510,6 +518,48 @@ static esp_err_t delete_sd_file(httpd_req_t *req)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "path", path);
     cJSON_AddStringToObject(root, "status", "deleted");
+    return send_json(req, "200 OK", root);
+}
+
+/* PUT /api/v1/sd/files?path=<file> {"read_only": true|false}: the FAT
+ * read-only attribute, i.e. the write-protect tab of that disk. */
+static esp_err_t put_sd_file(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return ESP_OK;
+    }
+    char path[SD_REL_MAX + 1];
+    if (query_param(req, "path", path, sizeof(path)) != ESP_OK || !path[0]) {
+        return sd_error(req, SD_INVALID, false);
+    }
+    cJSON *body = read_json(req);
+    if (!body) {
+        return ESP_OK;
+    }
+    const cJSON *jro = cJSON_GetObjectItem(body, "read_only");
+    bool ro = cJSON_IsTrue(jro);
+    bool valid = cJSON_IsBool(jro);
+    cJSON_Delete(body);
+    if (!valid) {
+        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"read_only\" (true/false) is required");
+    }
+    disk_info_t d;
+    disk_get_current(&d);
+    if (ro && d.source == DISK_SRC_SD && strcmp(d.sd_path, path) == 0 && disk_write_unsaved()) {
+        return send_error(req, HTTP_409, "UNSAVED_CHANGES", "the computer wrote to this disk and "
+                          "the changes are not saved yet; try again in a few seconds");
+    }
+    xSemaphoreTake(api_lock, portMAX_DELAY);
+    sd_result_t r = sd_card_set_read_only(path, ro);
+    xSemaphoreGive(api_lock);
+    if (r != SD_OK) {
+        return sd_error(req, r, false);
+    }
+    disk_note_sd_read_only(path, ro);
+    disk_write_refresh();               /* write protection of the inserted disk */
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "path", path);
+    cJSON_AddBoolToObject(root, "read_only", ro);
     return send_json(req, "200 OK", root);
 }
 
@@ -565,6 +615,7 @@ static esp_err_t delete_sd_folder(httpd_req_t *req)
     xSemaphoreGive(api_lock);
     if (r == SD_OK) {
         disk_note_sd_changed(path, true);
+        disk_write_refresh();
     }
     if (r != SD_OK) {
         return sd_error(req, r, true);
@@ -679,6 +730,7 @@ static void fail_sd(sd_result_t r)
     case SD_NO_CARD:   fail_upload("SD_NOT_PRESENT", "no SD card"); break;
     case SD_NOT_FOUND: fail_upload("FOLDER_NOT_FOUND", "the folder does not exist (any more)"); break;
     case SD_EXISTS:    fail_upload("FILE_EXISTS", "the file exists"); break;
+    case SD_READ_ONLY: fail_upload("FILE_READ_ONLY", "the file is read-only; nothing stored"); break;
     case SD_INVALID:   fail_upload("INVALID_NAME", "invalid file or folder name"); break;
     default:           fail_upload("SD_ERROR", "writing to the SD card failed; nothing stored"); break;
     }
@@ -778,6 +830,7 @@ static esp_err_t receive_sd(httpd_req_t *req)
                     snprintf(rel, sizeof(rel), "%s%s%s", up.sd_folder, up.sd_folder[0] ? "/" : "",
                              up.sd_name);
                     disk_note_sd_changed(rel, false);
+                    disk_write_refresh();
                 }
                 up.state = UP_DONE;
                 up.touched_us = esp_timer_get_time();
@@ -1332,6 +1385,14 @@ static esp_err_t put_settings(httpd_req_t *req)
                               "at the start or end, no name starting with '.' or ' ' or ending "
                               "with '.' or ' '", SETTINGS_ROOT_MAX);
         }
+        settings_t cur;
+        settings_get(&cur);
+        if (strcmp(cur.root_dir, jr->valuestring) != 0 && disk_write_unsaved()) {
+            cJSON_Delete(body);
+            return send_error(req, HTTP_409, "UNSAVED_CHANGES", "the computer wrote to the "
+                              "inserted disk and the changes are not saved yet; try again in a "
+                              "few seconds");
+        }
         /* Create it on the card now; without a card it is created once one is in. */
         esp_err_t err = sd_card_make_root(jr->valuestring);
         if (err == ESP_FAIL) {
@@ -1366,6 +1427,10 @@ static esp_err_t put_settings(httpd_req_t *req)
         if (err != ESP_OK) {
             return send_error(req, HTTP_500, "FLASH_ERROR", "settings could not be saved (%s)",
                               esp_err_to_name(err));
+        }
+        if (strcmp(s.root_dir, old.root_dir) != 0) {
+            disk_note_root_changed();   /* its path now names another file */
+            disk_write_refresh();
         }
         printf("API: settings saved (host name %s, drive %s, buzzer %s, machine %s, %u LED(s), "
                "root \"%s\")\n", s.hostname, s.drive_select == 0 ? "A: / DS0" : "B: / DS1",
@@ -1482,6 +1547,7 @@ esp_err_t api_start(void)
         { .uri = "/api/v1/uploads/*", .method = HTTP_PUT,    .handler = put_upload_data },
         { .uri = "/api/v1/sd/files",  .method = HTTP_GET,    .handler = get_sd_files },
         { .uri = "/api/v1/sd/files",  .method = HTTP_DELETE, .handler = delete_sd_file },
+        { .uri = "/api/v1/sd/files",  .method = HTTP_PUT,    .handler = put_sd_file },
         { .uri = "/api/v1/sd/folders", .method = HTTP_POST,  .handler = post_sd_folder },
         { .uri = "/api/v1/sd/folders", .method = HTTP_DELETE, .handler = delete_sd_folder },
         { .uri = "/api/v1/settings",  .method = HTTP_GET,    .handler = get_settings },

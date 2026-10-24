@@ -117,9 +117,16 @@ are erased once at start-up). Now:
   file: no disk. See `docs/FLASH_LAYOUT.md`.
 - Buttons: previous/next image file in the folder of the disk inserted
   last (natural sort as the web page), no wrap-around.
-- Every disk is write-protected for now. `disk_write.c` still receives
-  and decodes sectors; saving is the next step: write to the copy in the
-  flash, then to the file on the card.
+- Writing: an .ST file on the card is writable unless it has the FAT
+  read-only attribute (lock in the web page, `PUT /sd/files
+  {"read_only"}`). A save (motor off 2 s) patches the changed 64 KiB
+  blocks of the flash copy and commits it as pending (copy header v3),
+  writes the same blocks into the file in place and checks its CRC, then
+  marks the copy synced. A pending copy is written to the card at the
+  next start-up; when the file was replaced or deleted meanwhile, the
+  changes go to `<name> (changes).st`. Tested on the ST: Bolo copied from
+  a real floppy onto a new disk and loaded from it (925 sectors, one
+  save). Not tested yet: a power cut during a save.
 
 Tested on the board: inserting .ST and HFE from the card, the flash
 copy, the buttons (their task needs 8 KiB of stack for a step), and

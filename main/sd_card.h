@@ -27,6 +27,9 @@ typedef struct {
 /* Mount the card (if any) and make sure the configured root exists. */
 void sd_card_init(void);
 
+/* A card is mounted, as last seen (no card access: cheap). */
+bool sd_card_present(void);
+
 /* Current state; tries to mount a card that was inserted since (at most
  * every few seconds) and notices a removed one. */
 void sd_card_status(sd_status_t *st);
@@ -47,6 +50,7 @@ typedef enum {
     SD_NOT_FOUND,           /* folder or file does not exist */
     SD_EXISTS,              /* already there */
     SD_NOT_EMPTY,           /* folder has contents (and no recursive delete) */
+    SD_READ_ONLY,           /* the file has the read-only attribute (not overwritten) */
     SD_IO,                  /* card error (removed, full, ...) */
 } sd_result_t;
 
@@ -54,6 +58,7 @@ typedef struct {
     const char *name;
     bool is_dir;
     uint32_t size;
+    bool read_only;         /* file with the FAT read-only attribute */
 } sd_entry_t;
 
 /*
@@ -67,6 +72,33 @@ sd_result_t sd_card_list(const char *rel, int max, void (*cb)(void *ctx, const s
 /* What rel is: SD_OK with *is_dir (and *size for a file), or SD_NOT_FOUND. */
 sd_result_t sd_card_stat(const char *rel, bool *is_dir, uint32_t *size);
 
+/* File rel has the FAT read-only attribute (write-protected for the
+ * computer, like the tab on a real floppy). */
+sd_result_t sd_card_get_read_only(const char *rel, bool *ro);
+sd_result_t sd_card_set_read_only(const char *rel, bool ro);
+
+/*
+ * Write changed parts of file rel in place (same size, no new clusters):
+ * for every bit i in mask, region i (region bytes at i * region, as far
+ * as the file goes) from data, which holds the whole new file of size
+ * bytes. SD_INVALID: another size; SD_READ_ONLY. Flushed to the card
+ * before it returns.
+ */
+sd_result_t sd_card_update(const char *rel, const uint8_t *data, uint32_t size, uint32_t mask,
+                           uint32_t region);
+
+/*
+ * Store data (a disk image of size bytes, CRC-32 crc) as a new file next
+ * to rel: "<name> (changes).st", or "(changes 2)" ... when that exists.
+ * For written sectors whose own file was replaced or deleted meanwhile.
+ * out: the new file's path (below the root directory).
+ */
+sd_result_t sd_card_save_changes(const char *rel, const uint8_t *data, uint32_t size,
+                                 uint32_t crc, char *out, size_t out_size);
+
+/* CRC-32 and size of file rel (read in pieces, the card free in between). */
+sd_result_t sd_card_file_crc(const char *rel, uint32_t *crc, uint32_t *size);
+
 /* Create folder rel with every folder on the way (SD_EXISTS: it was already there). */
 sd_result_t sd_card_mkdir(const char *rel);
 
@@ -74,14 +106,15 @@ sd_result_t sd_card_mkdir(const char *rel);
  * in it when recursive. */
 sd_result_t sd_card_rmdir(const char *rel, bool recursive);
 
-/* Remove file rel. */
+/* Remove file rel (also a read-only one). */
 sd_result_t sd_card_remove(const char *rel);
 
 /*
  * Writing a file in pieces: into a hidden temporary file in the target
  * folder; only sd_card_writer_commit (after reading it back and checking
  * the CRC-32) gives it its name, replacing an existing file only when
- * overwrite was set. Anything else leaves no file behind.
+ * overwrite was set and it is not read-only (SD_READ_ONLY). Anything else
+ * leaves no file behind.
  */
 typedef struct sd_writer sd_writer_t;
 sd_result_t sd_card_writer_open(const char *folder, const char *name, bool overwrite,

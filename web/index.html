@@ -158,15 +158,17 @@
         <button id="newbtn" type="submit">Create</button>
       </div>
       <p id="newinfo" class="small muted" style="margin:0">An empty, formatted Atari disk: .ST, 720 KiB
-        (80 tracks, 2 sides, 9 sectors), created in the folder that is open in the SD card block.</p>
+        (80 tracks, 2 sides, 9 sectors), created in the folder that is open in the SD card block and
+        put into the drive.</p>
     </form>
   </section>
 
   <section aria-labelledby="h-sdcard" id="sdsec">
     <h2 id="h-sdcard">SD card <span id="sdcount" class="muted small"></span></h2>
     <p class="small muted" style="margin:0 0 10px">Your floppy images: <strong>.ST</strong> and
-      <strong>.HFE</strong> files on the SD card. <em>Insert</em> puts one into the drive (write-protected
-      for now: writing to the card comes later). The buttons on RadioFloppy step through the images of
+      <strong>.HFE</strong> files on the SD card. <em>Insert</em> puts one into the drive. The Atari can
+      write to an .ST file unless it is read-only (the lock: like the tab on a real floppy); .HFE files
+      are always read-only. The buttons on RadioFloppy step through the images of
       the folder of the disk inserted last.</p>
     <div id="sdcrumbs" class="small" style="margin-bottom:10px"></div>
     <div class="row" style="margin-bottom:10px">
@@ -492,9 +494,10 @@ function renderCurrent() {
     pending: '<span class="badge temp">Unsaved changes</span> <span class="small muted">— saving shortly…</span>',
     saving: '<span class="badge temp">Saving changes…</span>',
     error: '<span class="badge" style="color:var(--err)">Saving failed</span> <span class="small" style="color:var(--err)">' +
-           esc(w.error || "") + " — the changes are kept in memory; the disk is write-protected. Free some storage; RadioFloppy retries.</span>",
+           esc(w.error || "") + " — the changes are kept; the disk is write-protected. RadioFloppy retries every 30 s.</span>",
   };
   origin += '<div style="margin-top:6px">' + (WS[w.state] || "") + "</div>";
+  if (w.note) origin += '<div class="small muted">Note: ' + esc(w.note) + "</div>";
   el.innerHTML = '<div class="name">' + esc(c.name) + ' <span class="badge active">Active</span></div>' +
     '<div class="muted">' + kib(c.size) + (c.sides ? " · " + geometryText({ cylinders: c.cylinders, sectors: c.sectors, sides: c.sides }) : "") +
     ' · CRC32 <span class="code">' + esc(c.crc32 || "") + "</span></div><div>" + origin + "</div>";
@@ -508,6 +511,10 @@ const ICON_PATHS = {
   file: '<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/>',
   download: '<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/>' +
             '<path d="M12 17v-6"/><path d="M9.5 14.5l2.5 2.5l2.5 -2.5"/>',
+  lock: '<path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z"/>' +
+        '<path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0"/><path d="M8 11v-4a4 4 0 1 1 8 0v4"/>',
+  unlock: '<path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z"/>' +
+          '<path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0"/><path d="M8 11v-5a4 4 0 0 1 8 0"/>',
   zip: '<path d="M6 20.735a2 2 0 0 1 -1 -1.735v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2h-1"/>' +
        '<path d="M11 17a2 2 0 0 1 2 2v2a1 1 0 0 1 -1 1h-2a1 1 0 0 1 -1 -1v-2a2 2 0 0 1 2 -2"/>' +
        '<path d="M11 5l-1 0"/><path d="M13 7l-1 0"/><path d="M11 9l-1 0"/><path d="M13 11l-1 0"/>' +
@@ -632,10 +639,12 @@ $("newform").addEventListener("submit", async (ev) => {
   if (!name) { showMsg("err", esc(ERRORS.INVALID_NAME)); return; }
   setBusy(true);
   showMsg("warn", "Creating “" + esc(name) + "”…");
+  let created = null;
   try {
     const r = await api("POST", "/api/v1/sd/disks", { path: S.sdPath, name }, 30000, true);
     if (r.status === 201) {
-      showMsg("ok", "“" + esc(r.data.path) + "” is created on the SD card: an empty 720 KiB disk.");
+      created = r.data.path;
+      showMsg("ok", "“" + esc(created) + "” is created on the SD card: an empty 720 KiB disk.");
       $("newname").value = "";
     } else if (r.data && r.data.error && r.data.error.code === "MACHINE_NOT_SUPPORTED") {
       showMsg("err", "Creating a new disk is not available yet for this computer. " + esc(r.data.error.message) + ".");
@@ -647,6 +656,11 @@ $("newform").addEventListener("submit", async (ev) => {
     showMsg("err", "No connection to RadioFloppy; check the SD card list afterwards.");
   }
   setBusy(false);
+  // A new disk is meant to be used: put it into the drive at once.
+  if (created) {
+    await sdInsert(created, created.split("/").pop(),
+                   "“" + esc(created) + "” is created on the SD card and is now the active floppy.");
+  }
 });
 
 const CRC_TABLE = (() => {
@@ -862,7 +876,8 @@ function renderSd() {
     } else {
       main.innerHTML = '<span class="sdname">' + esc(e.name) + "</span>" +
         (active ? ' <span class="badge active">Active</span>' : "") +
-        '<br><span class="small muted">' + kib(e.size) + "</span>";
+        '<br><span class="small muted">' + kib(e.size) +
+        (/\.st$/i.test(e.name) && e.read_only ? " · read-only" : "") + "</span>";
     }
     if (active) li.className = "active";
     const act = document.createElement("div");
@@ -873,6 +888,12 @@ function renderSd() {
         : !isImage ? "Only .ST and .HFE images can be inserted"
         : lock || "Put this disk into floppy drive " + S.drive, !canChange || active || !isImage,
         () => sdInsert(path, e.name)));
+      if (/\.st$/i.test(e.name)) {
+        act.append(button(icon(e.read_only ? "lock" : "unlock"), "secondary icon",
+          lock || (e.read_only ? "Read-only: the Atari cannot write to it. Click to make it writable"
+                               : "Writable for the Atari. Click to make it read-only"),
+          !canChange, () => sdSetReadOnly(path, e.name, !e.read_only)));
+      }
     }
     act.append(button(icon("trash"), "danger icon", lock || (e.type === "folder" ? "Delete folder" : "Delete file"),
       !canChange, () => (e.type === "folder" ? sdDeleteFolder(path, e.name) : sdDeleteFile(path, e.name))));
@@ -889,7 +910,7 @@ async function sdOpen(path) {
   await refreshSd();
 }
 
-async function sdInsert(path, name) {
+async function sdInsert(path, name, okText) {
   if (S.busy) return;
   setBusy(true);
   try {
@@ -899,7 +920,7 @@ async function sdInsert(path, name) {
       S.current = r.data;
       renderCurrent();
       renderSd();
-      showMsg("ok", "“" + esc(name) + "” is now the active floppy.");
+      showMsg("ok", okText || "“" + esc(name) + "” is now the active floppy.");
     } else if (r.data && r.data.error && r.data.error.code === "DRIVE_BUSY") {
       showMsg("err", esc(ERRORS.DRIVE_BUSY.replace("{drive}", S.drive)) + ' <button type="button" id="retry">Try again</button>');
       $("retry").addEventListener("click", () => sdInsert(path, name));
@@ -910,6 +931,19 @@ async function sdInsert(path, name) {
     setOnline(false);
   }
   setBusy(false);
+}
+
+async function sdSetReadOnly(path, name, ro) {
+  if (S.busy) return;
+  setBusy(true);
+  try {
+    const r = await api("PUT", "/api/v1/sd/files" + sdQuery(path), { read_only: ro }, 15000, true);
+    if (r.status === 200) showMsg("ok", "“" + esc(name) + "” is " + (ro ? "read-only" : "writable") + " now.");
+    else showError(r.data, r.status, "Changing “" + name + "” failed.");
+  } catch (e) {
+    setOnline(false);
+  }
+  setBusy(false);                   // also refreshes the SD card list
 }
 
 async function sdDeleteFile(path, name) {

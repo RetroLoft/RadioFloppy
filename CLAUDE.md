@@ -29,8 +29,8 @@ add a handoff file before committing.
 working. Never flash current firmware on a rev 1 board (GPIO20 is the
 buzzer there).
 
-Open work, in order: writing (every disk is read-only now; plan: write
-to the copy in the flash, then to the file on the SD card); HFE weak bits (phase 3, needs a test file with real RAND
+Open work, in order: a power-cut test of writing (the journal in the
+flash); HFE weak bits (phase 3, needs a test file with real RAND
 areas); a timing measurement tool (P-47 hangs after its intro); cosmetic
 items listed in `docs/HANDOFF_HFE.md`.
 
@@ -48,9 +48,8 @@ items listed in `docs/HANDOFF_HFE.md`.
   images on the device.
 - Requirements from the HFE work (keep): the ST route stays unchanged
   incl. write support; INDEX sits on the real revolution boundary; measure
-  timing on hardware, don't assume; HFE is READ_ONLY and stored
-  stored
-as it is; never accept an image that cannot be activated.
+  timing on hardware, don't assume; HFE is READ_ONLY and stored as it
+  is; never accept an image that cannot be activated.
 
 ## Build, flash, test
 
@@ -94,12 +93,13 @@ HFEv3 from a Greaseweazle flux dump). Commercial images are never committed.
   change, also while selected unless the computer writes).
 - `flux_stream.c` – RMT flux (RDATA) and INDEX; ST mode and HFE mode.
 - `disk_image.c`, `disk_switch.c` – track buffers in PSRAM, disk changes.
-- `disk_write.c` – receives and decodes sectors the computer writes
-  (saving them is not there yet: every disk is read-only).
+- `disk_write.c` – receives and decodes sectors the computer writes,
+  write protection, saving (journal in the flash copy, then the file).
 - `hfe.c` – HFE parser, packing, streaming reader.
 - `sd_card.c`, `sd_path.c` – SD card in J5 (shared SPI bus, own lock, FAT
   with long names), root directory, path rules, file reader and writer.
-- `ext_flash.c`, `disk_copy.c` – NOR flash: the copy of the last disk;
+- `ext_flash.c`, `disk_copy.c` – NOR flash: the copy of the last disk
+  (also the write journal);
   `settings.c` – settings record (v9). Layout: `flash_layout.h`.
 - `api.c`, `web/index.html` – HTTP API and web UI. `oled.c`, `leds.c`,
   `buttons.c`, `step_sound.c` – front panel. `wifi_net.c`, `setup_mode.c` – WiFi.

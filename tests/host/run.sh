@@ -14,7 +14,7 @@ gcc $CFLAGS -o test_st_format test_st_format.c ../../main/st_format.c ../../main
 gcc $CFLAGS -o test_mfm_write test_mfm_write.c ../../main/mfm_track.c
 gcc $CFLAGS -o test_hfe test_hfe.c ../../main/hfe.c
 gcc $CFLAGS -o test_sd_path test_sd_path.c ../../main/sd_path.c
-gcc $CFLAGS -o test_disk_copy test_disk_copy.c mock_ext_flash.c ../../main/disk_copy.c
+gcc $CFLAGS -DDISK_COPY_NO_LOCK -o test_disk_copy test_disk_copy.c mock_ext_flash.c ../../main/disk_copy.c
 gcc $CFLAGS -o test_title test_title.c ../../main/disk_title.c ../../main/oled_gfx.c
 
 echo "== .ST validation =="; ./test_st_image

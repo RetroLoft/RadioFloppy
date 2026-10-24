@@ -15,10 +15,10 @@
  * disk operation; at the latest a minute after the last write if the
  * motor keeps running).
  *
- * For now no disk is writable: images live on the SD card and saving to
- * it comes in a next version, so the drive always reports write
- * protection (machine ATARI, receiver running, a disk whose sectors are
- * kept: none yet).
+ * Save: into the copy of the disk in the flash (journal), then into the
+ * file on the SD card (see disk_write.c). Writable: an .ST file on the
+ * card without the FAT read-only attribute (machine ATARI, receiver
+ * running).
  */
 #pragma once
 
@@ -27,6 +27,7 @@
 
 #include "esp_err.h"
 
+#define WRITE_NOTE_MAX     240
 #define SAVE_DELAY_MS   2000    /* motor off this long: written sectors are saved */
 
 typedef enum {
@@ -42,6 +43,7 @@ typedef struct {
     bool writable;              /* WPROT released now */
     const char *reason;         /* why protected ("" when writable) */
     char error[96];             /* last save error */
+    char note[WRITE_NOTE_MAX];     /* e.g. where changes went whose file was replaced */
     uint32_t sectors_written;   /* since start-up */
     uint32_t writes_rejected;   /* CRC / sync / position errors */
     uint32_t saves;

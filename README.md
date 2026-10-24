@@ -10,7 +10,7 @@ Framework: ESP-IDF v5.5.5 (C).
 
 | Test | Bestand | Wat |
 | ---- | ------- | --- |
-| `floppy_emu_run()` (actief) | `main/floppy_app.c`, `sd_card.c`, `disk_copy.c`, `drive_emu.c`, `flux_stream.c`, `mfm_track.c`, `disk_image.c` | **Read-only** floppy-emulatie als drive B: (`EMU_SELECT_LINE`). De image (.ST of HFE) komt van de SD-kaart (J5), bij opstarten zonder kaart uit de kopie van de laatste disk op de externe SPI-flash U2 (zie `docs/FLASH_LAYOUT.md`), of uit een tijdelijke PSRAM-upload (.ST). Alle 168 sporen worden bij het opstarten naar MFM gecodeerd in PSRAM (FlashFloppy-layout voor .ST: geen IAM, GAP4a 80, GAP2 22, GAP3 84). RMT+DMA speelt de fluxstroom op GPIO41 (0,8 us pulsen, 10 MHz), een tweede RMT-kanaal de INDEX-puls op GPIO1 (3 ms per 200 ms, synchroon gestart). WPROT actief zodra geselecteerd; schrijven is uitgeschakeld. |
+| `floppy_emu_run()` (actief) | `main/floppy_app.c`, `sd_card.c`, `disk_copy.c`, `drive_emu.c`, `flux_stream.c`, `mfm_track.c`, `disk_image.c` | Floppy-emulatie als drive B: (`EMU_SELECT_LINE`). De image (.ST of HFE) komt van de SD-kaart (J5), bij opstarten zonder kaart uit de kopie van de laatste disk op de externe SPI-flash U2 (zie `docs/FLASH_LAYOUT.md`), of uit een tijdelijke PSRAM-upload (.ST). Alle 168 sporen worden bij het opstarten naar MFM gecodeerd in PSRAM (FlashFloppy-layout voor .ST: geen IAM, GAP4a 80, GAP2 22, GAP3 84). RMT+DMA speelt de fluxstroom op GPIO41 (0,8 us pulsen, 10 MHz), een tweede RMT-kanaal de INDEX-puls op GPIO1 (3 ms per 200 ms, synchroon gestart). WPROT volgt de schrijfbeveiliging van de disk; geschreven sectoren worden opgeslagen (zie `docs/API.md` → *Writing*). |
 | (oud) `legacy/input_monitor.c` | niet gebouwd | Selectiebewuste monitor met TRACK0 uit de vorige fase, ter referentie. |
 | `loopback_test_run()` | `main/loopback_test.c` | Zoekt continu welke Shugart-uitgang (ULN2003A) via een jumper op J1 met welke ingang (SN74LVC245A) verbonden is. |
 
@@ -47,8 +47,9 @@ eerste stap in `app_main()`.
 **Floppy images:** de firmware bevat geen images. De images staan als bestanden op de SD-kaart,
 onder de ingestelde root directory. De externe flash bevat alleen de instellingen en een kopie van
 de laatste disk (`docs/FLASH_LAYOUT.md`), zodat RadioFloppy ook zonder kaart met die disk start.
-De oude imagebibliotheek op de flash wordt bij de eerste start van deze firmware gewist. Voorlopig
-is iedere disk schrijfbeveiligd. `images/RETROLOFT_TEST_720K.ST` is alleen een testbestand in de
+De oude imagebibliotheek op de flash wordt bij de eerste start van deze firmware gewist. De Atari
+kan schrijven naar .ST-bestanden zonder het FAT-kenmerk alleen-lezen (slotje op de website); een
+save gaat eerst naar de kopie in de flash (journaal) en dan naar het bestand op de kaart. `images/RETROLOFT_TEST_720K.ST` is alleen een testbestand in de
 repository. Commerciële images blijven lokaal (`.gitignore`).
 
 Volledige pinmapping: `main/board_pins.h`.

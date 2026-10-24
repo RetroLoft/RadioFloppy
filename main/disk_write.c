@@ -6,9 +6,11 @@
  * decodes and applies sectors within a few milliseconds; the save task
  * (low priority) does the slow storage work and decides write protection.
  *
- * For now no disk is writable: images live on the SD card, and saving
- * written sectors to it comes in a next version (save_now() has nothing
- * to save). Receiving and decoding stay in place for that.
+ * Saving goes through the copy of the disk in the flash as a journal
+ * (disk_copy.h): first the changed blocks of the copy, committed as
+ * pending, then the file on the SD card, then the copy is marked synced.
+ * A power cut leaves the old or the new version of the file, never a mix:
+ * a pending copy is written to the card at the next start-up.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,12 +26,16 @@
 #include "esp_timer.h"
 
 #include "board_pins.h"
+#include "disk_copy.h"
 #include "disk_image.h"
 #include "disk_write.h"
 #include "drive_emu.h"
+#include "flash_layout.h"
 #include "flux_stream.h"
 #include "machine.h"
 #include "mfm_track.h"
+#include "sd_card.h"
+#include "settings.h"
 
 #define RX_RESOLUTION_HZ    10000000    /* 0.1 us per tick */
 #define RX_TICK_NS          100
@@ -52,10 +58,12 @@ static bool rx_ready;
 
 static TaskHandle_t save_task;
 static SemaphoreHandle_t save_lock;
+static SemaphoreHandle_t prot_lock;     /* one update_protection at a time */
 static portMUX_TYPE st_lock = portMUX_INITIALIZER_UNLOCKED;
 static write_status_t status = { .state = WRITE_READ_ONLY, .reason = "starting" };
 static volatile int64_t last_write_us;
 static volatile bool save_error;
+static bool save_hopeless;              /* the error cannot pass by itself: no retries */
 static volatile bool saving;
 static int64_t last_try_us;
 
@@ -95,8 +103,23 @@ static const char *protect_reason(void)
     if (d.source == DISK_SRC_PSRAM) {
         return "temporary disk (PSRAM)";
     }
+    if (d.hfe) {
+        return "HFE image (always read-only)";
+    }
+    if (d.sd_copy) {
+        return "played from its copy in the flash (no SD card at start-up)";
+    }
+    if (d.image_changed) {
+        return "the file was replaced or deleted since it was inserted";
+    }
+    if (d.read_only) {
+        return "the file is read-only";
+    }
+    if (!sd_card_present()) {
+        return "no SD card";
+    }
     if (!disk_writable_data()) {
-        return "writing to the SD card is not available yet";
+        return "no memory to keep the sectors";
     }
     if (save_error) {
         return "saving failed";
@@ -106,6 +129,9 @@ static const char *protect_reason(void)
 
 static void update_protection(void)
 {
+    if (prot_lock) {
+        xSemaphoreTake(prot_lock, portMAX_DELAY);
+    }
     const char *why = protect_reason();
     bool on = why == NULL;
 
@@ -118,14 +144,16 @@ static void update_protection(void)
     status.writable = on;
     status.reason = on ? "" : why;
     portEXIT_CRITICAL(&st_lock);
+    if (prot_lock) {
+        xSemaphoreGive(prot_lock);
+    }
 }
 
 void disk_write_refresh(void)
 {
+    update_protection();                /* at once: callers report the new state */
     if (save_task) {
         xTaskNotify(save_task, 1, eSetBits);
-    } else {
-        update_protection();
     }
 }
 
@@ -277,6 +305,117 @@ static void rx_task(void *arg)
 
 /* ---- Saving ------------------------------------------------------------------------ */
 
+static int bits(uint32_t m)
+{
+    int n = 0;
+    for (; m; m &= m - 1) {
+        n++;
+    }
+    return n;
+}
+
+/*
+ * The snapshot into the flash copy (journal), then into the file on the
+ * card. ESP_ERR_INVALID_STATE: the file is not the inserted disk any more
+ * (a retry does not help); other errors may pass (card back, ...).
+ */
+static esp_err_t save_journal(const disk_snapshot_t *snap, char *msg, size_t msz)
+{
+    disk_info_t d;
+    disk_copy_info_t ci;
+    esp_err_t err;
+
+    disk_get_current(&d);
+    if (d.source != DISK_SRC_SD || d.sd_copy || d.size != snap->size) {
+        snprintf(msg, msz, "not a disk from the SD card");
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint32_t crc = esp_rom_crc32_le(0, snap->data, snap->size);
+    int64_t t0 = esp_timer_get_time();
+
+    disk_copy_lock();
+    /* 1. The flash copy: only the changed blocks when it is this disk as
+     * it was before these changes, else the whole image; nothing when it
+     * holds these changes already (a retry). */
+    bool have = disk_copy_get(&ci) && strcmp(ci.path, d.sd_path) == 0 && ci.size == snap->size;
+    bool journaled = have && ci.crc == crc && ci.pending;
+    if (journaled) {
+        err = ESP_OK;
+    } else if (have && ci.crc == d.crc32) {
+        err = disk_copy_patch_begin(snap->size);
+        for (uint32_t i = 0; i < 32 && err == ESP_OK; i++) {
+            if ((snap->mask & (1u << i)) && i * RF_COPY_BLOCK < snap->size) {
+                err = disk_copy_patch(i * RF_COPY_BLOCK, snap->data + i * RF_COPY_BLOCK);
+            }
+        }
+    } else {
+        err = disk_copy_begin(snap->size);
+        if (err == ESP_OK) {
+            err = disk_copy_write(snap->data, snap->size);
+        }
+    }
+    if (err == ESP_OK && !journaled) {
+        ci = (disk_copy_info_t) { .size = snap->size, .crc = crc, .pending = true,
+                                  .base_crc = d.file_crc };
+        snprintf(ci.path, sizeof(ci.path), "%s", d.sd_path);
+        err = disk_copy_commit(&ci);
+    }
+    if (err != ESP_OK) {
+        disk_copy_unlock();
+        snprintf(msg, msz, "flash: %s", esp_err_to_name(err));
+        return err;
+    }
+    disk_note_saved(snap->gen, crc, d.file_crc);    /* safe in the journal */
+    int64_t t1 = esp_timer_get_time();
+
+    /* 2. The file on the card: only when it still is the file the changes
+     * belong to (or already the new version: a retry). When it was
+     * replaced or deleted meanwhile, the changes go into a new file. */
+    uint32_t fcrc = 0, fsize = 0;
+    sd_result_t r = d.image_changed ? SD_NOT_FOUND : sd_card_file_crc(d.sd_path, &fcrc, &fsize);
+    if (r == SD_NOT_FOUND || (r == SD_OK && (fsize != snap->size ||
+                                             (fcrc != d.file_crc && fcrc != crc)))) {
+        char saved[SD_REL_MAX + 1];
+        r = sd_card_save_changes(d.sd_path, snap->data, snap->size, crc, saved, sizeof(saved));
+        if (r == SD_OK) {
+            disk_copy_mark_synced();
+            disk_note_sd_changed(d.sd_path, false);     /* this disk is not that file */
+            portENTER_CRITICAL(&st_lock);
+            snprintf(status.note, sizeof(status.note), "changes saved as %s", saved);
+            portEXIT_CRITICAL(&st_lock);
+            printf("Write: %s was replaced or deleted meanwhile - changes saved as %s\n",
+                   d.sd_path, saved);
+            disk_copy_unlock();
+            return ESP_OK;
+        }
+    } else if (r == SD_OK && fcrc != crc) {
+        /* Earlier changes not on the card yet: everything. */
+        uint32_t mask = d.file_crc == d.crc32 ? snap->mask : UINT32_MAX;
+        r = sd_card_update(d.sd_path, snap->data, snap->size, mask, RF_COPY_BLOCK);
+        if (r == SD_OK) {
+            r = sd_card_file_crc(d.sd_path, &fcrc, &fsize);
+        }
+        if (r == SD_OK && fcrc != crc) {
+            snprintf(msg, msz, "the file on the SD card reads back wrong");
+            err = ESP_FAIL;
+        }
+    }
+    if (r != SD_OK && err == ESP_OK) {
+        snprintf(msg, msz, "SD card: %s", sd_result_name(r));
+        err = ESP_FAIL;
+    }
+    if (err == ESP_OK) {
+        disk_note_saved(snap->gen, crc, crc);
+        settings_set_last_sd(d.sd_path, crc);
+        disk_copy_mark_synced();
+    }
+    disk_copy_unlock();
+    printf("Write: %s %d block(s) of %s (CRC32 %08lx): flash %lld ms, SD card %lld ms\n",
+           err == ESP_OK ? "saved" : "saved in the flash only:", bits(snap->mask), d.sd_path,
+           (unsigned long)crc, (t1 - t0) / 1000, (esp_timer_get_time() - t1) / 1000);
+    return err;
+}
+
 static esp_err_t save_now(void)
 {
     disk_snapshot_t snap;
@@ -290,14 +429,15 @@ static esp_err_t save_now(void)
     }
     saving = true;
     last_try_us = esp_timer_get_time();
+    char msg[96] = "";
     if (err == ESP_OK) {
-        /* No storage for written sectors yet (SD card writing comes later);
-         * no disk is writable, so this does not happen. */
-        printf("Write: %lu byte(s) of changes cannot be saved (writing to the SD card is "
-               "not available yet)\n", (unsigned long)snap.size);
+        err = save_journal(&snap, msg, sizeof(msg));
+        if (err != ESP_OK) {
+            disk_snapshot_failed(&snap);    /* still to be saved */
+        }
         free(snap.data);
-        err = ESP_ERR_NOT_SUPPORTED;
-        disk_snapshot_failed(&snap);
+    } else {
+        snprintf(msg, sizeof(msg), "no memory for a copy of the image");
     }
     saving = false;
     portENTER_CRITICAL(&st_lock);
@@ -308,15 +448,13 @@ static esp_err_t save_now(void)
     }
     portEXIT_CRITICAL(&st_lock);
     if (err != ESP_OK) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "%s", err == ESP_ERR_NOT_SUPPORTED ? "saving not available"
-                 : esp_err_to_name(err));
         portENTER_CRITICAL(&st_lock);
         memcpy(status.error, msg, sizeof(status.error));
         portEXIT_CRITICAL(&st_lock);
         printf("Write: SAVING FAILED (%s) - disk write-protected, changes kept in memory\n", msg);
     }
     save_error = err != ESP_OK;
+    save_hopeless = err == ESP_ERR_INVALID_STATE;
     xSemaphoreGive(save_lock);
     update_protection();
     return err;
@@ -344,7 +482,8 @@ static void save_task_fn(void *arg)
         bool overdue = now - last_write_us >= SAVE_MAX_MS * 1000LL;
         if (disk_dirty() && !save_error && !ds.wgate && (quiet || overdue)) {
             save_now();
-        } else if (disk_dirty() && save_error && now - last_try_us >= RETRY_MS * 1000LL) {
+        } else if (disk_dirty() && save_error && !save_hopeless &&
+                   now - last_try_us >= RETRY_MS * 1000LL) {
             save_now();                 /* e.g. storage was freed meanwhile */
         }
         if (!disk_dirty() && save_error) {
@@ -392,6 +531,7 @@ void disk_write_status(write_status_t *st)
 esp_err_t disk_write_init(void)
 {
     save_lock = xSemaphoreCreateMutex();
+    prot_lock = xSemaphoreCreateMutex();
     rx_queue = xQueueCreate(4, sizeof(size_t));
     rx_buf = heap_caps_aligned_alloc(64, RX_SYMBOLS * sizeof(rmt_symbol_word_t),
                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);

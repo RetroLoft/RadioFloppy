@@ -36,7 +36,7 @@
 typedef enum {
     DISK_SRC_NONE,          /* no disk inserted */
     DISK_SRC_PSRAM,         /* temporary upload, lost at reset */
-    DISK_SRC_SD,            /* a file on the SD card (read-only for now) */
+    DISK_SRC_SD,            /* a file on the SD card */
 } disk_source_t;
 
 typedef struct {
@@ -48,10 +48,13 @@ typedef struct {
     int cylinders;          /* geometry of the image */
     int heads;
     int sectors;            /* per track */
-    bool keep_sectors;      /* writable .ST: keep its sectors for writing (none for now) */
+    bool keep_sectors;      /* .ST from the SD card: sectors kept, so it can be written */
     bool hfe;               /* HFE image: packed tracks (hfe.h), played in native timing */
     char sd_path[SD_REL_MAX + 1];   /* DISK_SRC_SD: the file, below the root directory */
     bool sd_copy;           /* DISK_SRC_SD read from its copy in the flash (card not there) */
+    bool read_only;         /* DISK_SRC_SD: the file has the FAT read-only attribute */
+    uint32_t file_crc;      /* DISK_SRC_SD: CRC-32 of the file on the card as last known
+                             * (differs from crc32 while written sectors are not on it) */
 } disk_info_t;
 
 /* Active tracks, [cyl][head][MFM_MAX_BYTES]; read by the flux ISR. */
@@ -119,6 +122,17 @@ void disk_set_change_callback(void (*cb)(void));
 /* A file on the SD card was replaced or deleted (folder: everything in
  * folder path): flag the current disk if it came from there. */
 void disk_note_sd_changed(const char *path, bool folder);
+
+/* The root directory setting changed: the current SD disk's path now
+ * means another file (flagged as changed). */
+void disk_note_root_changed(void);
+
+/* File path got / lost the read-only attribute. */
+void disk_note_sd_read_only(const char *path, bool ro);
+
+/* Written sectors of the disk of generation gen were saved: the disk's
+ * CRC-32 is crc now, and the file on the card has file_crc. */
+void disk_note_saved(uint32_t gen, uint32_t crc, uint32_t file_crc);
 
 /* ---- Writing (see disk_write.h) ---------------------------------------------- */
 

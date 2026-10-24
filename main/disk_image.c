@@ -56,8 +56,8 @@ static uint32_t prepared_cells;     /* track length in the inactive buffer */
 static uint8_t prepared_kind;       /* DISK_TRACKS_* in the inactive buffer */
 
 /*
- * Sector data of the active disk, kept for writing (writable disks only;
- * none for now): written sectors are patched here, their track is encoded
+ * Sector data of the active disk, kept for writing (.ST from the SD
+ * card): written sectors are patched here, their track is encoded
  * again, and the changed 64 KiB regions are marked in dirty_mask until
  * they are saved.
  */
@@ -67,6 +67,7 @@ static uint8_t *prepared_raw;       /* copy taken by disk_prepare() */
 static disk_info_t active_geo;      /* geometry and id belonging to active_raw */
 static uint32_t dirty_mask;         /* bit i: 64 KiB region i changed */
 #define DIRTY_REGION    (64u * 1024u)
+_Static_assert(DIRTY_REGION == RF_COPY_BLOCK, "a changed region is one block of the flash copy");
 volatile uint32_t disk_media_gen;   /* +1 per disk change */
 
 /*
@@ -211,6 +212,38 @@ void disk_get_current(disk_info_t *info)
     portENTER_CRITICAL(&info_lock);
     *info = current;
     portEXIT_CRITICAL(&info_lock);
+}
+
+void disk_note_root_changed(void)
+{
+    portENTER_CRITICAL(&info_lock);
+    if (current.source == DISK_SRC_SD) {
+        current.image_changed = true;
+    }
+    portEXIT_CRITICAL(&info_lock);
+}
+
+void disk_note_sd_read_only(const char *path, bool ro)
+{
+    portENTER_CRITICAL(&info_lock);
+    if (current.source == DISK_SRC_SD && strcmp(current.sd_path, path) == 0) {
+        current.read_only = ro;
+    }
+    portEXIT_CRITICAL(&info_lock);
+}
+
+void disk_note_saved(uint32_t gen, uint32_t crc, uint32_t file_crc)
+{
+    xSemaphoreTake(raw_lock, portMAX_DELAY);
+    if (gen == disk_media_gen) {
+        active_geo.crc32 = crc;
+        active_geo.file_crc = file_crc;
+        portENTER_CRITICAL(&info_lock);
+        current.crc32 = crc;
+        current.file_crc = file_crc;
+        portEXIT_CRITICAL(&info_lock);
+    }
+    xSemaphoreGive(raw_lock);
 }
 
 void disk_note_sd_changed(const char *path, bool folder)
@@ -383,7 +416,9 @@ static esp_err_t load_boot_sd(const char *path, uint8_t **raw, disk_info_t *info
         return ESP_FAIL;
     }
     info->size = size;
-    info->crc32 = esp_rom_crc32_le(0, buf, size);
+    info->crc32 = info->file_crc = esp_rom_crc32_le(0, buf, size);
+    info->keep_sectors = true;
+    sd_card_get_read_only(path, &info->read_only);
     printf("Last disk: %s (SD card, %lu bytes, CRC32 %08lx, read in %lld ms)\n", path,
            (unsigned long)size, (unsigned long)info->crc32, (esp_timer_get_time() - t0) / 1000);
     *raw = buf;
@@ -409,16 +444,78 @@ static esp_err_t load_boot_copy(uint8_t **raw, disk_info_t *info)
     }
     info->size = ci.size;
     info->crc32 = ci.crc;
+    info->file_crc = ci.pending ? ci.base_crc : ci.crc;
     info->sd_copy = true;
     *raw = buf;
     return ESP_OK;
 }
 
-/* Does the flash copy belong to the remembered disk? */
+/* Does the flash copy belong to the remembered disk? (A pending copy is
+ * that disk with sectors written to it.) */
 static bool copy_matches(const settings_t *cfg)
 {
     disk_copy_info_t ci;
-    return disk_copy_get(&ci) && strcmp(ci.path, cfg->last_sd) == 0 && ci.crc == cfg->last_sd_crc;
+    return disk_copy_get(&ci) && strcmp(ci.path, cfg->last_sd) == 0 &&
+           (ci.crc == cfg->last_sd_crc || (ci.pending && ci.base_crc == cfg->last_sd_crc));
+}
+
+/*
+ * A pending copy (written sectors saved in the flash, but the power went
+ * before they were all on the card): write it to the card now. Only onto
+ * the file it was made from (CRC base_crc, or already the new one).
+ */
+static void sync_pending_copy(void)
+{
+    disk_copy_info_t ci;
+    uint32_t crc, size;
+
+    disk_copy_lock();
+    if (!disk_copy_get(&ci) || !ci.pending) {
+        disk_copy_unlock();
+        return;
+    }
+    sd_result_t r = sd_card_file_crc(ci.path, &crc, &size);
+    if (r == SD_NO_CARD || r == SD_IO) {
+        printf("Write: %s has saved changes in the flash; the SD card is not available\n", ci.path);
+        disk_copy_unlock();
+        return;                         /* played from the copy; synced at a later start */
+    }
+    uint8_t *buf = heap_caps_malloc(ci.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf || disk_copy_read(0, buf, ci.size) != ESP_OK ||
+        esp_rom_crc32_le(0, buf, ci.size) != ci.crc) {
+        printf("Write: saved changes of %s cannot be read from the flash\n", ci.path);
+        free(buf);
+        disk_copy_unlock();
+        return;
+    }
+    bool wrote = false;
+    if (r == SD_OK && size == ci.size && crc == ci.base_crc) {
+        wrote = true;
+        r = sd_card_update(ci.path, buf, ci.size, UINT32_MAX, DIRTY_REGION);
+        if (r == SD_OK) {
+            r = sd_card_file_crc(ci.path, &crc, &size);
+        }
+    }
+    if (r == SD_OK && size == ci.size && crc == ci.crc) {
+        disk_copy_mark_synced();
+        settings_set_last_sd(ci.path, ci.crc);
+        printf("Write: saved changes of %s written from the flash to the SD card\n", ci.path);
+    } else if (!wrote && (r == SD_NOT_FOUND || r == SD_OK)) {
+        /* The file was replaced or deleted (on a PC): keep both. */
+        char saved[SD_REL_MAX + 1];
+        r = sd_card_save_changes(ci.path, buf, ci.size, ci.crc, saved, sizeof(saved));
+        if (r == SD_OK) {
+            disk_copy_mark_synced();
+        }
+        printf("Write: %s was replaced or deleted - its saved changes %s%s\n", ci.path,
+               r == SD_OK ? "are in " : "could NOT be stored: ", r == SD_OK ? saved
+               : sd_result_name(r));
+    } else {
+        printf("Write: saved changes of %s NOT written to the SD card (%s)\n", ci.path,
+               sd_result_name(r));
+    }
+    free(buf);
+    disk_copy_unlock();
 }
 
 /*
@@ -437,6 +534,7 @@ static esp_err_t load_boot(uint8_t *buf, uint8_t **raw, disk_info_t *info, bool 
         return ESP_ERR_NOT_FOUND;
     }
     erase_old_library();
+    sync_pending_copy();
     settings_get(&cfg);
     if (!cfg.last_sd[0]) {
         printf("No disk remembered - insert one from the SD card through the web page.\n");
@@ -479,6 +577,7 @@ static void set_active_buffer(void *arg)
 esp_err_t disk_image_init(void)
 {
     raw_lock = xSemaphoreCreateMutex();
+    disk_copy_init();
     printf("PSRAM free: %u KiB before the track buffers\n",
            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     for (int i = 0; i < 2; i++) {
@@ -552,7 +651,7 @@ esp_err_t disk_image_init(void)
 esp_err_t disk_prepare(const uint8_t *raw, const disk_info_t *info)
 {
     /* Writable disks: keep a copy of the sectors, so the disk can be
-     * written (none for now). */
+     * written. */
     xSemaphoreTake(raw_lock, portMAX_DELAY);
     free(prepared_raw);
     prepared_raw = NULL;

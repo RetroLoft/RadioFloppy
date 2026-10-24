@@ -116,7 +116,8 @@ def sd_tests(cc):
     r = sd_upload(cc, name, path=T + "/L")
     check(r[0] == 200 and r[1]["state"] == "done", "upload .ST into a subfolder")
     ents = call("GET", "/api/v1/sd/files" + q(path=T + "/L"))[1]["entries"]
-    check([(e["name"], e.get("size")) for e in ents] == [(name, len(cc))], "listed with its size, no temporary file")
+    check([(e["name"], e.get("size"), e.get("read_only")) for e in ents] == [(name, len(cc), False)],
+          "listed with its size, writable, no temporary file")
     r = call("POST", "/api/v1/uploads", {"filename": name, "size": len(cc), "destination": "sd", "path": T + "/L"})
     check(r[0] == 409 and err(r) == "FILE_EXISTS", "same name again: FILE_EXISTS")
     check(sd_upload(cc, name, path=T + "/L", overwrite=True)[0] == 200, "overwrite: true replaces it")
@@ -139,7 +140,36 @@ def sd_tests(cc):
     r = call("PUT", "/api/v1/current", {"sd_path": path})
     check(r[0] == 200 and r[1]["source"] == "sd" and r[1]["sd_path"] == path and
           r[1]["crc32"] == crc(cc) and not r[1]["image_changed_since"], "insert the .ST from the SD card")
-    check(r[0] == 200 and r[1]["write"]["state"] == "read_only", "write-protected")
+    check(r[0] == 200 and r[1]["write"]["state"] == "writable", "writable for the Atari")
+
+    print("SD card: read-only attribute")
+    wp = lambda: current()["write"]
+    r = call("PUT", "/api/v1/sd/files" + q(path=path), {"read_only": True})
+    check(r[0] == 200 and r[1] == {"path": path, "read_only": True}, "make the inserted file read-only")
+    check(wp()["state"] == "read_only" and wp()["reason"] == "the file is read-only",
+          "the inserted disk is write-protected now")
+    ents = call("GET", "/api/v1/sd/files" + q(path=T + "/L"))[1]["entries"]
+    check(ents[0].get("read_only") is True, "listed as read-only")
+    r = call("POST", "/api/v1/uploads", {"filename": name, "size": len(cc), "destination": "sd",
+                                         "path": T + "/L", "overwrite": True})
+    if r[0] == 201:
+        r = call("PUT", r[1]["upload_url"], raw=cc)
+    check(r[0] == 409 and err(r) == "FILE_READ_ONLY", "a read-only file is not overwritten by an upload")
+    names = [e["name"] for e in call("GET", "/api/v1/sd/files" + q(path=T + "/L"))[1]["entries"]]
+    check(names == [name], "nothing else left in the folder")
+    check(call("PUT", "/api/v1/current", {"sd_path": path})[0] == 200 and wp()["state"] == "read_only",
+          "inserted again: still write-protected")
+    r = call("PUT", "/api/v1/sd/files" + q(path=path), {"read_only": False})
+    check(r[0] == 200 and wp()["state"] == "writable", "writable again")
+    check(call("PUT", "/api/v1/sd/files" + q(path=path), {"read_only": "yes"})[0] == 400,
+          "read_only not a boolean: 400")
+    check(call("PUT", "/api/v1/sd/files" + q(path=T + "/nope.st"), {"read_only": True})[0] == 404,
+          "missing file: 404")
+    check(call("PUT", "/api/v1/sd/files" + q(path="../x.st"), {"read_only": True})[0] == 400,
+          "bad path: 400")
+    check(call("PUT", "/api/v1/sd/files" + q(path=path), {"read_only": True}, token=False)[0] in (200, 401),
+          "without token: only refused when a token is configured")
+    call("PUT", "/api/v1/sd/files" + q(path=path), {"read_only": False})
     for bad, code in [("nope.st", 404), ("../x.st", 400), (T + "/L", 422)]:
         check(call("PUT", "/api/v1/current", {"sd_path": bad})[0] == code, "insert %r: %d" % (bad, code))
     check(call("PUT", "/api/v1/current", {})[0] == 400, "insert without sd_path: 400")
@@ -148,12 +178,16 @@ def sd_tests(cc):
         r = call("PUT", "/api/v1/current", {"sd_path": root_hfe[0]})
         check(r[0] == 200 and r[1]["source"] == "sd" and r[1]["sides"] in (1, 2) and r[1]["cylinders"] > 0,
               "insert .HFE from the SD card (%s)" % root_hfe[0])
+        check(r[0] == 200 and r[1]["write"]["state"] == "read_only" and "HFE" in r[1]["write"]["reason"],
+              "an HFE disk is write-protected")
     else:
         print("        (no .HFE file in the root directory: HFE insert skipped)")
     r = call("PUT", "/api/v1/current", {"sd_path": path})
     check(r[0] == 200, "insert the .ST again")
     check(call("DELETE", "/api/v1/sd/files" + q(path=path))[0] == 200, "delete the inserted file")
     check(current()["image_changed_since"], "deleting the active file: flagged as changed")
+    check(wp()["state"] == "read_only" and "replaced or deleted" in wp()["reason"],
+          "and write-protected")
     check(call("DELETE", "/api/v1/sd/files" + q(path=path))[0] == 404, "delete it again: 404")
 
     print("SD card: new disk")

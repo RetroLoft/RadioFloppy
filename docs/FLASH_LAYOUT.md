@@ -44,18 +44,26 @@ path and CRC-32). The file is streamed from the card in 8 KiB pieces; the
 SD card is locked per piece, so the API stays responsive (a 2 MB file
 takes about 17 s).
 
+The copy is also the **journal for writing** (see *Writing* in
+`docs/API.md`): a save patches the changed 64 KiB blocks of the copy,
+commits it as *pending* (newer than the file on the card), writes the
+file on the card and then marks the copy *synced*.
+
 Header (at `0x010000`, little endian):
 
 | Offset | Type      | Field      | Meaning                                         |
 | ------ | --------- | ---------- | ----------------------------------------------- |
 | 0      | u32       | magic      | `0x59504352` ("RCPY")                           |
-| 4      | u16       | version    | 2 (1 had its data at `0x011000`; not read)      |
-| 6      | u16       | hfe        | 1 = HFE file, 0 = .ST                           |
+| 4      | u16       | version    | 3 (2 without pending/base_crc, 1 with its data at `0x011000`; neither is read) |
+| 6      | u8        | hfe        | 1 = HFE file, 0 = .ST                           |
+| 7      | u8        | pending    | 1 = written sectors not on the card yet (until the sync word) |
 | 8      | u32       | size       | File size in bytes, 1 … 3 MiB                   |
 | 12     | u32       | crc        | CRC-32 (IEEE, as zlib `crc32()`) of the data    |
-| 16     | char[201] | path       | The file, relative to the root directory, NUL terminated |
-| 217    | 3         | reserved   | 0                                               |
-| 220    | u32       | header_crc | CRC-32 of bytes 0–219                           |
+| 16     | u32       | base_crc   | Pending: CRC-32 of the file on the card the changes belong to |
+| 20     | char[201] | path       | The file, relative to the root directory, NUL terminated |
+| 221    | 3         | reserved   | 0                                               |
+| 224    | u32       | header_crc | CRC-32 of bytes 0–223                           |
+| 4088   | u32       | sync       | `0x434E5953` ("SYNC"): a pending copy is on the card now (programmed later, no erase) |
 | 4092   | u32       | commit     | `0x21544D43` ("CMT!"), written last             |
 
 Writing a copy: erase the header sector (from now on there is no valid
@@ -64,12 +72,25 @@ copy) → write the data, erasing each 64 KiB block when the write enters it
 and check its CRC-32 → write the header → write the commit word. A power
 cut at any point leaves either no copy or a complete one.
 
-Using the copy at start-up (`main/disk_image.c`): the last disk
-(`last_sd` in the settings) is read from the card. Only when there is no
-card or it cannot be read, the copy is used, and only when its path and
-CRC-32 match `last_sd` and `last_sd_crc`; its data is checked against the
-CRC again while it is read. A card without the file: the drive starts
-empty (the copy is not used).
+Patching a copy (a save): erase the header sector → erase and write only
+the changed 64 KiB blocks → read *all* data back and check the new
+CRC-32 → header with `pending` = 1 and `base_crc` → commit word. After
+the file on the card is written and checked: the sync word.
+
+Start-up (`main/disk_image.c`):
+
+- A **pending** copy is written to the card first, but only onto the file
+  it belongs to (CRC-32 `base_crc`; or the new CRC already: then it is
+  only marked synced). If the file was replaced or deleted, the copy is
+  stored next to it as `<name> (changes).st`. Without a card it stays
+  pending (and the disk is played from it, write-protected).
+- The last disk (`last_sd` in the settings) is read from the card. Only
+  when there is no card or it cannot be read, the copy is used, and only
+  when its path matches `last_sd` and its CRC-32 (or, pending, its
+  `base_crc`) matches `last_sd_crc`; its data is checked against the CRC
+  again while it is read. A card without the file: the drive starts empty
+  (the copy is not used).
+- The *remember* task never overwrites a pending copy of another disk.
 
 ## Settings (one 4 KiB sector per copy, little endian)
 
@@ -100,7 +121,7 @@ anything is saved, the firmware uses its menuconfig defaults.
 | 257    | 3         | reserved       | 0                                               |
 | 260    | char[201] | last_sd        | Last disk from the SD card (below the root directory), `""` = none |
 | 461    | 3         | reserved       | 0                                               |
-| 464    | u32       | last_sd_crc    | CRC-32 of that file when it was inserted        |
+| 464    | u32       | last_sd_crc    | CRC-32 of that file when it was inserted or last saved |
 | 4092   | u32       | commit         | `0x21544D43` ("CMT!"), written last             |
 
 Older versions (1–8, `version_size()` in `main/settings.c` has their

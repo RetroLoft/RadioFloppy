@@ -23,17 +23,20 @@ Open `http://<device>/` in a browser (PC or phone). The page is served by
 the device itself, uses only this API and needs no internet access:
 
 - **Current Floppy** — the disk the Atari sees now, its origin (the SD
-  card, its copy in the flash, or a temporary PSRAM image) and a warning
-  when its file was replaced or deleted since.
+  card, its copy in the flash, or a temporary PSRAM image), whether the
+  Atari can write to it (and whether its changes are saved), and a
+  warning when its file was replaced or deleted since.
 - **Load a floppy temporarily** — upload a `.ST` file straight into the
   drive (PSRAM, not stored).
 - **New disk** — a name and *Create*: an empty, formatted 720 KiB Atari
-  disk as a file in the folder that is open in the SD card block (only
-  when the computer is set to Atari 16-bit).
+  disk as a file in the folder that is open in the SD card block, and
+  put into the drive at once (only when the computer is set to Atari
+  16-bit).
 - **SD card** — your floppy images: the files below the root directory,
   with a breadcrumb, folders first, then the files with their size;
-  **Insert** (.ST and .HFE), **Upload here…** (one or more files),
-  **New folder** and a delete button per file and folder.
+  **Insert** (.ST and .HFE), a lock per .ST file (read-only or writable
+  for the Atari), **Upload here…** (one or more files), **New folder**
+  and a delete button per file and folder.
 - **Admin access** — only shown when the device has a token; it is kept only in the open page.
 - **Settings** (gear icon, top right, `/#settings`) — connected computer, host name, floppy drive (A:/B:), buzzer on/off, front panel LEDs, SD card root directory, WiFi status,
   firmware version and a *Check for updates* button (not functional yet).
@@ -139,8 +142,9 @@ shorter than their file system — the missing tracks then read as
 unformatted, as they would from the real disk. Other geometries (8 sectors, 40 or 70
 cylinders, HD with 18 sectors, …) are recognised but not supported
 (`UNSUPPORTED_GEOMETRY`); anything above 1.5 MiB (1 572 864 bytes) is
-refused as `IMAGE_TOO_LARGE`. `.MSA` is not supported. For now every disk
-is **write-protected** for the Atari (see [Writing](#writing)).
+refused as `IMAGE_TOO_LARGE`. `.MSA` is not supported. The Atari can write to
+an .ST file on the SD card unless the file is read-only (see
+[Writing](#writing)).
 
 **HFE** (HxC Floppy Emulator) files (`.hfe`) are played from the SD card;
 they cannot be loaded temporarily. An upload to the card is checked as it
@@ -213,6 +217,7 @@ web page asks for the token.
 | `GET /api/v1/uploads/{id}`      |       | State of an upload                          |
 | `GET /api/v1/sd/files?path=`    |       | Contents of a folder on the SD card         |
 | `DELETE /api/v1/sd/files?path=` | (yes) | Delete a file on the SD card                |
+| `PUT /api/v1/sd/files?path=`    | (yes) | Make a file read-only or writable           |
 | `POST /api/v1/sd/folders`       | (yes) | Create a folder on the SD card              |
 | `DELETE /api/v1/sd/folders?path=` | (yes) | Delete a folder (with contents: confirm)  |
 | `POST /api/v1/sd/disks`         | (yes) | Create a new, empty, formatted disk file    |
@@ -298,8 +303,9 @@ Insert a file from the SD card (relative to the root directory, see
 { "sd_path": "Bolo (1987)(Application Systems Heidelberg)(de-en).st" }
 ```
 
-`.ST` and `.HFE` files can be inserted; every disk is write-protected for
-now. The disk is remembered: after a restart it is read from the card
+`.ST` and `.HFE` files can be inserted; an .ST file is writable for the
+Atari unless it is read-only, an HFE file is always write-protected
+(see [Writing](#writing)). The disk is remembered: after a restart it is read from the card
 again. About 5 s after the last disk change RadioFloppy also keeps a
 **copy in the flash** (one copy, of the last disk only; up to 3 MiB;
 written only when it differs from the copy already there). When the card
@@ -466,9 +472,20 @@ is already there.
 (`400 CONFIRMATION_REQUIRED` otherwise): everything in it is lost. The
 root directory itself cannot be deleted.
 
-`DELETE /api/v1/sd/files?path=L/Larry.st` — deletes a file
-(`404 FILE_NOT_FOUND`). Deleting the file of the active disk does not
+`DELETE /api/v1/sd/files?path=L/Larry.st` — deletes a file, also a
+read-only one (`404 FILE_NOT_FOUND`). Deleting the file of the active disk does not
 take the disk out of the drive (`image_changed_since` becomes `true`).
+
+`PUT /api/v1/sd/files?path=L/Larry.st` `{"read_only": true}` — sets or
+clears the file's FAT read-only attribute (the same attribute a PC
+shows): a read-only file is write-protected for the Atari, like the tab
+on a real floppy, and is not overwritten by an upload
+(`409 FILE_READ_ONLY`). Takes effect at once, also for the inserted
+disk. Response `200 {"path": ..., "read_only": true}`. Errors:
+`400 INVALID_REQUEST` (no boolean), `400 INVALID_PATH`,
+`404 FILE_NOT_FOUND`, `409 UNSAVED_CHANGES` (making the inserted disk
+read-only while the Atari's changes are not saved yet; retry in a few
+seconds). Listings show `"read_only"` for every file.
 
 `POST /api/v1/sd/disks` `{"path": "L", "name": "Save games"}` — creates
 a new, empty, formatted disk as a file in folder `path` (default `""`).
@@ -478,7 +495,8 @@ a new, empty, formatted disk as a file in folder `path` (default `""`).
 9 sectors × 512 bytes, formatted as TOS does it (boot sector with BPB, not
 executable, random serial number; two empty FATs; empty root directory
 for 112 entries; 711 free clusters of 1 KiB). It is written like an
-upload (temporary file, read back, then renamed) and not inserted.
+upload (temporary file, read back, then renamed) and not inserted (the
+web page inserts it right after).
 Response `201 {"path": "L/Save games.st", "size": 737280}`. Errors:
 `422 INVALID_NAME`, `400 INVALID_PATH`, `404 FOLDER_NOT_FOUND`,
 `409 FILE_EXISTS`, `409 MACHINE_NOT_SUPPORTED`, `503 SD_NOT_PRESENT`,
@@ -492,7 +510,7 @@ Response `201 {"path": "L/Save games.st", "size": 737280}`. Errors:
 | `filename`  | The file name on the card (rules above, `422 INVALID_NAME`); `.st` or `.hfe` only (`422 UNSUPPORTED_FORMAT`) |
 | `size`      | Exact size: a supported .ST size, or an HFE file of at most 8 MiB    |
 | `path`      | Folder below the root directory (default `""`); must exist (`404 FOLDER_NOT_FOUND`) |
-| `overwrite` | `true`: replace a file of that name (default `false`: `409 FILE_EXISTS`) |
+| `overwrite` | `true`: replace a file of that name, unless it is read-only (`409 FILE_READ_ONLY`; default `false`: `409 FILE_EXISTS`) |
 | `crc32`     | Optional, as for PSRAM uploads                                       |
 | `activate`  | Must be `false`: insert the file with `PUT /current` afterwards      |
 
@@ -605,25 +623,74 @@ Placeholder for online updates; always answers:
 
 ## Writing
 
-**For now every disk is write-protected.** Writing will come back as
-"write to the copy in the flash, then to the file on the SD card". The
-parts that receive and decode what the Atari writes are in place
-(`main/disk_write.c`): WDATA is sampled by an RMT receive channel with DMA
-(0.1 µs), MFM sectors with a correct CRC are found, and the sector is the
-one whose ID field passed just before WGATE. Saving them is not.
+The Atari can write to an **.ST file on the SD card** that is not
+read-only. Always write-protected: HFE files, temporary PSRAM disks, a
+disk played from its copy in the flash (no card at start-up), and a disk
+whose file was replaced or deleted since it was inserted. What happens:
+
+1. **Receive** — WDATA is sampled by an RMT receive channel with DMA
+   (0.1 µs); a write ends when WDATA stays quiet for 16 µs.
+2. **Decode** — MFM: three A1 syncs, data mark, 512 bytes, CRC. Only a
+   complete sector with a correct CRC is used; anything else is ignored
+   and counted in `writes_rejected` (the image is not touched; TOS
+   retries). Formatting a track from the Atari is not supported.
+3. **Which sector** — the WD1772 writes only the data field. RadioFloppy
+   takes the rotation position when WGATE is asserted (time since the
+   INDEX pulse) and the cylinder and side of that moment: the sector whose
+   ID field just passed.
+4. **Apply** — the sector is patched into the image kept in PSRAM and its
+   track is encoded again, so the next read returns the new data.
+5. **Save** — when the drive motor has been off for 2 s (one save per disk
+   operation; at the latest a minute after the last write):
+   1. the changed 64 KiB blocks go into the **copy of the disk in the
+      flash**, which is read back, checked against the new CRC-32 and
+      marked *not on the card yet*;
+   2. the same blocks are written into the **file on the SD card** (in
+      place: same size, no new clusters), after checking that the file
+      still is the one the changes belong to; the file is read back and
+      checked against the new CRC-32;
+   3. the flash copy is marked *on the card*.
+
+   After a power cut in the middle the file on the card is the old or the
+   new version: at the next start-up a copy marked *not on the card yet*
+   is written to the card first.
+
+If the file was replaced or deleted meanwhile (through the API, or on a
+PC), the changes are not written over it: they are stored next to it as
+`<name> (changes).st` (`write.note` says so).
 
 `GET /api/v1/current` → `write`:
 
 ```json
-{ "state": "read_only", "writable": false,
-  "reason": "writing to the SD card is not available yet", "unsaved": false,
-  "sectors_written": 0, "writes_rejected": 0, "saves": 0 }
+{ "state": "pending", "writable": true, "reason": "", "unsaved": true,
+  "sectors_written": 14, "writes_rejected": 0, "saves": 3 }
 ```
 
-`reason` says why the disk is write-protected: `no disk`, `temporary disk
-(PSRAM)`, `computer not supported`, or `writing to the SD card is not
-available yet`. The other states (`writable`, `pending`, `saving`,
-`error`) return with writing.
+| `state`     | Meaning                                                                    |
+| ----------- | -------------------------------------------------------------------------- |
+| `read_only` | Write-protected; `reason` says why (`the file is read-only`, `HFE image (always read-only)`, `temporary disk (PSRAM)`, `no SD card`, …) |
+| `writable`  | Writes accepted, everything saved                                          |
+| `pending`   | Written sectors not saved yet (saved when the motor has been off for 2 s)  |
+| `saving`    | Being saved                                                                |
+| `error`     | Saving failed (`error`): the disk is write-protected, the changes stay in memory (and in the flash once they got there) and are retried every 30 s (e.g. when the card is back) |
+
+`note` (only when there is one): e.g. where changes went whose file was
+replaced.
+
+Guarantees and limits:
+
+- Changes are **not** lost by inserting another disk, a restart through
+  the API or the buttons (WiFi setup): those save first; if saving fails,
+  they are refused with `409 UNSAVED_CHANGES`. Changing the root
+  directory or making the inserted file read-only while there are unsaved
+  changes is refused the same way.
+- A **power cut** loses the changes not saved yet: those of the disk
+  operation in progress, plus 2 seconds and the time the save takes. Wait until the page shows *Writable — all
+  changes saved* before switching off.
+- If a file operation is interrupted by a power cut, the disk is left as a
+  real floppy would be after a cut in the middle of writing: the saved
+  version is consistent at block level, but the file system may lack the
+  last sectors TOS wrote.
 
 ## Uploading images
 
@@ -690,6 +757,8 @@ change. A failed upload carries the same `error` inside its upload object.
 | 404  | `FILE_NOT_FOUND`, `FOLDER_NOT_FOUND` | Use a path from `GET /sd/files`          |
 | 404  | `UPLOAD_NOT_FOUND`     | Start a new upload                                     |
 | 409  | `FILE_EXISTS`, `FOLDER_EXISTS` | Choose another name (or `overwrite: true`)     |
+| 409  | `FILE_READ_ONLY`       | Make the file writable first                           |
+| 409  | `UNSAVED_CHANGES`      | The Atari wrote to the disk and it is not saved yet — wait and retry |
 | 409  | `FOLDER_NOT_EMPTY`     | Delete with `recursive=true&confirm=<path>`            |
 | 409  | `UPLOAD_BUSY`          | Wait for the running upload (or its 60 s timeout)      |
 | 409  | `UPLOAD_STATE`         | Start a new upload                                     |

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -17,6 +18,8 @@
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
+#include "diskio_sdmmc.h"
+#include "ff.h"
 #include "sdmmc_cmd.h"
 
 #include "board_pins.h"
@@ -131,6 +134,11 @@ void sd_card_init(void)
     xSemaphoreGive(lock);
 }
 
+bool sd_card_present(void)
+{
+    return card != NULL;
+}
+
 void sd_card_status(sd_status_t *st)
 {
     char root[SETTINGS_ROOT_MAX + 1];
@@ -191,6 +199,7 @@ const char *sd_result_name(sd_result_t r)
     case SD_NOT_FOUND:  return "not found";
     case SD_EXISTS:     return "already exists";
     case SD_NOT_EMPTY:  return "folder not empty";
+    case SD_READ_ONLY:  return "the file is read-only";
     default:            return "SD card error";
     }
 }
@@ -234,6 +243,29 @@ static bool is_file(const char *path, uint32_t *size)
     return true;
 }
 
+/* The FAT read-only attribute of path (lock held). The VFS has no chmod:
+ * FatFs itself, on "<drive>:/<path on the card>". */
+static bool set_ro_locked(const char *path, bool ro)
+{
+    char fpath[PATH_MAX_LEN + 260];
+    snprintf(fpath, sizeof(fpath), "%u:%s", ff_diskio_get_pdrv_card(card), path + strlen(SD_MOUNT));
+    return f_chmod(fpath, ro ? AM_RDO : 0, AM_RDO) == FR_OK;
+}
+
+static bool is_read_only(const char *path)
+{
+    return access(path, W_OK) != 0;     /* the FAT VFS: AM_RDO refuses W_OK */
+}
+
+/* Delete a file, also a read-only one (deleting is asked for explicitly). */
+static int unlink_any(const char *path)
+{
+    if (unlink(path) == 0) {
+        return 0;
+    }
+    return is_read_only(path) && set_ro_locked(path, false) ? unlink(path) : -1;
+}
+
 sd_result_t sd_card_list(const char *rel, int max, void (*cb)(void *ctx, const sd_entry_t *e),
                          void *ctx, bool *more)
 {
@@ -263,6 +295,7 @@ sd_result_t sd_card_list(const char *rel, int max, void (*cb)(void *ctx, const s
         sd_entry_t ent = { .name = e->d_name, .is_dir = e->d_type == DT_DIR };
         if (!ent.is_dir) {
             is_file(child, &ent.size);
+            ent.read_only = is_read_only(child);
         }
         cb(ctx, &ent);
         n++;
@@ -286,6 +319,153 @@ sd_result_t sd_card_stat(const char *rel, bool *dir, uint32_t *size)
         r = SD_NOT_FOUND;
     }
     xSemaphoreGive(lock);
+    return r;
+}
+
+sd_result_t sd_card_get_read_only(const char *rel, bool *ro)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+
+    if (r != SD_OK) {
+        return r;
+    }
+    if (!rel[0] || !is_file(path, NULL)) {
+        r = SD_NOT_FOUND;
+    } else {
+        *ro = is_read_only(path);
+    }
+    xSemaphoreGive(lock);
+    return r;
+}
+
+sd_result_t sd_card_set_read_only(const char *rel, bool ro)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+
+    if (r != SD_OK) {
+        return r;
+    }
+    if (!rel[0] || !is_file(path, NULL)) {
+        r = SD_NOT_FOUND;
+    } else {
+        if (!set_ro_locked(path, ro)) {
+            r = SD_IO;
+        } else {
+            printf("SD card: %s %s\n", path, ro ? "read-only" : "writable");
+        }
+    }
+    xSemaphoreGive(lock);
+    return r;
+}
+
+sd_result_t sd_card_update(const char *rel, const uint8_t *data, uint32_t size, uint32_t mask,
+                           uint32_t region)
+{
+    char path[PATH_MAX_LEN];
+    sd_result_t r = begin(rel, path);
+    uint32_t n = 0;
+
+    if (r != SD_OK) {
+        return r;
+    }
+    FILE *f = NULL;
+    if (!rel[0] || !is_file(path, &n)) {
+        r = SD_NOT_FOUND;
+    } else if (n != size) {
+        r = SD_INVALID;
+    } else if (is_read_only(path)) {
+        r = SD_READ_ONLY;
+    } else if (!(f = fopen(path, "r+b"))) {
+        r = SD_IO;
+    } else {
+        setvbuf(f, NULL, _IONBF, 0);
+        for (uint32_t i = 0; i < 32 && r == SD_OK; i++) {
+            uint32_t off = i * region;
+            if (!(mask & (1u << i)) || off >= size) {
+                continue;
+            }
+            uint32_t len = size - off < region ? size - off : region;
+            if (fseek(f, off, SEEK_SET) != 0 || fwrite(data + off, 1, len, f) != len) {
+                r = SD_IO;
+            }
+        }
+        if (fsync(fileno(f)) != 0) {
+            r = SD_IO;
+        }
+        if (fclose(f) != 0) {
+            r = SD_IO;
+        }
+    }
+    xSemaphoreGive(lock);
+    return r;
+}
+
+sd_result_t sd_card_save_changes(const char *rel, const uint8_t *data, uint32_t size,
+                                 uint32_t crc, char *out, size_t out_size)
+{
+    char folder[SD_REL_MAX + 1], name[SD_NAME_MAX + 1];
+    const char *slash = strrchr(rel, '/');
+    const char *base = slash ? slash + 1 : rel;
+    size_t flen = slash ? (size_t)(slash - rel) : 0;
+    size_t stem = strlen(base);
+
+    if (flen >= sizeof(folder)) {
+        return SD_INVALID;
+    }
+    memcpy(folder, rel, flen);
+    folder[flen] = 0;
+    if (stem >= 3 && strcasecmp(base + stem - 3, ".st") == 0) {
+        stem -= 3;
+    }
+    sd_result_t r = SD_EXISTS;
+    for (int i = 1; i <= 9 && r == SD_EXISTS; i++) {
+        char tag[16];
+        snprintf(tag, sizeof(tag), i == 1 ? " (changes).st" : " (changes %d).st", i);
+        int keep = (int)(stem < SD_NAME_MAX - strlen(tag) ? stem : SD_NAME_MAX - strlen(tag));
+        while (keep > 0 && (base[keep - 1] == ' ' || base[keep - 1] == '.')) {
+            keep--;                     /* no name ending in a space or dot before the tag */
+        }
+        snprintf(name, sizeof(name), "%.*s%s", keep, base, tag);
+        sd_writer_t *w;
+        r = sd_card_writer_open(folder, name, false, &w);
+        if (r == SD_OK) {
+            r = sd_card_writer_write(w, data, size);
+            if (r == SD_OK) {
+                r = sd_card_writer_commit(w, crc);
+            } else {
+                sd_card_writer_abort(w);
+            }
+        }
+    }
+    if (r == SD_OK) {
+        snprintf(out, out_size, "%s%s%s", folder, folder[0] ? "/" : "", name);
+    }
+    return r;
+}
+
+sd_result_t sd_card_file_crc(const char *rel, uint32_t *crc, uint32_t *size)
+{
+    const uint32_t piece = 8192;
+    sd_reader_t *rd = NULL;
+    uint32_t got, done = 0, c = 0;
+
+    *crc = *size = 0;
+    uint8_t *buf = heap_caps_malloc(piece, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        return SD_IO;
+    }
+    sd_result_t r = sd_card_reader_open(rel, UINT32_MAX, &rd, size);
+    while (r == SD_OK && done < *size) {
+        uint32_t want = *size - done < piece ? *size - done : piece;
+        r = sd_card_reader_read(rd, buf, want, &got);
+        c = esp_rom_crc32_le(c, buf, got);
+        done += got;
+    }
+    sd_card_reader_close(rd);
+    free(buf);
+    *crc = c;
     return r;
 }
 
@@ -347,7 +527,7 @@ static sd_result_t remove_tree(char *path, size_t size, int depth)
         snprintf(path + len, size - len, "/%s", e->d_name);
         if (e->d_type == DT_DIR) {
             r = remove_tree(path, size, depth + 1);
-        } else if (unlink(path) != 0) {
+        } else if (unlink_any(path) != 0) {
             r = SD_IO;
         }
         path[len] = 0;
@@ -404,7 +584,7 @@ sd_result_t sd_card_remove(const char *rel)
     }
     if (!rel[0] || !is_file(path, NULL)) {
         r = SD_NOT_FOUND;
-    } else if (unlink(path) != 0) {
+    } else if (unlink_any(path) != 0) {
         r = SD_IO;
     } else {
         printf("SD card: removed %s\n", path);
@@ -446,8 +626,10 @@ sd_result_t sd_card_writer_open(const char *folder, const char *name, bool overw
         w->overwrite = overwrite;
         if (is_dir(w->target) || (!overwrite && is_file(w->target, NULL))) {
             r = SD_EXISTS;
+        } else if (is_file(w->target, NULL) && is_read_only(w->target)) {
+            r = SD_READ_ONLY;
         } else {
-            unlink(w->tmp);             /* left over from an interrupted upload */
+            unlink_any(w->tmp);             /* left over from an interrupted upload */
             w->f = fopen(w->tmp, "wb");
             r = w->f ? SD_OK : SD_IO;
             if (w->f) {
@@ -522,9 +704,11 @@ sd_result_t sd_card_writer_commit(sd_writer_t *w, uint32_t crc)
         bool had = is_file(w->target, NULL);
         if (had && !w->overwrite) {
             r = SD_EXISTS;              /* appeared meanwhile */
+        } else if (had && is_read_only(w->target)) {
+            r = SD_READ_ONLY;           /* made read-only meanwhile */
         } else if (had) {
             /* Old one aside, new one in place, old one away. */
-            unlink(w->old);
+            unlink_any(w->old);
             if (rename(w->target, w->old) != 0 || rename(w->tmp, w->target) != 0) {
                 rename(w->old, w->target);      /* put the old one back */
                 r = SD_IO;
