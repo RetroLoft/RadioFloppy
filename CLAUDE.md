@@ -17,20 +17,17 @@ These handoff files replace the chat history of earlier sessions. Keep
 them up to date: when the user asks for "aantekeningen" (notes), update or
 add a handoff file before committing.
 
-## State (2026-10-23)
+## State (2026-10-25)
 
 | Branch | State |
 | --- | --- |
-| `main` | Firmware for **PCB revision 2**, tested on the board: HFE player, LEDs on J4 with the 1/2 LED setting, SD card mounted at start-up with the root directory setting. |
-| `wip/board-rev2` | Merged into `main`; can be deleted. |
-| `wip/hfe-player` | Old, contained in `main`; can be deleted. |
+| `main` | Firmware for **PCB revision 2**, tested on the board: HFE player, LEDs, images on the SD card, writing through the flash journal. The only branch (the `wip/*` branches were merged and deleted 2026-10-25). |
 
 **PCB revision 1 is history**: not supported any more, no need to keep it
 working. Never flash current firmware on a rev 1 board (GPIO20 is the
 buzzer there).
 
-Open work, in order: a power-cut test of writing (the journal in the
-flash); HFE weak bits (phase 3, needs a test file with real RAND
+Open work, in order: HFE weak bits (phase 3, needs a test file with real RAND
 areas); a timing measurement tool (P-47 hangs after its intro); cosmetic
 items listed in `docs/HANDOFF_HFE.md`.
 
