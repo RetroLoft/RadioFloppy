@@ -16,14 +16,16 @@
  * half buffer (FLUX_DMA_SYMBOLS / 2 transitions, ~1.4 ms).
  *
  * HFE mode (native timing, see flux_stream.h): the data encoder plays the
- * packed track (hfe.h) with its own cell times and records the RMT tick of
- * every revolution boundary; the INDEX channel is then an encoder too,
- * started in sync, that puts the pulse on exactly those ticks. It may
- * only run ahead of the data encoder in FLUX_INDEX_STEP pieces: its whole
- * memory (INDEX_MEM_SYMBOLS) is then at most 0.48 ms, less than the data
- * encoder always has queued (half its DMA buffer, >= 1 ms of flux), so a
- * boundary is known before INDEX gets there. Pulses that came late anyway
- * are counted (flux_hfe_stats).
+ * packed track (hfe.h) with its own cell times. It knows when the current
+ * revolution will end (its last boundary plus the track's duration; worked
+ * out again on a track change) and publishes that tick with a revolution
+ * number. The INDEX channel, started in sync, is an encoder too: it puts
+ * the pulse on exactly that tick. Its symbols last at most
+ * FLUX_INDEX_STEP, so its memory (INDEX_MEM_SYMBOLS) holds at most 9.6 ms
+ * and needs a refill only every 4.8 ms (with 10 us steps that was every
+ * 0.24 ms: a late refill replayed old symbols and every later pulse came
+ * late, measured with the flux monitor). Pulses that came late anyway are
+ * counted (flux_hfe_stats).
  */
 #include <stdio.h>
 
@@ -159,11 +161,10 @@ static size_t build_index_symbols(void)
 /* ---- HFE: native timing ------------------------------------------------------ */
 
 #define TICK_X16        1600u       /* ns_x16 per RMT tick (0.1 us) */
-#define FLUX_INDEX_STEP 100u        /* 10 us: INDEX filler while no boundary is known */
+#define FLUX_INDEX_STEP 2000u       /* 200 us: longest INDEX symbol (see the top) */
 #define IDLE_TICKS      200u        /* 20 us: symbols without flux (no track, no disk) */
 #define LONG_TICKS      30000u      /* a flux gap longer than this: LOW-only symbols */
 #define NO_TRACK_REV    FLUX_REV_TICKS  /* rotation of an unformatted track: 200 ms */
-#define BOUNDARY_RING   8
 
 /* Data encoder state: RMT ticks since the sync start (wrapping, compared as differences). */
 static uint32_t h_t;                /* end of the symbols generated so far */
@@ -176,26 +177,24 @@ static uint8_t h_seg;               /* timing segment of h_pos */
 static uint32_t h_gap;              /* time since the last flux, ns_x16 */
 static uint32_t h_frac;             /* tick remainder, ns_x16 (< TICK_X16) */
 static uint32_t h_cells_since;      /* cells since the last flux */
+static uint32_t h_track_ticks;      /* duration of the current track (no track: 200 ms) */
 
-/* Boundaries: data encoder -> INDEX encoder (both in the RMT ISR). */
-static volatile uint32_t ring[BOUNDARY_RING];
-static volatile uint8_t ring_head, ring_tail;
+/* Data encoder -> INDEX encoder (both in RMT ISRs on the same core): the
+ * number of the last revolution boundary, and when the next one is due. */
+static volatile uint32_t h_rev_num;
+static volatile uint32_t h_next;    /* tick of boundary h_rev_num + 1 */
 
 /* INDEX encoder state */
 static uint32_t i_t;
 static uint32_t i_high;             /* ticks of the current pulse still to send */
-static volatile uint32_t late_pulses, late_max_ticks, lost_boundaries;
+static uint32_t i_rev;              /* the boundary the last pulse was for */
+static volatile uint32_t late_pulses, late_max_ticks;
 
 static void IRAM_ATTR boundary_at(uint32_t tick)
 {
-    uint8_t next = (ring_head + 1) % BOUNDARY_RING;
-    if (next == ring_tail) {
-        lost_boundaries++;
-        return;
-    }
-    ring[ring_head] = tick;
-    ring_head = next;
     h_rev_start = tick;
+    h_next = tick + h_track_ticks;
+    h_rev_num++;
     revolutions++;
 }
 
@@ -226,8 +225,16 @@ static void IRAM_ATTR hfe_enter_track(const uint8_t *buf, int cyl, int side)
     h_pos = 0;
     h_seg = 0;
     if (!h_trk.cells) {
+        h_track_ticks = NO_TRACK_REV;
+        h_next = h_rev_start + h_track_ticks;
         return;
     }
+    uint64_t total = 0;
+    for (int i = 0; i < h_trk.nseg; i++) {
+        uint32_t end = i + 1 < h_trk.nseg ? h_trk.seg[i + 1].start : h_trk.count;
+        total += (uint64_t)(end - h_trk.seg[i].start) * h_trk.seg[i].ns_x16;
+    }
+    h_track_ticks = (uint32_t)(total / TICK_X16);
     /* Elapsed time since the boundary (up to now, not just the symbols
      * generated), then walk the segments. */
     uint32_t now = h_t + (h_frac + h_gap) / TICK_X16;
@@ -236,8 +243,14 @@ static void IRAM_ATTR hfe_enter_track(const uint8_t *buf, int cyl, int side)
         uint32_t end = i + 1 < h_trk.nseg ? h_trk.seg[i + 1].start : h_trk.count;
         uint64_t span = (uint64_t)(end - h_trk.seg[i].start) * h_trk.seg[i].ns_x16;
         if (left < span) {
-            h_pos = h_trk.seg[i].start + (uint32_t)(left / h_trk.seg[i].ns_x16);
+            uint32_t ns = h_trk.seg[i].ns_x16;
+            h_pos = h_trk.seg[i].start + (uint32_t)(left / ns);
             h_seg = (uint8_t)i;
+            /* Cell h_pos is partly over; its rest still has to pass (the
+             * encoder goes on with the next cell), else this revolution
+             * would end up to one cell early. */
+            h_gap += ns - (uint32_t)(left % ns);
+            h_next = h_rev_start + h_track_ticks;   /* this track's length decides */
             return;
         }
         left -= span;
@@ -261,6 +274,7 @@ static size_t IRAM_ATTR hfe_encode(const void *data, size_t data_size,
 
     if (disk_tracks_kind != DISK_TRACKS_HFE) {
         /* Right after a disk change, before the mode follows: no flux. */
+        h_track_ticks = NO_TRACK_REV;
         while (n < symbols_free) {
             symbols[n++] = low_symbol(IDLE_TICKS);
             h_t += IDLE_TICKS;
@@ -320,7 +334,7 @@ static size_t IRAM_ATTR hfe_encode(const void *data, size_t data_size,
     return n;
 }
 
-/* HFE INDEX encoder: the pulse on the boundary ticks the data encoder recorded. */
+/* HFE INDEX encoder: the pulse on the boundary ticks the data encoder publishes. */
 static size_t IRAM_ATTR hfe_index_encode(const void *data, size_t data_size,
                                          size_t symbols_written, size_t symbols_free,
                                          rmt_symbol_word_t *symbols, bool *done, void *arg)
@@ -330,32 +344,43 @@ static size_t IRAM_ATTR hfe_index_encode(const void *data, size_t data_size,
 
     while (n < symbols_free) {
         if (i_high) {
-            symbols[n++] = (rmt_symbol_word_t) { .level0 = 1, .duration0 = i_high / 2,
-                                                 .level1 = 1, .duration1 = i_high - i_high / 2 };
-            i_t += i_high;
-            i_high = 0;
-            continue;
-        }
-        if (ring_tail != ring_head) {
-            int32_t gap = (int32_t)(ring[ring_tail] - i_t);
-            if (gap < 2) {
-                if (gap < 0) {
-                    late_pulses++;
-                    if ((uint32_t)-gap > late_max_ticks) {
-                        late_max_ticks = (uint32_t)-gap;
-                    }
-                }
-                ring_tail = (ring_tail + 1) % BOUNDARY_RING;
-                i_high = pulse;
-                continue;
-            }
-            uint32_t d = gap > 2 * RMT_MAX_DURATION ? 2 * RMT_MAX_DURATION : (uint32_t)gap;
-            symbols[n++] = low_symbol(d);
+            uint32_t d = i_high > FLUX_INDEX_STEP ? FLUX_INDEX_STEP : i_high;
+            symbols[n++] = (rmt_symbol_word_t) { .level0 = 1, .duration0 = d / 2,
+                                                 .level1 = 1, .duration1 = d - d / 2 };
             i_t += d;
+            i_high -= d;
             continue;
         }
-        symbols[n++] = low_symbol(FLUX_INDEX_STEP);     /* boundary not known yet */
-        i_t += FLUX_INDEX_STEP;
+        /* The next pulse: a boundary that already passed without one (then
+         * it is late), else the one that is due next. Already given for that
+         * one (INDEX runs ahead of the data encoder): wait. */
+        uint32_t rev = h_rev_num, target;
+        int32_t behind = (int32_t)(rev - i_rev);
+        if (behind > 0) {
+            target = h_rev_start;
+        } else if (behind == 0) {
+            rev++;
+            target = h_next;
+        } else {
+            symbols[n++] = low_symbol(FLUX_INDEX_STEP);
+            i_t += FLUX_INDEX_STEP;
+            continue;
+        }
+        int32_t gap = (int32_t)(target - i_t);
+        if (gap < 2) {
+            if (gap < -1) {
+                late_pulses++;
+                if ((uint32_t)-gap > late_max_ticks) {
+                    late_max_ticks = (uint32_t)-gap;
+                }
+            }
+            i_rev = rev;
+            i_high = pulse;
+            continue;
+        }
+        uint32_t d = (uint32_t)gap > FLUX_INDEX_STEP ? FLUX_INDEX_STEP : (uint32_t)gap;
+        symbols[n++] = low_symbol(d);
+        i_t += d;
     }
     return n;
 }
@@ -364,7 +389,6 @@ void flux_hfe_stats(flux_hfe_stats_t *st)
 {
     st->late_pulses = late_pulses;
     st->late_max_us = late_max_ticks / (FLUX_RESOLUTION_HZ / 1000000);
-    st->lost_boundaries = lost_boundaries;
 }
 
 /* ---- Start / restart ------------------------------------------------------------- */
@@ -487,9 +511,10 @@ esp_err_t flux_stream_set_mode(flux_mode_t m)
     h_buf = NULL;
     h_cyl = h_side = -1;
     h_gap = h_frac = h_cells_since = 0;
-    ring[0] = 0;                    /* INDEX right at the start, as in ST mode */
-    ring_head = 1;
-    ring_tail = 0;
+    h_track_ticks = NO_TRACK_REV;
+    h_rev_num = 0;                  /* boundary 0 at tick 0: INDEX right at the start, */
+    h_next = NO_TRACK_REV;          /* as in ST mode */
+    i_rev = (uint32_t)-1;
     i_t = 0;
     i_high = 0;
     mode = m;

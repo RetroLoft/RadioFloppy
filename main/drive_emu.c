@@ -31,6 +31,7 @@ static QueueHandle_t event_queue;
 static volatile uint32_t select_edges;
 gpio_num_t emu_select_line = EMU_DS1;
 static volatile uint32_t ignored_steps;
+static volatile uint32_t head_events;   /* steps, side and select changes (flux monitor) */
 static bool disk_present;
 static int64_t media_change_until_us;
 static volatile bool writable;          /* WPROT released: see drive_set_writable() */
@@ -80,6 +81,9 @@ static void IRAM_ATTR drive_isr(void *arg)
     bool log;
 
     portENTER_CRITICAL_ISR(&drive_lock);
+    if (ev.type == DRV_EV_STEP || ev.type == DRV_EV_SIDE || ev.type == DRV_EV_SELECT) {
+        head_events++;
+    }
     if (ev.type == DRV_EV_STEP && armed && emulator_is_selected()) {
         if (gpio_ll_get_level(&GPIO, PIN_FDD_DIR) == 0) {
             if (current_track < DRIVE_MAX_TRACK) {
@@ -265,6 +269,11 @@ void drive_get_write_start(drive_write_start_t *ws)
 bool drive_is_armed(void)
 {
     return armed;
+}
+
+uint32_t drive_head_events(void)
+{
+    return head_events;
 }
 
 uint32_t drive_ignored_steps(void)

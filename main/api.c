@@ -37,6 +37,8 @@
 #include "disk_switch.h"
 #include "disk_title.h"
 #include "disk_write.h"
+#include "flux_monitor.h"
+#include "flux_stream.h"
 #include "drive_config.h"
 #include "drive_emu.h"
 #include "ext_flash.h"
@@ -1471,6 +1473,96 @@ static esp_err_t post_restart(httpd_req_t *req)
 }
 
 /* Placeholder: online updates are not implemented yet. */
+/* ---- Debug: flux monitor (flux_monitor.h) -------------------------------------- */
+
+static cJSON *flux_monitor_json(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "enabled", flux_monitor_enabled());
+    cJSON_AddStringToObject(root, "mode", flux_stream_mode() == FLUX_MODE_HFE ? "hfe" : "st");
+    flux_hfe_stats_t hs;
+    flux_hfe_stats(&hs);
+    cJSON *h = cJSON_AddObjectToObject(root, "hfe");
+    cJSON_AddNumberToObject(h, "late_pulses", hs.late_pulses);
+    cJSON_AddNumberToObject(h, "late_max_us", hs.late_max_us);
+    cJSON *list = cJSON_AddArrayToObject(root, "tracks");
+    for (int c = 0; c < DISK_MAX_CYLS; c++) {
+        for (int sd = 0; sd < 2; sd++) {
+            mon_track_t t;
+            if (!flux_monitor_track(c, sd, &t)) {
+                continue;
+            }
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "cyl", c);
+            cJSON_AddNumberToObject(o, "side", sd);
+            cJSON_AddNumberToObject(o, "revs", t.revs);
+            cJSON_AddNumberToObject(o, "expected_us", t.expected_ns / 1000.0);
+            cJSON_AddNumberToObject(o, "period_min_us", t.period_min_ns / 1000.0);
+            cJSON_AddNumberToObject(o, "period_max_us", t.period_max_ns / 1000.0);
+            cJSON_AddNumberToObject(o, "pulse_min_us", t.pulse_min_ns / 1000.0);
+            cJSON_AddNumberToObject(o, "pulse_max_us", t.pulse_max_ns / 1000.0);
+            cJSON_AddNumberToObject(o, "checks", t.checks);
+            cJSON_AddNumberToObject(o, "clean", t.clean);
+            cJSON_AddNumberToObject(o, "unaligned", t.unaligned);
+            cJSON_AddNumberToObject(o, "intervals", t.intervals);
+            cJSON_AddNumberToObject(o, "bad", t.bad);
+            cJSON_AddNumberToObject(o, "align_min_us", t.align_min_ns / 1000.0);
+            cJSON_AddNumberToObject(o, "align_max_us", t.align_max_ns / 1000.0);
+            cJSON_AddItemToArray(list, o);
+        }
+    }
+    mon_failure_t f[MON_FAILURES];
+    int n = flux_monitor_failures(f, MON_FAILURES);
+    cJSON *fl = cJSON_AddArrayToObject(root, "failures");
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "cyl", f[i].cyl);
+        cJSON_AddNumberToObject(o, "side", f[i].side);
+        cJSON_AddNumberToObject(o, "first_at", f[i].at);
+        cJSON_AddNumberToObject(o, "cell", f[i].cell);
+        cJSON_AddNumberToObject(o, "expected_ns", f[i].expected_ns);
+        cJSON_AddNumberToObject(o, "got_ns", f[i].got_ns);
+        cJSON_AddNumberToObject(o, "bad", f[i].bad);
+        cJSON_AddNumberToObject(o, "intervals", f[i].intervals);
+        cJSON_AddItemToArray(fl, o);
+    }
+    return root;
+}
+
+/* GET /api/v1/debug/flux: what the monitor measured. */
+static esp_err_t get_debug_flux(httpd_req_t *req)
+{
+    return send_json(req, "200 OK", flux_monitor_json());
+}
+
+/* PUT /api/v1/debug/flux {"enabled": bool, "reset": bool} */
+static esp_err_t put_debug_flux(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return ESP_OK;
+    }
+    cJSON *body = read_json(req);
+    if (!body) {
+        return ESP_OK;
+    }
+    const cJSON *je = cJSON_GetObjectItem(body, "enabled");
+    const cJSON *jr = cJSON_GetObjectItem(body, "reset");
+    bool valid = (!je || cJSON_IsBool(je)) && (!jr || cJSON_IsBool(jr)) && (je || jr);
+    bool on = cJSON_IsTrue(je), reset = cJSON_IsTrue(jr), set = je != NULL;
+    cJSON_Delete(body);
+    if (!valid) {
+        return send_error(req, HTTP_400, "INVALID_REQUEST", "\"enabled\" and/or \"reset\" (true/false)");
+    }
+    if (reset) {
+        flux_monitor_reset();
+    }
+    if (set && flux_monitor_enable(on) != ESP_OK) {
+        return send_error(req, HTTP_500, "MONITOR_FAILED", "the flux monitor could not be started "
+                          "(see the device log)");
+    }
+    return send_json(req, "200 OK", flux_monitor_json());
+}
+
 static esp_err_t get_update(httpd_req_t *req)
 {
     cJSON *root = cJSON_CreateObject();
@@ -1554,6 +1646,8 @@ esp_err_t api_start(void)
         { .uri = "/api/v1/settings",  .method = HTTP_PUT,    .handler = put_settings },
         { .uri = "/api/v1/system/restart", .method = HTTP_POST, .handler = post_restart },
         { .uri = "/api/v1/system/update",  .method = HTTP_GET,  .handler = get_update },
+        { .uri = "/api/v1/debug/flux", .method = HTTP_GET, .handler = get_debug_flux },
+        { .uri = "/api/v1/debug/flux", .method = HTTP_PUT, .handler = put_debug_flux },
         { .uri = "/",                 .method = HTTP_GET,    .handler = get_index },
         { .uri = "/favicon.ico",      .method = HTTP_GET,    .handler = get_favicon },
     };

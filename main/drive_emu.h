@@ -94,6 +94,10 @@ uint32_t drive_select_edges(void);
 /* STEP pulses ignored because the drive was not armed/selected. */
 uint32_t drive_ignored_steps(void);
 
+/* +1 for every STEP, SIDE or select change: what the head reads may have
+ * changed (the flux monitor skips measurements across one). */
+uint32_t drive_head_events(void);
+
 #define DRIVE_MEDIA_CHANGE_MS   700
 
 typedef enum {

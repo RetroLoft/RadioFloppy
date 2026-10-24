@@ -44,6 +44,5 @@ flux_mode_t flux_stream_mode(void);
 typedef struct {
     uint32_t late_pulses;       /* INDEX pulses that came after their boundary */
     uint32_t late_max_us;
-    uint32_t lost_boundaries;   /* boundary queue overflow (never expected) */
 } flux_hfe_stats_t;
 void flux_hfe_stats(flux_hfe_stats_t *st);

@@ -339,8 +339,11 @@ def main():
              "document.getElementById('newform').requestSubmit()")
         check(b.wait("document.getElementById('msg').innerText.includes('is created on the SD card and is now "
                      "the active floppy')", 30), "New disk: created in the open folder and inserted")
-        check(b.wait("S.current && S.current.sd_path === %s && S.current.write.state === 'writable'"
-                     % json.dumps(T + "/Save games.st"), 10), "the new disk is the current floppy, writable")
+        ok = b.wait("S.current && S.current.sd_path === %s && S.current.write.state === 'writable'"
+                    % json.dumps(T + "/Save games.st"), 10)
+        check(ok, "the new disk is the current floppy, writable")
+        if not ok:
+            print("        page has: " + str(b.js("JSON.stringify(S.current)")))
         check(b.wait("S.sdData && S.sdData.entries.some(e => e.name === 'Save games.st' && e.size === 737280)", 20),
               "New disk listed (Save games.st, 720 KiB)")
         b.js("[...document.querySelectorAll('#sdcrumbs a')][0].click()")
