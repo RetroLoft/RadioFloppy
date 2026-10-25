@@ -480,6 +480,10 @@ static void save_task_fn(void *arg)
         int64_t now = esp_timer_get_time();
         drive_status_t ds;
         drive_peek(&ds);
+        if (!ds.armed) {
+            /* Not armed (computer off: its lines read active): idle. */
+            ds.selected = ds.motor = ds.wgate = false;
+        }
         if (ds.motor || ds.wgate) {
             motor_off_since = 0;
         } else if (!motor_off_since) {

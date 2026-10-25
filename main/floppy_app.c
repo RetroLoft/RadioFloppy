@@ -46,6 +46,7 @@
 #define STEP_GROUP_MS       20      /* STEP pulses closer together: one line */
 #define POLL_REPORT_MS      5000
 #define SAFETY_REFRESH_MS   100
+#define OFF_LOW_MS          500     /* STEP and WGATE low this long: computer off */
 
 static void print_ts(int64_t t)
 {
@@ -87,6 +88,18 @@ static bool verify_outputs_released(void)
     return ok && in_ok;
 }
 
+/*
+ * A switched-off Atari pulls every floppy line low through its unpowered
+ * chips (the select lines come straight from the YM2149), stronger than
+ * our pull-ups: all inputs then read active. STEP (a pulse of a few us)
+ * and WGATE (at most one track, ~200 ms) are never both low for long while
+ * it runs, so that is the sign it is off. Measured on the rev 2 board.
+ */
+static bool computer_off_levels(void)
+{
+    return gpio_get_level(PIN_FDD_STEP) == 0 && gpio_get_level(PIN_FDD_WGATE) == 0;
+}
+
 static void wait_until_armed(void)
 {
     uint32_t edges = drive_select_edges();
@@ -97,7 +110,7 @@ static void wait_until_armed(void)
         vTaskDelay(1);
         int64_t now = esp_timer_get_time();
         uint32_t e = drive_select_edges();
-        bool high = gpio_get_level(EMU_SELECT_LINE) == 1;
+        bool high = gpio_get_level(EMU_SELECT_LINE) == 1 && !computer_off_levels();
 
         if (!high || e != edges) {
             edges = e;
@@ -395,14 +408,20 @@ void floppy_emu_run(void)
     buttons_start();
     printf("Ready.\n\n");
 
-    wait_until_armed();
     drive_status_t st;
+    log_state_t ls;
+    uint32_t ignored_reported;
+    int64_t last_refresh, off_since;
+
+arm:
+    wait_until_armed();
     drive_arm(&st);
     printf("Emulator ARMED. Virtual track: %d\n\n", st.cyl);
-
-    log_state_t ls = { .last_st = st };
-    uint32_t ignored_reported = drive_ignored_steps();
-    int64_t last_refresh = esp_timer_get_time();
+    disk_write_refresh();
+    ls = (log_state_t) { .last_st = st };
+    ignored_reported = drive_ignored_steps();
+    last_refresh = esp_timer_get_time();
+    off_since = 0;
 
     while (true) {
         drive_event_t ev;
@@ -433,6 +452,19 @@ void floppy_emu_run(void)
         /* Safety net: re-evaluate the outputs from the live levels. */
         if (now - last_refresh >= SAFETY_REFRESH_MS * 1000LL) {
             last_refresh = now;
+            /* The computer switched off: release everything until it is back. */
+            if (!computer_off_levels()) {
+                off_since = 0;
+            } else if (!off_since) {
+                off_since = now;
+            } else if (now - off_since >= OFF_LOW_MS * 1000LL) {
+                drive_disarm(&st);
+                disk_write_refresh();
+                print_ts(now);
+                printf("Computer switched off (STEP and WGATE low for %d ms): drive released\n",
+                       OFF_LOW_MS);
+                goto arm;
+            }
             drive_refresh(&st);
             uint32_t ignored = drive_ignored_steps();
             if (ignored != ignored_reported && !ls.selected) {

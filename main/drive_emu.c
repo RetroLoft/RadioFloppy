@@ -192,6 +192,15 @@ void drive_arm(drive_status_t *status)
     portEXIT_CRITICAL(&drive_lock);
 }
 
+void drive_disarm(drive_status_t *status)
+{
+    portENTER_CRITICAL(&drive_lock);
+    armed = false;
+    wrote_while_selected = false;
+    update_outputs_locked(status);
+    portEXIT_CRITICAL(&drive_lock);
+}
+
 void drive_peek(drive_status_t *st)
 {
     *st = (drive_status_t) {

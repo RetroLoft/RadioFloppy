@@ -76,8 +76,11 @@ bool drive_writable(void);
 
 void drive_get_write_start(drive_write_start_t *ws);
 
-/* Arm the drive (once, after the start-up guard) and apply the outputs. */
+/* Arm the drive (after the start-up guard) and apply the outputs. */
 void drive_arm(drive_status_t *status);
+
+/* The computer was switched off: not armed, every output released. */
+void drive_disarm(drive_status_t *status);
 
 /* Current state without touching the outputs (for displays). */
 void drive_peek(drive_status_t *status);

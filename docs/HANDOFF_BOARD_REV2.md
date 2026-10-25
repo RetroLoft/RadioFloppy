@@ -62,7 +62,7 @@ SW_NEXT 19), UART0.
 | Item | Result |
 | --- | --- |
 | Flash (app only), boot, image library on the NOR flash | OK (21 images, catalog intact; the library has since been removed) |
-| DS0/DS1 pull-ups | OK with +5 V on J2 (Atari on): `"selected": false` when idle. Without +5 V on J2 (Atari off, board on USB) the pull-ups have no supply, all lines read active and the activity LED lights; the user accepts this, normal use has +5 V. |
+| DS0/DS1 pull-ups | OK with the Atari on: `"selected": false` when idle. RadioFloppy is an external drive with its own supply (J2), so the pull-ups stay powered when the Atari is off; but a switched-off Atari pulls every floppy line low through its unpowered chips (the select lines come straight from the YM2149), stronger than 10k. With the cable unplugged all lines are idle. Handled in the firmware since 2026-10-25, see below. |
 | Atari reads a game through the emulator | OK |
 | LEDs | Activity on J4 pin 3 OK. 1/2 LED setting (see below) switches at once. With 470R a standard green 3 mm LED is dim (about 2.5 mA). |
 | SD card in J5 | OK: 32 GB SDHC mounted (SPI, 20 MHz), long file names, root directory created; the NOR flash keeps working next to it. |
@@ -96,8 +96,9 @@ SW_NEXT 19), UART0.
   MOTOR in particular: it reads as on while the ST is idle (probably
   because this input has no pull-up), so the firmware cannot see the
   motor go off.
-- A +5 V sense from J2 to a free GPIO (e.g. GPIO3 or GPIO35-37, unused)
-  so the firmware knows whether the computer is powered.
+- A sense of whether the computer is powered (its +5 V is not on the
+  Atari floppy port; RadioFloppy has its own supply on J2), so the
+  firmware does not have to infer it from STEP and WGATE.
 - Optionally read pin 2 as an input too (PC density select, Falcon HD
   signalling).
 
@@ -136,6 +137,24 @@ are erased once at start-up). Now:
   2026-10-25), so "motor off 2 s" never triggered a save (it came after
   the 60 s fallback). A save now also starts when the emulated drive
   (DS0/DS1, setting `drive_select`) has not been selected for 3 s.
+- **Atari switched off** (2026-10-25). Raw input levels measured
+  (`GET /status` → `drive.input_levels`, 8 s each):
+
+  | Line | Atari off | Atari on, idle at the desktop |
+  | --- | --- | --- |
+  | DS0, DS1, STEP, WDATA, WGATE, SIDE | low | high |
+  | MOTOR, DIR | low | low |
+
+  STEP (a pulse of a few us) and WGATE (at most one track, ~200 ms) are
+  never low together while the Atari runs. So: both low → not a
+  selection (`emulator_is_selected`, at once: no track/side flash on the
+  display), and after 500 ms the drive is disarmed (outputs released,
+  saves and disk changes no longer wait for a "writing" Atari);
+  re-armed when the select line, STEP and WGATE are high again
+  (`floppy_app.c`). Independent of DS0/DS1, so also for an ST without
+  an internal drive where RadioFloppy is A:; only tested as B: on the
+  user's ST. Other machines (STE, Mega, Falcon, other computers) may
+  behave differently: check `input_levels` with the computer off.
 
 Tested on the board: inserting .ST and HFE from the card, the flash
 copy, the buttons (their task needs 8 KiB of stack for a step), and

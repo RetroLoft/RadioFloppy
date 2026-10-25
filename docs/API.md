@@ -264,6 +264,7 @@ Overall state of the device.
 | `drive.selected`            | The Atari is using our drive right now                            |
 | `drive.motor`               | The floppy motor line is on                                       |
 | `drive.cylinder`            | Current head position (0–83)                                      |
+| `drive.input_levels`        | Debug: raw level of every Shugart input (`ds0`, `ds1`, `motor`, `dir`, `step`, `wdata`, `wgate`, `side`); 0 = pulled low = active. A switched-off Atari pulls all of them low: then the drive is not armed |
 | `current`                   | Same object as [`GET /current`](#get-apiv1current)                |
 | `psram_free`                | Free PSRAM in bytes                                               |
 | `auth_required`             | A token is configured: changing calls need it                     |

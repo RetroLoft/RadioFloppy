@@ -32,8 +32,14 @@ static inline void drive_set_select_line(int ds)
  * The one place that decides whether the Atari is talking to our drive.
  * Drive select is active low. IRAM-safe (CONFIG_GPIO_CTRL_FUNC_IN_IRAM),
  * so it is also used from the GPIO ISR.
+ *
+ * A switched-off Atari pulls every floppy line low (its unpowered chips
+ * beat our pull-ups), so the select line reads active too. STEP and WGATE
+ * are never low together while it runs (a STEP pulse lasts a few us and
+ * the head does not move during a write): then it is not a selection.
  */
 static inline bool emulator_is_selected(void)
 {
-    return gpio_get_level(EMU_SELECT_LINE) == 0;
+    return gpio_get_level(EMU_SELECT_LINE) == 0 &&
+           (gpio_get_level(PIN_FDD_STEP) != 0 || gpio_get_level(PIN_FDD_WGATE) != 0);
 }

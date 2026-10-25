@@ -87,7 +87,9 @@ HFEv3 from a Greaseweazle flux dump). Commercial images are never committed.
 
 - `board_pins.h` – pin map of PCB revision 2.
 - `drive_emu.c` – Shugart drive state in ISRs; `drive_swap_media` (disk
-  change, also while selected unless the computer writes).
+  change, also while selected unless the computer writes). A switched-off
+  Atari pulls all lines low: STEP and WGATE both low = no selection, and
+  the drive is disarmed (`drive_config.h`, `floppy_app.c`).
 - `flux_stream.c` – RMT flux (RDATA) and INDEX; ST mode and HFE mode.
   `flux_monitor.c` – debug: measures the INDEX/RDATA pins (`/api/v1/debug/flux`).
 - `disk_image.c`, `disk_switch.c` – track buffers in PSRAM, disk changes.

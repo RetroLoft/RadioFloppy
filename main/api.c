@@ -30,12 +30,14 @@
 #include "esp_rom_crc.h"
 #include "esp_system.h"
 #include "esp_http_server.h"
+#include "driver/gpio.h"
 #include "esp_timer.h"
 
 #include "api.h"
 #include "disk_image.h"
 #include "disk_switch.h"
 #include "disk_title.h"
+#include "board_pins.h"
 #include "disk_write.h"
 #include "flux_monitor.h"
 #include "flux_stream.h"
@@ -896,6 +898,17 @@ static esp_err_t get_status(httpd_req_t *req)
     cJSON_AddBoolToObject(drv, "selected", d.selected);
     cJSON_AddBoolToObject(drv, "motor", d.motor);
     cJSON_AddNumberToObject(drv, "cylinder", d.cyl);
+    /* Debug: the raw level of every Shugart input (after the SN74LVC245A;
+     * 0 = the line is pulled low = active). */
+    static const struct { const char *name; gpio_num_t pin; } in[] = {
+        { "ds0", PIN_FDD_DS0 },     { "ds1", PIN_FDD_DS1 },   { "motor", PIN_FDD_MOTOR },
+        { "dir", PIN_FDD_DIR },     { "step", PIN_FDD_STEP }, { "wdata", PIN_FDD_WDATA },
+        { "wgate", PIN_FDD_WGATE }, { "side", PIN_FDD_SIDE },
+    };
+    cJSON *lv = cJSON_AddObjectToObject(drv, "input_levels");
+    for (size_t i = 0; i < sizeof(in) / sizeof(in[0]); i++) {
+        cJSON_AddNumberToObject(lv, in[i].name, gpio_get_level(in[i].pin));
+    }
 
     cJSON_AddItemToObject(root, "current", current_json());
     disk_info_t pi;
